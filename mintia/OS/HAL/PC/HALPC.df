@@ -1,0 +1,26 @@
+//
+// Initialization of the XRstation HAL.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCrash.h"
+#include "<inc>/HALLog.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+var KeThreadCurrentStackTop 0
+public KeThreadCurrentStackTop
+
+var HALPlatformKernelPageDirectory 0
+public HALPlatformKernelPageDirectory
+
+buffer HALPlatformModel 32
+public HALPlatformModel
+
+buffer HALCPUModel 64
+public HALCPUModel

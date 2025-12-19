@@ -108,15 +108,3 @@ HALCPUInterruptEnable:
 .globl HALCPUIsUserTrapFrame
 HALCPUIsUserTrapFrame:
     int3
-
-.section "bss", "aw", %progbits
-
-.globl HALPlatformKernelPageDirectory
-HALPlatformKernelPageDirectory:
-.globl KeIPLCurrent
-KeIPLCurrent:
-.globl HALPlatformModel
-HALPlatformModel:
-.globl HALCPUModel
-HALCPUModel:
-    .long 0xabcdef01

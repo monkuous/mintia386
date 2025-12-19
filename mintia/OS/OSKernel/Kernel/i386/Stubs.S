@@ -27,9 +27,6 @@ KeSafeGetByte:
 .globl KeAddressSpaceSwitch
 KeAddressSpaceSwitch:
     int3
-.globl KeThreadCurrentStackTop
-KeThreadCurrentStackTop:
-    int3
 .globl KeInterlockedIncrement
 KeInterlockedIncrement:
     int3
