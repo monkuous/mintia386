@@ -141,3 +141,10 @@ HALI386TLBFlushAll:
     mov %eax, %cr3
     ret
 .size HALI386TLBFlushAll, . - HALI386TLBFlushAll
+
+.globl HALCPUInterruptEnable
+.type HALCPUInterruptEnable, @function
+HALCPUInterruptEnable:
+    sti
+    ret
+.size HALCPUInterruptEnable, . - HALCPUInterruptEnable

@@ -60,10 +60,6 @@ fn HALNvramRead { query index -- nextindex ok }
     "TODO HALNvramRead\n" HALCrash
 end
 
-fn HALCPUInterruptEnable { -- }
-    "TODO HALCPUInterruptEnable\n" HALCrash
-end
-
 fn HALCPUIsUserTrapFrame { tf -- user }
     "TODO HALCPUIsUserTrapFrame\n" HALCrash
 end
