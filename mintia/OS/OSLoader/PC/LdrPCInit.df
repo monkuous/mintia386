@@ -119,6 +119,12 @@ end
 fn LdrPlatformBootDriversLoadAll { -- }
 end
 
+extern LdrI386StartSystem { -- }
+
+fn LdrPlatformStartSystem { -- }
+    LdrI386StartSystem
+end
+
 extern LdrPCCallInterrupt { vec regs -- }
 
 struct LdrPCRegs
