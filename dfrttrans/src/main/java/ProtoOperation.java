@@ -163,7 +163,7 @@ public interface ProtoOperation {
             }
 
             builder.add(new AstStatement.Expression(new AstExpression.Write(
-                    new AstExpression.DereferenceByte(location, "volatile "), "=",
+                    new AstExpression.DereferenceShort(location, "volatile "), "=",
                     value
             )));
         }
