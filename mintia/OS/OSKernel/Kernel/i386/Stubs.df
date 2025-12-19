@@ -32,10 +32,6 @@ fn KeAddressSpaceSwitch { process -- }
     "TODO KeAddressSpaceSwitch\n" KeCrash
 end
 
-fn KeInterlockedIncrement { inc ptr -- oldcount }
-    "TODO KeInterlockedIncrement\n" KeCrash
-end
-
 fn KeSafeStringCopyIn { dest src max -- ok }
     "TODO KeSafeStringCopyIn\n" KeCrash
 end
