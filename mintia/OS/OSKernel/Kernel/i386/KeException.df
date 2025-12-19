@@ -191,7 +191,7 @@ fn KiI386Trap { cr2 tf -- }
 
 	0 handled!
 
-	if (vector@ 0x20 >= vector@ 0x2f <=)
+	if (vector@ 0x20 >= vector@ 0x2f <= &&)
 		1 KeStatistics OSStatistics_Interrupts + +=
 
 		tf@ HALInterrupt
