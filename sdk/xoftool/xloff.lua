@@ -607,6 +607,20 @@ function xloff.new(filename)
 	end
 
 	function img:binary(nobss)
+		local sections = {}
+
+		for i = 0, self.sectioncount-1 do
+			local section = self.sectionsbyid[i]
+
+			if not nobss or band(section.flags, XLOFFSECTIONFLAG_BSS) == 0 then
+				sections[#sections + 1] = section
+			end
+		end
+
+		table.sort(sections, function (section1, section2)
+			return section1.vaddr < section2.vaddr
+		end)
+
 		local file = io.open(self.filename, "wb")
 
 		if not file then
@@ -614,8 +628,8 @@ function xloff.new(filename)
 			return false
 		end
 
-		for i = 0, self.sectioncount-1 do
-			local section = self.sectionsbyid[i]
+		for i = 1, #sections do
+			local section = sections[i]
 
 			if band(section.flags, XLOFFSECTIONFLAG_BSS) == 0 then
 				for j = 0, section.size-1 do
