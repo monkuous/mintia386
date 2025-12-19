@@ -52,10 +52,6 @@ fn MiPTESetDirty { pteaddr -- }
     "TODO MiPTESetDirty\n" KeCrash
 end
 
-fn MiPlatformInit { -- }
-    "TODO MiPlatformInit\n" KeCrash
-end
-
 fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
     "TODO MiPTEPin\n" KeCrash
 end

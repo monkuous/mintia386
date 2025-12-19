@@ -1,0 +1,43 @@
+//
+// Initialization of the MINTIA memory manager.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALResource.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../MmInternal.h"
+
+extern HALI386TLBFlushAll { -- }
+
+fn MiPlatformInit { -- }
+	fnsection "INIT$text"
+
+	// unmap the lower half so those page tables can be reclaimed
+
+	PAGEDIRECTORY // ptr
+	2048 // size
+	0 // word
+	memset
+
+	HALI386TLBFlushAll
+end

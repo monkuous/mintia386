@@ -133,3 +133,11 @@ HALI386TLBFlush:
     invlpg (%eax)
     ret
 .size HALI386TLBFlush, . - HALI386TLBFlush
+
+.globl HALI386TLBFlushAll
+.type HALI386TLBFlushAll, @function
+HALI386TLBFlushAll:
+    mov %cr0, %eax
+    mov %eax, %cr0
+    ret
+.size HALI386TLBFlushAll, . - HALI386TLBFlushAll
