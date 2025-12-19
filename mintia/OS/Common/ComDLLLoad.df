@@ -177,7 +177,15 @@ fn ComDLLDoFixup { ptr value type -- ok }
 #endif
 
 #ifdef I386
-	COMSTATUS_BAD_EXECUTABLE ok!
+	if (type@ XLOFF_RELOC_I386_32 ==)
+		value@ ptr@!
+	end elseif (type@ XLOFF_RELOC_I386_PC32 == type@ XLOFF_RELOC_I386_PLT32 == ||)
+		value@ ptr@ - ptr@!
+	end elseif (type@ XLOFF_RELOC_I386_16 ==)
+		value@ ptr@ si
+	end else
+		COMSTATUS_BAD_EXECUTABLE ok!
+	end
 #endif
 end
 
