@@ -9,12 +9,6 @@ HALPlatformIsComputerOnFire:
 .globl HALPlatformConsolePutc
 HALPlatformConsolePutc:
     int3
-.globl HALPlatformInterruptRegister
-HALPlatformInterruptRegister:
-    int3
-.globl HALPlatformInterruptUnregister
-HALPlatformInterruptUnregister:
-    int3
 .globl KVFontQuery
 KVFontQuery:
     int3

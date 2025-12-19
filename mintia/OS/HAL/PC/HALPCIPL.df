@@ -7,6 +7,7 @@
 #include "../../OSLoader/OSLoaderGlobal.h"
 
 #include "<inc>/HALLog.h"
+#include "<inc>/HALPCIO.h"
 
 #include "<inc>/HALIPL.h"
 #include "<inc>/HALInterrupt.h"
@@ -17,3 +18,72 @@
 
 var KeIPLCurrent IPLDPC
 public KeIPLCurrent
+
+const PIC0_CMD 0x20
+const PIC0_DAT 0x21
+const PIC1_CMD 0xa0
+const PIC1_DAT 0xa1
+
+const ICW1_ICW4 0x01
+const ICW1_INIT 0x10
+
+const ICW4_8086 0x01
+
+const PIC1_IRQ 0x02
+
+table HALPlatformInterruptHandlers[(16 2 *)]
+public HALPlatformInterruptHandlers
+
+var HALPCPICMask (0xffff 1 PIC1_IRQ << ~ &)
+
+fn HALPCPICInit { -- }
+	fnsection "INIT$text"
+
+    ICW1_INIT ICW1_ICW4 | PIC0_CMD HALPCOutb
+    ICW1_INIT ICW1_ICW4 | PIC1_CMD HALPCOutb
+
+    0x20 PIC0_DAT HALPCOutb
+    0x28 PIC1_DAT HALPCOutb
+
+    1 PIC1_IRQ << PIC0_DAT HALPCOutb
+    PIC1_IRQ PIC1_DAT HALPCOutb
+
+    ICW4_8086 PIC0_DAT HALPCOutb
+    ICW4_8086 PIC1_DAT HALPCOutb
+
+    HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
+    HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
+
+	auto i
+	0 i!
+
+	while (i@ 64 <)
+		pointerof HALPCInterruptDefault [i@ 2 *]HALPlatformInterruptHandlers!
+
+		1 i +=
+	end
+end
+
+fn HALPlatformInterruptRegister { handler int ipl -- }
+	if ([int@ 2 *]HALPlatformInterruptHandlers@ pointerof HALPCInterruptDefault ~=)
+		int@ "HALPlatformInterruptRegister: attempt to register IRQ #%d twice\n" HALCrash
+	end
+
+	handler@ [int@ 2 *]HALPlatformInterruptHandlers!
+	ipl@ [int@ 2 * 1 +]HALPlatformInterruptHandlers!
+end
+
+fn HALPlatformInterruptUnregister { int -- }
+	auto spf
+	pointerof HALPCInterruptDefault spf!
+
+	if ([int@ 2 *]HALPlatformInterruptHandlers@ spf@ ==)
+		int@ "HALPlatformInterruptUnregister: attempt to unregister IRQ #%d; wasn't registered\n" HALCrash
+	end
+
+	spf@ [int@ 2 *]HALPlatformInterruptHandlers!
+end
+
+fn (HALInterruptHandler) HALPCInterruptDefault { trapframe int -- }
+	int@ "unregistered interrupt: %d\n" HALCrash
+end

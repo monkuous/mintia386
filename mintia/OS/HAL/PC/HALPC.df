@@ -37,6 +37,8 @@ end
 
 extern HALPCGetCPUModel { -- modeldata }
 
+extern HALPCPICInit { -- }
+
 fn HALPlatformInit { ldrinfo -- ret }
 	fnsection "INIT$text"
 
@@ -78,6 +80,8 @@ fn HALPlatformInit { ldrinfo -- ret }
     end
 
     ldrinfo@ LdrInfo_TotalRAM + @ InfoTotalRAM!
+
+    HALPCPICInit
 
     "Platform: " "HALMain" HALLog
     HALPlatformInfo
