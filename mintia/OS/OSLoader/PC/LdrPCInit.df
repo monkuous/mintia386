@@ -511,6 +511,8 @@ fn private LdrPCBuildDescriptors { -- }
         hbottom@ LdrHeapPointer!
     end
 
+    htop@ LdrMemoryTotalRAM +=
+
 	auto ok
 	auto ldrdesc
 
@@ -604,6 +606,8 @@ fn private LdrPCBuildDescriptors { -- }
         htop@ PAGEOFFSETMASK - PAGEOFFSETMASK | rtop!
 
         if (hbottom@ ok@ <= htop@ rtop@ >= && ok@ rtop@ <=)
+            LdrMemoryTotalRAM += rtop@ ok@ - 1 +
+
             0 ldrdesc@ LdrMemoryDescriptor_Next + !
             ok@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !
             rtop@ ok@ - PAGESHIFT >> 1 + ldrdesc@ LdrMemoryDescriptor_Pages + !
