@@ -3,6 +3,5 @@
 .globl _start
 .type _start, @function
 _start:
-1:  hlt
-    jmp 1b
+    jmp HALMain
 .size _start, . - _start
