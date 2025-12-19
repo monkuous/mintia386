@@ -6,9 +6,6 @@ HALPlatformExit:
 .globl HALCPUHalt
 HALCPUHalt:
     int3
-.globl HALPlatformCrash
-HALPlatformCrash:
-    int3
 .globl HALPlatformConsoleGetc
 HALPlatformConsoleGetc:
     int3

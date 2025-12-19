@@ -82,3 +82,6 @@ fn HALPlatformInit { ldrinfo -- ret }
     "Platform: " "HALMain" HALLog
     HALPlatformInfo
 end
+
+fn HALPlatformCrash { -- }
+end
