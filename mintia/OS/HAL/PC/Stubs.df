@@ -52,10 +52,6 @@ fn HALNvramSet { delete query -- ok }
     "TODO HALNvramSet\n" HALCrash
 end
 
-fn KVInit { -- }
-    "TODO KVInit\n" HALCrash
-end
-
 fn HALCPUTrapFrameAbort { ok abort tf -- }
     "TODO HALCPUTrapFrameAbort\n" HALCrash
 end

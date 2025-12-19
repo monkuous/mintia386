@@ -1,0 +1,37 @@
+//
+// Implements basic kernel video support.
+// Used primarily by CoVideoConsole.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALResource.h"
+#include "<inc>/HALCrash.h"
+
+externptr HALLoaderInfo
+
+var FBAddr 0
+var FBPitch 0
+var FBSize 0
+
+fn KVInit { -- }
+	fnsection "INIT$text"
+
+	if (HALLoaderInfo@ LdrInfo_HALConsoleFBFormat + @ OSBOOTFBFORMAT_RGBA32 ~=)
+		0 FBAddr!
+		return
+	end
+
+	if (HALConsoleWidthPix@ ~~)
+		0 FBAddr!
+		return
+	end
+
+	HALLoaderInfo@ LdrInfo_HALConsoleFBAddr + @ FBAddr!
+    HALLoaderInfo@ LdrInfo_HALConsoleFBPitch + @ FBPitch!
+	FBPitch@ HALConsoleHeightPix@ * FBSize!
+end
