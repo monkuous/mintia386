@@ -13,6 +13,7 @@ Header:
 
 # [in] dx:ax = boot volume sector
 # [in] cl = boot drive id
+# [in] si = command line
 .globl _start
 .type _start, @function
 _start:
@@ -28,9 +29,10 @@ _start:
 1:  sti
 
     # Save boot args
-    push %ax
     push %dx
+    push %ax
     push %cx
+    push %si
 
     # Determine whether the processor is i386-compatible. This is done by trying to change bits 12..15 of EFLAGS,
     # and looking at what EFLAGS was actually set to. These results are architectural:
@@ -101,16 +103,20 @@ _start:
     call EnterNativeMode
 .code32
     # Restore boot args
-    popl %eax
+    popw %si
     popw %dx
+    popl %eax
+    movzx %dx, %edx
+    movzx %si, %esi
 
     # Call main function
     xor %ebp, %ebp
     and $~15, %esp
     movzx %dl, %edx
     sub $16, %esp
-    mov %edx, (%esp)
-    mov %eax, 4(%esp)
+    mov %esi, 0(%esp)
+    mov %edx, 4(%esp)
+    mov %eax, 8(%esp)
     call LdrPCMain
     int3
 .code16

@@ -32,7 +32,7 @@ struct LdrPCRegs
     4 eflags
 endstruct
 
-fn LdrPCMain { sector drive -- }
+fn LdrPCMain { sector drive cmdline -- }
 	// clear BSS section
 
 	pointerof _bss
