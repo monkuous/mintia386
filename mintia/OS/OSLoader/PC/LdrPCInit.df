@@ -604,6 +604,20 @@ end
 fn LdrPlatformMemoryInit { -- }
     LdrPCBuildDescriptors
 
+    // allocate a kernel space bitmap
+
+    auto desc
+    auto ok
+    MANAGEDKERNELSPACESIZE PAGESHIFT >> 7 + 3 >> PAGEOFFSETMASK + PAGESHIFT >> // pages
+    OSLOADERMEM_RECLAIMABLE // type
+    LdrMemoryAllocatePhysicalRange ok! desc!
+
+    if (ok@)
+        "failed to allocate kernel space bitmap\n" LdrCrash
+    end
+
+    desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << LdrKernelSpaceBitmap!
+
     "TODO\n" LdrCrash
 end
 
