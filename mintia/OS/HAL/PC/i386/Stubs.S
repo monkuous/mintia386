@@ -1,8 +1,5 @@
 .section "text", "ax", %progbits
 
-.globl HALPlatformExit
-HALPlatformExit:
-    int3
 .globl HALPlatformConsoleGetc
 HALPlatformConsoleGetc:
     int3
