@@ -116,6 +116,9 @@ fn LdrPlatformExit { ret -- }
     LdrPCHalt
 end
 
+fn LdrPlatformBootDriversLoadAll { -- }
+end
+
 extern LdrPCCallInterrupt { vec regs -- }
 
 struct LdrPCRegs
