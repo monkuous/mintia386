@@ -12,7 +12,94 @@ public LdrArgsBuffer
 var LdrPlatformHALName 0
 public LdrPlatformHALName
 
+fn private ArgsInit { argp -- }
+	auto p
+	LdrArgsBuffer p!
+
+	auto l
+	0 l!
+
+	auto esc
+	0 esc!
+
+	if (argp@ ~~)
+		return
+	end
+
+    auto inlen
+    argp@ strlen inlen!
+
+    while (inlen 0 >)
+        1 inlen -=
+
+        if (argp@ inlen@ + gb '\n' ~=)
+            break
+        end
+
+        0 argp@ inlen@ + sb
+    end
+
+	while (argp@ gb)
+		if (l@ 255 >=)
+			1 p -=
+
+			while (p@ gb)
+				0 p@ sb
+				1 p -=
+			end
+
+			return
+		end
+
+		if (esc@)
+			0 esc!
+			argp@ gb p@ sb
+			1 p +=
+			1 l +=
+		end elseif (argp@ gb ' ' ==)
+			0 p@ sb
+			1 p +=
+			1 l +=
+		end elseif (argp@ gb '\\' ==)
+			1 esc!
+		end else
+			argp@ gb p@ sb
+			1 p +=
+			1 l +=
+		end
+
+		1 argp +=
+	end
+
+	0 p@ sb
+end
+
+fn LdrPCMain { sector drive cmdline -- }
+	// clear BSS section
+
+	pointerof _bss
+	pointerof _bss_end pointerof _bss -
+	0 memset
+
+	// convert arguments to HAL-preferred format
+
+	cmdline@ ArgsInit
+
+    // get HAL name
+
+    "HALPC.dll" LdrPlatformHALName!
+
+    // call generic bootloader entrypoint
+
+    LdrMain LdrExit
+end
+
 extern LdrPCHalt { -- }
+
+fn LdrPlatformExit { ret -- }
+    ret@ "bootloader exited with code %i" Printf
+    LdrPCHalt
+end
 
 extern LdrPCCallInterrupt { vec regs -- }
 
@@ -31,27 +118,6 @@ struct LdrPCRegs
     2 gsI
     4 eflags
 endstruct
-
-fn LdrPCMain { sector drive cmdline -- }
-	// clear BSS section
-
-	pointerof _bss
-	pointerof _bss_end pointerof _bss -
-	0 memset
-
-    // get HAL name
-
-    "HALPC.dll" LdrPlatformHALName!
-
-    // call generic bootloader entrypoint
-
-    LdrMain LdrExit
-end
-
-fn LdrPlatformExit { ret -- }
-    ret@ "bootloader exited with code %i" Printf
-    LdrPCHalt
-end
 
 fn private LdrPCWriteChar { c -- }
     auto regs
