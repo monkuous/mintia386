@@ -102,3 +102,13 @@ fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
 	pte@ 127 & flags!
 	pte@ 12 >> PAGESHIFT << phyaddr!
 end
+
+fn MiPTEIsZero { pte -- iszero }
+	if (pte@ ~~)
+		1 iszero!
+	end elseif (pte@ PTE_KERNEL_ZERO ==)
+		1 iszero!
+	end else
+		0 iszero!
+	end
+end
