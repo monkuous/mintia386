@@ -1,0 +1,414 @@
+//
+// Implements MINTIA page cache management routines.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+var IOCacheInfoBlockDirtyCount 0
+public IOCacheInfoBlockDirtyCount
+
+var IOiCacheInfoBlockDirtyListHead 0
+public IOiCacheInfoBlockDirtyListHead
+
+var IOiCacheInfoBlockDirtyListTail 0
+public IOiCacheInfoBlockDirtyListTail
+
+fn IOCacheInfoBlockTryIncrementMap { cacheblock -- oldcount ok }
+	0 ok!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (cacheblock@ IOiCacheInfoBlock_Flags + @ IOCACHEBLOCKFLAG_TRUNCATING &)
+		rs@ HALCPUInterruptRestore
+
+		STATUS_TRY_AGAIN_LATER ok!
+
+		return
+	end
+
+	1 cacheblock@ IOiCacheInfoBlock_MapCount + KeInterlockedIncrement oldcount!
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn IOCacheInfoBlockDecrementMap { cacheblock -- oldcount }
+	-1 cacheblock@ IOiCacheInfoBlock_MapCount + KeInterlockedIncrement oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"IOCacheInfoBlockDecrementMap: underflow\n" KeCrash
+		end
+	end
+end
+
+fn IOCacheInfoBlockFlush { cacheblock -- ok }
+	// flush all of the cacheblock's dirty pages.
+
+	// the corresponding FCB need not have been locked.
+
+	0 ok!
+
+	auto pfdbe
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (cacheblock@ IOiCacheInfoBlock_Flags + @ IOCACHEBLOCKFLAG_DIRTY & ~~)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	IOCACHEBLOCKFLAG_DIRTY ~ cacheblock@ IOiCacheInfoBlock_Flags + &=
+
+	auto modcount
+	cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + @ modcount!
+	0 cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + !
+
+	auto first
+	cacheblock@ IOiCacheInfoBlock_FirstModifiedPage + @ first!
+
+	auto last
+	cacheblock@ IOiCacheInfoBlock_LastModifiedPage + @ last!
+
+	-1 cacheblock@ IOiCacheInfoBlock_FirstModifiedPage + !
+	0 cacheblock@ IOiCacheInfoBlock_LastModifiedPage + !
+
+	first@ // value
+	cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+	ExAvlTreeFindNodeByValue pfdbe!
+
+	if (pfdbe@ ~~)
+		cacheblock@ IOiCacheInfoBlock_PageTree + ExAvlTreeNodeFirst pfdbe!
+	end
+
+	while (pfdbe@)
+		IOiPageFrameEntryCache_Parent pfdbe -=
+
+		pfdbe@ MmEvictablePageReference drop
+
+		ipl@ KeIPLLower
+
+		if (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ last@ >)
+			pfdbe@ MmEvictablePageDereference drop
+
+			IPLDPC KeIPLRaise ipl!
+
+			break
+		end
+
+		IPLDPC KeIPLRaise ipl!
+
+		if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED &)
+			0 // transfer
+			IOKFLAG_URGENT IOKFLAG_PAGEOUT | // kflags
+			pfdbe@ // pfdbe
+			IOCachePageWrite drop
+		end
+
+		pfdbe@ MmEvictablePageDereference drop
+
+		pfdbe@ IOiPageFrameEntryCache_Parent + // node
+		ExAvlTreeNodeNext pfdbe!
+	end
+
+	1 IOCacheInfoBlockDirtyCount -=
+	modcount@ IOModifiedFilePageCountTotal -=
+
+	ipl@ KeIPLLower
+end
+
+fn IOCacheInfoBlockTruncate { newsize writeout cacheblock -- ok }
+	// Evict all of the cacheblock's page frames beyond newsize.
+	// Also evicts the page that contains newsize, to prevent a weird
+	// interaction with the dirty page writer.
+	// The corresponding FCB must have been locked exclusively.
+	//
+	// This function is intricately involved in the proper synchronization of
+	// FCB deletion and cache writeback. Cache writeback does not necessarily
+	// acquire any FCB locks, and in fact when the writebehind thread finds a
+	// cacheblock on its list, the associated FCB might not even exist
+	// anymore. There are substantial lock-ordering issues associated with
+	// attempting to keep the FCB alive while it is on this list.
+	//	
+	// A similar issue is that of synchronization between file truncation to a
+	// smaller size and writeback, which turns out to be a functionally
+	// equivalent problem from the cache perspective, since both issues stem
+	// from a page -> (fcb existence | disk blocks) dependency.
+	//
+	// The chosen solution to this use-after-free issue is to make a guarantee
+	// that by the time an FCB is either evicted from memory or truncated
+	// on-disk, its page cache is completely devoid of pages, at all or beyond
+	// the new size, respectively, and that there are no writes to such pages
+	// in-flight. Thus, the writebehind thread will never even see any pages
+	// for a deleted FCB.
+	//
+	// To begin with, we need not concern ourselves with new pages being added
+	// or modified while this function works, since all such cases are blocked
+	// out by holding the FCB lock exclusively, and/or checking the MapCount
+	// to ensure there are no mappings of this FCB into user processes. We
+	// also truncate the corresponding views in the system viewcache to make
+	// sure that the system working set doesn't reference any of the pages we
+	// are about to remove.
+	//
+	// We require interlocking between this function and IOCachePageWrite. Our
+	// part of the interlocking is to remove the page from the cacheblock page
+	// tree, and therefore prevent 'Write from adding it to the write cluster.
+	// Write's part of the interlocking is to set an IOINPROGRESS flag in the
+	// PFDBE for each page it adds to the cluster, a flag which we wait on
+	// until it is clear before we remove the page from the tree. This two-way
+	// interlock guarantees that by the time we leave this function, there is
+	// absolutely no way that a write is in-flight or can become in-flight to
+	// one of the pages that we removed, even though a flush can occur
+	// concurrently with us (with the structure of the page tree itself being
+	// kept consistent by the PFN spinlock, or elevated IPL).
+	//
+	// IOCachePageWrite is also what the modified page writer uses to dump
+	// file pages to disk, so the synchronization there is taken care of as
+	// well.
+	//
+	// There's another case where there's ongoing page-in, the file mapping is
+	// unmapped, the file object is deleted, and the FCB is reclaimed. This
+	// function again acts as a gate, through which no inflight page-ins will
+	// still exist on the other side, since we wait for in-progress IO to
+	// complete.
+
+	auto maxpage
+	newsize@ PAGENUMBERMASK & maxpage!
+
+	0 ok!
+
+	auto pfdbe
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (cacheblock@ IOiCacheInfoBlock_MapCount + @)
+		// this file is currently mapped. truncation isn't allowed.
+
+		ipl@ KeIPLLower
+
+		STATUS_TRY_AGAIN_LATER ok!
+
+		return
+	end
+
+	IOCACHEBLOCKFLAG_TRUNCATING cacheblock@ IOiCacheInfoBlock_Flags + |=
+
+	if (cacheblock@ IOiCacheInfoBlock_BcbTree + ExAvlTree_Root + ExAvlTreeNode_RightChild + @)
+		ipl@ KeIPLLower
+
+		newsize@ // newsize
+		cacheblock@ // cacheblock
+		VcCacheInfoBlockTruncate
+
+		IPLDPC KeIPLRaise ipl!
+	end
+
+	maxpage@ // value
+	cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+	ExAvlTreeFindNodeByValue pfdbe!
+
+	if (pfdbe@ ~~)
+		cacheblock@ IOiCacheInfoBlock_PageTree + ExAvlTreeNodeFirst pfdbe!
+	end
+
+	while (pfdbe@)
+		IOiPageFrameEntryCache_Parent pfdbe -=
+
+		pfdbe@ MmEvictablePageReference drop
+
+		ipl@ KeIPLLower
+
+		if (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ newsize@ >=)
+			IPLDPC KeIPLRaise ipl!
+
+			while (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_IOINPROGRESS &)
+				// This page is either being written to disk or being paged
+				// in. In either case, wait for completion before unlinking it
+				// from the tree.
+
+				0 // process
+				MUSTSUCCEEDL2 CANBLOCK | // pri
+				pfdbe@ // pfdbe
+				MmEvictablePageWait drop
+			end
+
+			if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED &)
+				if (writeout@)
+					// this is a dirty page, and caller wants us to
+					// write them out to disk. the alternative is
+					// writeout==0, which means the caller says its fine
+					// to ignore and throw them out.
+
+					0 // transfer
+					IOKFLAG_URGENT IOKFLAG_PAGEOUT | // kflags
+					pfdbe@ // pfdbe
+					IOCachePageWrite ok!
+
+					if (ok@)
+						pfdbe@ MmEvictablePageDereference drop
+
+						break
+					end
+				end else
+					1 IOModifiedFilePageCountTotal -=
+					1 cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + -=
+				end
+			end
+
+			auto npfdbe
+			pfdbe@ IOiPageFrameEntryCache_Parent + // node
+			ExAvlTreeNodeNext npfdbe!
+
+			pfdbe@ IOiPageFrameEntryCache_Parent + // node
+			cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+			ExAvlTreeRemove
+
+			pfdbe@ MmEvictablePageDelete
+
+			pfdbe@ MmEvictablePageDereference drop
+
+			npfdbe@ pfdbe!
+
+			1 IOCachePagesUsed -=
+		end elseif (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ maxpage@ ==)
+			if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID &)
+				// zero out the end of the page
+
+				newsize@ PAGEOFFSETMASK & // offset
+				pfdbe@ MmPFDBEToPhysicalAddress // phyaddr
+				MmPageFrameZero
+
+				pfdbe@ // pfdbe
+				0 // process
+				MmEvictablePageModify
+			end
+
+			IPLDPC KeIPLRaise ipl!
+
+			pfdbe@ MmEvictablePageDereference drop
+
+			pfdbe@ IOiPageFrameEntryCache_Parent + // node
+			ExAvlTreeNodeNext pfdbe!
+		end else
+			IPLDPC KeIPLRaise ipl!
+
+			pfdbe@ MmEvictablePageDereference drop
+
+			pfdbe@ IOiPageFrameEntryCache_Parent + // node
+			ExAvlTreeNodeNext pfdbe!
+		end
+	end
+
+	IOCACHEBLOCKFLAG_TRUNCATING ~ cacheblock@ IOiCacheInfoBlock_Flags + &=
+
+	ipl@ KeIPLLower
+end
+
+fn IOiCacheInfoBlockCreate { -- cacheblock ok }
+	fnsection "PAGE$text"
+
+	IOiCacheInfoBlock_SIZEOF VcBuffer_SIZEOF + // bytes
+	'Cach' // tag
+	CANBLOCK // flags
+	MmAllocWithTag ok! cacheblock!
+
+	if (ok@)
+		// allocation failed
+
+		return
+	end
+
+	0 cacheblock@ IOiCacheInfoBlock_Next + !
+	0 cacheblock@ IOiCacheInfoBlock_Prev + !
+
+	1 cacheblock@ IOiCacheInfoBlock_References + !
+
+	0 cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + !
+
+	-1 cacheblock@ IOiCacheInfoBlock_FirstModifiedPage + !
+	0 cacheblock@ IOiCacheInfoBlock_LastModifiedPage + !
+
+	0 cacheblock@ IOiCacheInfoBlock_MapCount + !
+	0 cacheblock@ IOiCacheInfoBlock_Flags + !
+	
+	cacheblock@ IOiCacheInfoBlock_PageTree + ExAvlTreeInitialize
+	cacheblock@ IOiCacheInfoBlock_BcbTree + ExAvlTreeInitialize
+
+	1 // signaled
+	OSEVENT_SYNCH // type
+	"BCBTreeEvent" // name
+	cacheblock@ IOiCacheInfoBlock_BCBTreeEvent + // event
+	KeEventInitialize
+
+	0 cacheblock@ IOiCacheInfoBlock_SIZEOF + VcBuffer_WindowAddress + !
+	0 cacheblock@ IOiCacheInfoBlock_SIZEOF + VcBuffer_FileControlBlock + !
+	VCBCBTYPE_PERMANENT cacheblock@ IOiCacheInfoBlock_SIZEOF + VcBuffer_Type + !
+end
+
+fn IOiCacheInfoBlockReference { cacheblock -- oldcount }
+	1 cacheblock@ IOiCacheInfoBlock_References + KeInterlockedIncrement oldcount!
+end
+
+fn IOiCacheInfoBlockDereference { cacheblock -- oldcount }
+	-1 cacheblock@ IOiCacheInfoBlock_References + KeInterlockedIncrement oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"IOiCacheInfoBlockDereference: underflow\n" KeCrash
+		end
+	end
+
+	if (oldcount@ 1 ==)
+		cacheblock@ MmFree
+	end
+end
+
+fn IOiCacheInfoBlockDestroy { writeout cacheblock -- ok }
+	fnsection "PAGE$text"
+
+	// assumes caller made sure there's no way this cacheblock can be used by
+	// anybody else.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	0 // newsize
+	writeout@ // writeout
+	cacheblock@ // cacheblock
+	IOCacheInfoBlockTruncate ok!
+
+	if (ok@ ~~)
+		cacheblock@ IOiCacheInfoBlockDereference drop
+	end
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end

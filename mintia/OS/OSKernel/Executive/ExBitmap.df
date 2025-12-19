@@ -1,0 +1,19 @@
+//
+// Faster bitmap management routines.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "../../Common/Common.h"
+
+#include "../../Common/ComBitmap.df"

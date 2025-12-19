@@ -1,0 +1,243 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "Edit.h"
+
+var UIMode -1
+public UIMode
+
+var UISaveMessage 0
+public UISaveMessage
+
+fn DrawAll { -- }
+	TermResetColor
+
+	1 TermSetCursorHidden
+
+	0 ScreenHeight@ 1 - DrawScreen
+	UINORMAL SetUIMode
+
+	ScreenCursorX@ ScreenCursorY@ SCREENROW + TermSetCursorPosition
+
+	0 TermSetCursorHidden
+
+	TermFinishDrawing
+end
+
+fn DrawScreen { startrow endrow -- }
+	0 startrow@ SCREENROW + TermSetCursorPosition
+
+	auto line
+	startrow@ ScreenLine_SIZEOF * ScreenLineTable@ + line!
+
+	auto buffer
+	EditorBuffer@ buffer!
+
+	while (startrow@ endrow@ <=)
+		auto length
+		line@ ScreenLine_Length + @ length!
+
+		if (length@ ~~)
+			TermClearLineAll
+			"\r\n" Puts
+
+			1 startrow +=
+			ScreenLine_SIZEOF line +=
+			continue
+		end
+
+		auto lineoffset
+		if (startrow@ ScreenCursorY@ ==)
+			// cursor might be off to the side
+			ScreenLinePosition@ TermWidth@ / TermWidth@ * lineoffset!
+		end else
+			0 lineoffset!
+		end
+
+		lineoffset@ length -=
+		line@ ScreenLine_Offset + @ lineoffset +=
+
+		auto long
+		if (length@ TermWidth@ >)
+			TermWidth@ length!
+			1 long!
+		end else
+			0 long!
+		end
+
+		while (length@)
+			auto char
+			lineoffset@ buffer@ BufferGetChar drop char!
+
+			if (char@ '\n' ~=)
+				if (char@ '\t' ==)
+					' ' char!
+				end elseif (char@ 0x20 < char@ 0x7F >= ||)
+					'?' char!
+				end
+
+				char@ Putc
+			end
+
+			1 lineoffset +=
+			1 length -=
+		end
+
+		if (long@ ~~)
+			TermClearLine
+			"\r\n" Puts
+		end
+
+		1 startrow +=
+		ScreenLine_SIZEOF line +=
+	end
+end
+
+fn SetUIMode { uimode -- }
+	if (uimode@ UIMode@ ~=)
+		uimode@ UIMode!
+		DrawUI
+	end
+end
+
+fn DrawInstructions { -- }
+	TermClearLineAll
+
+	"  " Puts
+
+	TermInvertColor
+	"^C" Puts
+	TermResetColor
+	" Exit" Puts
+
+	"   " Puts
+
+	TermInvertColor
+	"^U" Puts
+	TermResetColor
+	" Kill Line" Puts
+
+	"   " Puts
+
+	if (EditorFileAccess@ ACCESS_WRITE &)
+		TermInvertColor
+		"^S" Puts
+		TermResetColor
+		" Save" Puts
+	end else
+		TermInvertColor
+		"Read-only" Puts
+		TermResetColor
+	end
+
+	"\r\n" Puts
+end
+
+fn DrawUI { -- }
+	0 ScreenHeight@ SCREENROW + TermSetCursorPosition
+
+	if (UIMode@ UINORMAL ==)
+		DrawInstructions
+
+		TermInvertColor
+
+		auto left
+		EditorFileName@ DrawTextCentered left!
+
+		if (left@)
+			1 left -=
+		end
+
+		if (left@)
+			if (EditorFileModified@)
+				'*' Putc
+				1 left -=
+			end
+		end
+
+		while (left@)
+			' ' Putc
+			1 left -=
+		end
+
+		TermResetColor
+	end elseif (UIMode@ UISAVEFAIL ==)
+		DrawInstructions
+
+		TermInvertColor
+
+		UISaveMessage@ DrawTextCentered left!
+
+		if (left@)
+			1 left -=
+		end
+
+		while (left@)
+			' ' Putc
+			1 left -=
+		end
+
+		TermResetColor
+	end elseif (UIMode@ UIMODIFIED ==)
+		DrawInstructions
+
+		TermInvertColor
+
+		"Strike ^S to save, or strike ^C again to quit (without saving!)" DrawTextCentered left!
+
+		if (left@)
+			1 left -=
+		end
+
+		while (left@)
+			' ' Putc
+			1 left -=
+		end
+
+		TermResetColor
+	end
+
+	ScreenCursorX@
+	ScreenCursorY@ SCREENROW +
+	TermSetCursorPosition
+
+	TermFinishDrawing
+end
+
+fn DrawTextCentered { text -- left }
+	auto len
+	text@ strlen len!
+
+	auto toolong
+	auto pad
+
+	if (len@ 5 + TermWidth@ >)
+		1 toolong!
+		1 pad!
+		TermWidth@ 5 - len!
+	end else
+		0 toolong!
+		TermWidth@ 2 / len@ 2 / - pad!
+	end
+
+	TermWidth@ pad@ - len@ - left!
+
+	while (pad@)
+		' ' Putc
+		1 pad -=
+	end
+
+	if (toolong@ ~~)
+		text@ Puts
+	end else
+		while (len@)
+			text@ gb Putc
+
+			1 text +=
+			1 len -=
+		end
+
+		"..." Puts
+	end
+end

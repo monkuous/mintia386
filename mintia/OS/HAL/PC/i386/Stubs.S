@@ -1,0 +1,122 @@
+.section "text", "ax", %progbits
+
+.globl HALPlatformExit
+HALPlatformExit:
+    int3
+.globl HALPlatformInit
+HALPlatformInit:
+    int3
+.globl HALCPUInterruptDisable
+HALCPUInterruptDisable:
+    int3
+.globl HALPlatformConsoleInit
+HALPlatformConsoleInit:
+    int3
+.globl HALPlatformConsoleClear
+HALPlatformConsoleClear:
+    int3
+.globl HALCPUHalt
+HALCPUHalt:
+    int3
+.globl HALPlatformInfo
+HALPlatformInfo:
+    int3
+.globl HALPlatformCrash
+HALPlatformCrash:
+    int3
+.globl HALCPUInterruptRestore
+HALCPUInterruptRestore:
+    int3
+.globl HALPlatformConsoleGetc
+HALPlatformConsoleGetc:
+    int3
+.globl HALPlatformIsComputerOnFire
+HALPlatformIsComputerOnFire:
+    int3
+.globl HALPlatformDebugDump
+HALPlatformDebugDump:
+    int3
+.globl HALPlatformConsoleShutter
+HALPlatformConsoleShutter:
+    int3
+.globl HALPlatformConsoleScroll
+HALPlatformConsoleScroll:
+    int3
+.globl HALPlatformConsolePutc
+HALPlatformConsolePutc:
+    int3
+.globl HALPlatformInterruptRegister
+HALPlatformInterruptRegister:
+    int3
+.globl HALPlatformInterruptUnregister
+HALPlatformInterruptUnregister:
+    int3
+.globl HALPlatformConsoleDrawChar
+HALPlatformConsoleDrawChar:
+    int3
+.globl KVFontQuery
+KVFontQuery:
+    int3
+.globl KVDrawEmptyRectangle
+KVDrawEmptyRectangle:
+    int3
+.globl KVI8ToNative
+KVI8ToNative:
+    int3
+.globl KVDrawFilledRectangle
+KVDrawFilledRectangle:
+    int3
+.globl KVDrawCharacter
+KVDrawCharacter:
+    int3
+.globl HALIcacheSynchronize
+HALIcacheSynchronize:
+    int3
+.globl KVFontGet
+KVFontGet:
+    int3
+.globl KVClearScreen
+KVClearScreen:
+    int3
+.globl KVQuery
+KVQuery:
+    int3
+.globl HALNvramQuery
+HALNvramQuery:
+    int3
+.globl HALNvramSet
+HALNvramSet:
+    int3
+.globl HALCPUContextSwitch
+HALCPUContextSwitch:
+    int3
+.globl KVInit
+KVInit:
+    int3
+.globl HALCPUTrapFrameAbort
+HALCPUTrapFrameAbort:
+    int3
+.globl HALCPUContextInit
+HALCPUContextInit:
+    int3
+.globl HALNvramRead
+HALNvramRead:
+    int3
+.globl HALCPUInterruptEnable
+HALCPUInterruptEnable:
+    int3
+.globl HALCPUIsUserTrapFrame
+HALCPUIsUserTrapFrame:
+    int3
+
+.section "bss", "aw", %progbits
+
+.globl HALPlatformKernelPageDirectory
+HALPlatformKernelPageDirectory:
+.globl KeIPLCurrent
+KeIPLCurrent:
+.globl HALPlatformModel
+HALPlatformModel:
+.globl HALCPUModel
+HALCPUModel:
+    .long 0xabcdef01

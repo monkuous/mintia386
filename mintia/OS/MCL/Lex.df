@@ -1,0 +1,393 @@
+//
+// Implements the lexer for the MINTIA Command Language.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/MCL/Mcl.h"
+
+#include "Mcl.h"
+
+const CHAR_NORMAL   0
+const CHAR_COALESCE 1
+const CHAR_SPLIT    2
+
+buffer MclpLexCharTreatment 256
+
+fn MclpLexInit { -- }
+	CHAR_COALESCE MclpLexCharTreatment '>' + sb
+	CHAR_COALESCE MclpLexCharTreatment '<' + sb
+	CHAR_COALESCE MclpLexCharTreatment '&' + sb
+	CHAR_COALESCE MclpLexCharTreatment '|' + sb
+
+	CHAR_SPLIT MclpLexCharTreatment '(' + sb
+	CHAR_SPLIT MclpLexCharTreatment ')' + sb
+	CHAR_SPLIT MclpLexCharTreatment '$' + sb
+	CHAR_SPLIT MclpLexCharTreatment '{' + sb
+	CHAR_SPLIT MclpLexCharTreatment '}' + sb
+	CHAR_SPLIT MclpLexCharTreatment '!' + sb
+end
+
+fn MclpLexFillBuffer { ctx -- ok }
+	auto lexbuf
+
+	if (ctx@ MclpParseContext_LexFlags + @ LEX_INTERACTIVE &)
+		ctx@ MclpParseContext_LexBuffer + @ lexbuf!
+
+		if (lexbuf@ ~~)
+			// allocate lex buffer
+
+			LEXBUFFERSIZE OSHeapAllocate ok! lexbuf!
+
+			if (ok@)
+				return
+			end
+
+			lexbuf@ ctx@ MclpParseContext_LexBuffer + !
+		end
+
+		if (LEXBUFFERSIZE 1 - ctx@ MclpParseContext_LexValidLength + @ - ~~)
+			// no room to fill up... the lex buffer is 1024 bytes so this
+			// ought not happen in an interactive session, so just return
+			// EOF.
+			STATUS_END_OF_FILE ok!
+			return
+		end
+
+		if (ctx@ MclpParseContext_LexFlags + @ LEX_NEWSTATEMENT &)
+			0 ctx@ MclpParseContext_LexOffset + !
+			0 ctx@ MclpParseContext_LexValidLength + !
+			LEX_NEWSTATEMENT ~ ctx@ MclpParseContext_LexFlags + &=
+
+			if (ctx@ MclpParseContext_Depth + @ 1 >)
+				"> " Printf
+				OSFlushLine
+			end
+		end else
+			"? " Printf
+			OSFlushLine
+		end
+
+		// refill from user input
+
+		auto count
+		lexbuf@ ctx@ MclpParseContext_LexValidLength + @ + // buf
+		LEXBUFFERSIZE 1 - ctx@ MclpParseContext_LexValidLength + @ - // max
+		ctx@ MclpParseContext_StreamHandle + @ // stream
+		ctx@ MclpParseContext_Machine + @ // machine
+		MclpInteractiveReadLine ok! count!
+
+		if (ok@)
+			return
+		end
+
+		count@ ctx@ MclpParseContext_LexValidLength + +=
+	end else
+		// just mmap the entire file
+
+		if (ctx@ MclpParseContext_LexBuffer + @)
+			"MclpLexFillBuffer: lexbuffer already exists\n" OSAbort
+		end
+
+		ctx@ MclpParseContext_LexInputLength + @ // length
+		USERMAP // startva
+		0 // sectionoffset
+		ctx@ MclpParseContext_StreamHandle + @ OSStreamGetFileHandle // mappedhandle
+		OSCURRENTPROCESS // processhandle
+		PAGEACCESS_READ // pageprotection
+		0 // flags
+		OSMapView ok! lexbuf!
+
+		if (ok@)
+			return
+		end
+
+		lexbuf@ ctx@ MclpParseContext_LexBuffer + !
+		ctx@ MclpParseContext_LexInputLength + @ ctx@ MclpParseContext_LexValidLength + !
+	end
+end
+
+fn MclpLexNextCharacter { ctx -- lastln lastpos char ok }
+	ctx@ MclpParseContext_LexLineNumber + @ lastln!
+
+	if (ctx@ MclpParseContext_LexOffset + @
+		ctx@ MclpParseContext_LexValidLength + @ >=)
+		if (ctx@ MclpParseContext_LexOffset + @
+			ctx@ MclpParseContext_LexInputLength + @ >)
+			STATUS_END_OF_FILE ok!
+			return
+		end elseif (ctx@ MclpParseContext_LexOffset + @
+			ctx@ MclpParseContext_LexInputLength + @ ==)
+
+			if (ctx@ MclpParseContext_LexFlags + @ LEX_NEWLINE &)
+				STATUS_END_OF_FILE ok!
+				return
+			end
+
+			// try to fix it up so we see a newline at the end of the file,
+			// even though there isn't one.
+
+			ctx@ MclpParseContext_LexOffset + @ lastpos!
+
+			1 ctx@ MclpParseContext_LexOffset + +=
+
+			1 ctx@ MclpParseContext_LexLineNumber + +=
+			LEX_NEWLINE ctx@ MclpParseContext_LexFlags + |=
+
+			'\n' char!
+
+			0 ok!
+
+			return
+		end
+
+		// refill the buffer
+
+		ctx@ MclpLexFillBuffer ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	0 ok!
+
+	ctx@ MclpParseContext_LexOffset + @ lastpos!
+
+	ctx@ MclpParseContext_LexBuffer + @
+	ctx@ MclpParseContext_LexOffset + @ + gb char!
+
+	1 ctx@ MclpParseContext_LexOffset + +=
+
+	if (char@ '\n' ==)
+		1 ctx@ MclpParseContext_LexLineNumber + +=
+		LEX_NEWSTATEMENT ctx@ MclpParseContext_LexFlags + |=
+		LEX_NEWLINE ctx@ MclpParseContext_LexFlags + |=
+	end else
+		LEX_NEWLINE ~ ctx@ MclpParseContext_LexFlags + &=
+	end
+end
+
+const LEXSTATE_NORMAL    1
+const LEXSTATE_STRING    2
+const LEXSTATE_COMMENT   3
+
+fn MclpLexNextToken { peek tokbuf ctx -- tokflag toklen ok }
+	auto firstpos
+	0 firstpos!
+
+	auto firstln
+	0 firstln!
+
+	auto nolastyet
+	1 nolastyet!
+
+	0 toklen!
+
+	auto ignorewhitespace
+	1 ignorewhitespace!
+
+	auto isbackslash
+	0 isbackslash!
+
+	auto coalescechar
+	0 coalescechar!
+
+	0 tokflag!
+
+	auto state
+	LEXSTATE_NORMAL state!
+
+	while (1)
+		auto char
+		auto lastpos
+		auto lastln
+
+		ctx@ MclpLexNextCharacter ok! char! lastpos! lastln!
+
+		if (ok@)
+			break
+		end
+
+		if (nolastyet@)
+			lastpos@ firstpos!
+			lastln@ firstln!
+			0 nolastyet!
+		end
+
+		if (peek@)
+			LEX_NEWSTATEMENT ~ ctx@ MclpParseContext_LexFlags + &=
+		end
+
+		if (isbackslash@)
+			0 isbackslash!
+
+			if (char@ '\n' ==)
+				LEX_NEWSTATEMENT ~ ctx@ MclpParseContext_LexFlags + &=
+				continue
+			end
+
+			if (toklen@ TOKBUFFERSIZE 1 - >=)
+				STATUS_END_OF_FILE ok!
+				break
+			end
+
+			char@ tokbuf@ sb
+			1 tokbuf +=
+			1 toklen +=
+
+			continue
+		end
+
+		if (state@ LEXSTATE_NORMAL ==)
+			if (char@ '\n' ==)
+				LEXTOK_NEWLINE tokflag |=
+				break
+			end
+
+			if (char@ ' ' == char@ '\t' == ||)
+				if (ignorewhitespace@)
+					continue
+				end else
+					break
+				end
+			end
+
+			if (char@ 92 ==) // backslash
+				1 isbackslash!
+				continue
+			end
+
+			0 ignorewhitespace!
+
+			if (char@ 34 ==) // doublequote (34 could be an ascii literal but it messes up syntax highlighting on my editor)
+				LEXTOK_LITERAL tokflag |=
+				LEXSTATE_STRING state!
+				continue
+			end
+
+			if (char@ '#' ==)
+				LEXSTATE_COMMENT state!
+				continue
+			end
+
+			if (char@ coalescechar@ ==)
+				char@ tokbuf@ sb
+				1 tokbuf +=
+				1 toklen +=
+
+				continue
+			end elseif (coalescechar@)
+				lastpos@ ctx@ MclpParseContext_LexOffset + !
+
+				break
+			end
+
+			if (char@ MclpLexCharTreatment + gb CHAR_COALESCE ==)
+				if (toklen@)
+					lastpos@ ctx@ MclpParseContext_LexOffset + !
+					break
+				end
+
+				char@ coalescechar!
+			end
+
+			if (char@ MclpLexCharTreatment + gb CHAR_SPLIT ==)
+				if (toklen@ tokflag@ LEXTOK_LITERAL & ||)
+					lastpos@ ctx@ MclpParseContext_LexOffset + !
+					break
+				end
+			end
+
+			char@ tokbuf@ sb
+			1 tokbuf +=
+			1 toklen +=
+
+			if (char@ MclpLexCharTreatment + gb CHAR_SPLIT ==)
+				ctx@ MclpLexNextCharacter ok! char! lastpos! lastln!
+
+				if (ok@)
+					break
+				end
+
+				if (char@ '\n' ==)
+					LEXTOK_NEWLINE tokflag |=
+				end elseif (char@ ' ' ~= char@ '\t' ~= &&)
+					lastpos@ ctx@ MclpParseContext_LexOffset + !
+				end
+
+				break
+			end
+		end elseif (state@ LEXSTATE_STRING ==)
+			if (char@ 34 ==) // doublequote
+				LEXSTATE_NORMAL state!
+				continue
+			end
+
+			if (char@ '\n' ==)
+				LEX_NEWSTATEMENT ~ ctx@ MclpParseContext_LexFlags + &=
+			end
+
+			if (toklen@ TOKBUFFERSIZE 1 - >=)
+				STATUS_END_OF_FILE ok!
+				break
+			end
+
+			char@ tokbuf@ sb
+			1 tokbuf +=
+			1 toklen +=
+		end elseif (state@ LEXSTATE_COMMENT ==)
+			if (char@ '\n' ==)
+				LEXTOK_NEWLINE tokflag |=
+				break
+			end
+		end
+	end
+
+	0 tokbuf@ sb
+
+	if (nolastyet@ ~~)
+		if (peek@)
+			firstpos@ ctx@ MclpParseContext_LexOffset + !
+			firstln@ ctx@ MclpParseContext_LexLineNumber + !
+		end else
+			firstpos@ ctx@ MclpParseContext_LexLastOffset + !
+			firstln@ ctx@ MclpParseContext_LexLastLineNumber + !
+		end
+	end
+
+	if (toklen@ ~~)
+		LEXTOK_EMPTY tokflag |=
+	end
+end
+
+fn MclpLexNextNonemptyToken { stopnl tokbuf ctx -- tokflag toklen ok }
+	0 toklen!
+	0 tokflag!
+
+	while (toklen@ ~~ tokflag@ LEXTOK_LITERAL & ~~ &&)
+		0 // peek
+		tokbuf@ // tokbuf
+		ctx@ // ctx
+		MclpLexNextToken ok! toklen! tokflag!
+
+		if (ok@)
+			break
+		end
+
+		if (stopnl@)
+			if (tokflag@ LEXTOK_NEWLINE &)
+				break
+			end
+		end
+	end
+end
+
+fn MclpLexLastToken { ctx -- }
+	ctx@ MclpParseContext_LexLastOffset + @ ctx@ MclpParseContext_LexOffset + !
+	LEX_NEWLINE ~ ctx@ MclpParseContext_LexFlags + &=
+
+	ctx@ MclpParseContext_LexLastLineNumber + @
+	ctx@ MclpParseContext_LexLineNumber + !
+end

@@ -1,0 +1,458 @@
+//
+// Implements the system calls for the MINTIA IO subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+fn OSFileQuery { filehandle query -- ok }
+	fnsection "PAGE$text"
+
+	auto kquery
+	OSFileInformation_SIZEOF alloc kquery!
+
+	filehandle@ // filehandle
+	kquery@ // query
+	IOFileInformationQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSFileInformation_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSFileTruncate { newsize growing handle -- oldsize ok }
+	fnsection "PAGE$text"
+
+	newsize@ growing@ handle@ IOFileTruncate ok! oldsize!
+end
+
+fn OSFileSeek { offset handle mode -- newoffset ok }
+	fnsection "PAGE$text"
+
+	offset@ handle@ mode@ IOFileSeek ok! newoffset!
+end
+
+fn OSFileRead { timeout flags length buffer filehandle -- bytesread ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		// reserved flags were specified
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	timeout@ flags@ length@ buffer@ filehandle@ IOFileRead ok! bytesread!
+end
+
+fn OSFileWrite { flags length buffer filehandle -- byteswritten ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		// reserved flags were specified
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	flags@ length@ buffer@ filehandle@ IOFileWrite ok! byteswritten!
+end
+
+fn OSFileReadAsync { requestblock flags offset length buffer filehandle -- ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		// reserved flags were specified
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto krequest
+	OSRequest_SIZEOF alloc krequest!
+
+	krequest@ // dest
+	requestblock@ // src
+	OSRequest_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	krequest@ flags@ offset@ length@ buffer@ filehandle@ IOFileReadAsync ok!
+end
+
+fn OSFileWriteAsync { requestblock flags offset length buffer filehandle -- ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		// reserved flags were specified
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto krequest
+	OSRequest_SIZEOF alloc krequest!
+
+	krequest@ // dest
+	requestblock@ // src
+	OSRequest_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	krequest@ flags@ offset@ length@ buffer@ filehandle@ IOFileWriteAsync ok!
+end
+
+fn OSFileFlush { purge filehandle -- ok }
+	fnsection "PAGE$text"
+
+	purge@ filehandle@ IOFileFlush ok!
+end
+
+fn OSFileSetInformation { info filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto kinfo
+	OSFileInformation_SIZEOF alloc kinfo!
+
+	kinfo@ // dest
+	info@ // src
+	OSFileInformation_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	kinfo@ filehandle@ IOFileSetInformation ok!
+end
+
+fn OSDirectoryRead { count dirent filehandle -- readcount ok }
+	fnsection "PAGE$text"
+
+	count@ // count
+	dirent@ // dirent
+	filehandle@ // filehandle
+	USERMODE // lastmode
+	IODirectoryRead ok! readcount!
+end
+
+fn OSPageFileCreateRelative { minpages maxpages pri initialobjecthandle path -- ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	OSFILEPATHMAX // max
+	path@ // string
+	ExCallGetString ok! kname!
+
+	if (ok@)
+		return
+	end
+
+	minpages@ // minpages
+	maxpages@ // maxpages
+	pri@ // pri
+	initialobjecthandle@ // initialobjecthandle
+	kname@ // path
+	IOPageFileCreate ok!
+
+	kname@ ExCallFreeString
+end
+
+fn OSPageFileQuery { query id -- ok }
+	fnsection "PAGE$text"
+
+	auto kquery
+	OSPageFileInformation_SIZEOF alloc kquery!
+
+	kquery@ // ptr
+	OSPageFileInformation_SIZEOF // size
+	0 // word
+	memset
+
+	kquery@ id@ IOPageFileQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSPageFileInformation_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSIOControl { arg2 arg1 filehandle -- ret ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+	auto access
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	if (access@ ACCESS_READ ACCESS_WRITE | & ~~)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto ioctlfunc
+	fcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_IOControl + @ ioctlfunc!
+
+	if (ioctlfunc@ ~~)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	arg2@ // arg2
+	arg1@ // arg1
+	access@ // access
+	fcb@ // fcb
+	USERMODE // lastmode
+	ioctlfunc@ IODispatchIOControlFunction ok! ret!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+externptr IOBootDevicePath
+
+fn OSGetBootDevicePath { buffer -- ok }
+	fnsection "PAGE$text"
+
+	// should this require any special permissions?
+
+	buffer@ // dest
+	IOBootDevicePath // src
+	OSFILEPATHMAX 1 - // max
+	KeSafeStringCopyOut ok!
+end
+
+fn OSMountUpdateFlags { newflags handle -- ok }
+	fnsection "PAGE$text"
+
+	newflags@ handle@ IOMountUpdateFlags ok!
+end
+
+fn OSMountGetFilesystemName { buffer handle -- ok }
+	fnsection "PAGE$text"
+
+	auto kbuffer
+	OBNAMEMAX alloc kbuffer!
+
+	kbuffer@ // buffer
+	handle@ // handle
+	IOMountGetFilesystemName ok!
+
+	if (ok@)
+		return
+	end
+
+	buffer@ // dest
+	kbuffer@ // src
+	OBNAMEMAX 1 - // max
+	KeSafeStringCopyOut ok!
+end
+
+fn OSMountSet { query handle -- ok }
+	fnsection "PAGE$text"
+
+	auto kquery
+	OSMountInformation_SIZEOF alloc kquery!
+
+	kquery@ // dest
+	query@ // src
+	OSMountInformation_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	kquery@ // query
+	handle@ // handle
+	IOMountSet ok!
+end
+
+fn OSFilesystemMount { flags handle fsname -- ok }
+	fnsection "PAGE$text"
+
+	auto kfsname
+	0 kfsname!
+
+	if (fsname@)
+		OBNAMEMAX // max
+		fsname@ // string
+		ExCallGetString ok! kfsname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	flags@ // flags
+	handle@ // handle
+	kfsname@ // fsname
+	IOFilesystemMount ok!
+
+	if (kfsname@)
+		kfsname@ ExCallFreeString
+	end
+end
+
+fn OSFilesystemUnmount { handle -- ok }
+	fnsection "PAGE$text"
+
+	handle@ IOFilesystemUnmount ok!
+end
+
+fn OSMountCountQuery { -- count ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+	IOMountCount@ count!
+end
+
+fn OSMountQueryAll { buffer maxquery -- count ok }
+	fnsection "PAGE$text"
+
+	IOMountCount@ maxquery@ min maxquery!
+
+	auto kbuffer
+	auto mdl
+
+	1 // lockforwrite
+	maxquery@ OSMountInformation_SIZEOF * // length
+	buffer@ // vaddr
+	ExCallGetUserBuffer ok! mdl! kbuffer!
+
+	if (ok@)
+		return
+	end
+
+	kbuffer@ // buffer
+	maxquery@ // maxquery
+	IOMountQueryAll ok! count!
+
+	mdl@ ExCallFreeUserBuffer
+end
+
+fn OSDirectoryUnlink { name filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	OSFILEPATHMAX // max
+	name@ // string
+	ExCallGetString ok! kname!
+
+	if (ok@)
+		return
+	end
+
+	kname@ // name
+	filehandle@ // filehandle
+	IODirectoryUnlink ok!
+
+	kname@ ExCallFreeString
+end
+
+fn OSDirectoryRename { srcname srcfilehandle destname destfilehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto ksrcname
+	OSFILEPATHMAX // max
+	srcname@ // string
+	ExCallGetString ok! ksrcname!
+
+	if (ok@)
+		return
+	end
+
+	auto kdestname
+	OSFILEPATHMAX // max
+	destname@ // string
+	ExCallGetString ok! kdestname!
+
+	if (ok@)
+		ksrcname@ ExCallFreeString
+
+		return
+	end
+
+	ksrcname@ // srcname
+	srcfilehandle@ // srcfilehandle
+	kdestname@ // destname
+	destfilehandle@ // destfilehandle
+	IODirectoryRename ok!
+
+	ksrcname@ ExCallFreeString
+	kdestname@ ExCallFreeString
+end
+
+fn OSFlushModifiedPages { -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	IOTriggerWritebehind
+end
+
+fn OSFileCancelIO { wait filehandle -- ok }
+	fnsection "PAGE$text"
+
+	wait@ filehandle@ IOFileCancelIO ok!
+end

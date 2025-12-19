@@ -1,0 +1,46 @@
+//
+// Implements boot resource management routines.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALLog.h"
+
+#include "<inc>/HALMap.h"
+
+var HALResourceKeepHeaders 0
+public HALResourceKeepHeaders
+
+var HALResourceListHead 0
+public HALResourceListHead
+
+fn HALResourceInit { ldrinfo -- ok }
+	fnsection "INIT$text"
+
+	ldrinfo@ LdrInfo_ResourceListHead + @ HALResourceListHead!
+
+	0 ok!
+end
+
+fn HALResourceByName { name -- rsrc }
+	HALResourceListHead@ rsrc!
+
+	while (rsrc@)
+		if (rsrc@ LdrBootResource_Data + @)
+			if (rsrc@ LdrBootResource_Name + name@ strcmp)
+				return
+			end
+		end
+
+		rsrc@ LdrBootResource_Next + @ rsrc!
+	end
+end
+
+fn HALResourceWire { rsrc -- }
+	0 rsrc@ LdrBootResource_Jettison + !
+end
+
+fn HALResourceData { rsrc -- data }
+	rsrc@ LdrBootResource_Data + @ data!
+end

@@ -1,0 +1,238 @@
+//
+// Initialization of the MINTIA executive.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALNvram.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "<inc>/Video.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "<ll>/OSDLL/OSBootFlags.h"
+
+#include "ExInternal.h"
+
+rosection "INIT$text"
+
+var ExBootFlags 0
+public ExBootFlags
+
+buffer ExReleaseName 32
+public ExReleaseName
+
+buffer ExBuildString 64
+public ExBuildString
+
+buffer ExNvramMutex KeMutex_SIZEOF
+
+fn ExInitPhase0 { -- }
+	fnsection "INIT$text"
+
+	// initialize boot flags
+
+	if ("-s" HALArgsCheck)
+		OSBOOTFLAG_SINGLEUSERMODE ExBootFlags |=
+	end
+
+	if ("-nonpagedexec" HALArgsCheck)
+		OSBOOTFLAG_NONPAGEDEXEC ExBootFlags |=
+	end
+
+	if ("-nonpagedpool" HALArgsCheck)
+		OSBOOTFLAG_NONPAGEDPOOL ExBootFlags |=
+	end
+
+	// create identifying build string
+
+	ExiMakeBuildString
+
+	// initialize NVRAM mutex
+
+	"ExNvramMutex" // name
+	KERNELMODE // mode
+	ExNvramMutex // mutex
+	KeMutexInitialize
+
+	// initialize basic kernel video
+
+	KVInit
+
+	// initialize physical memory allocation
+
+	MmInitPhase0
+
+	// initialize security
+
+	SeInitPhase0
+
+	// initialize object manager
+
+	ObInitPhase0
+
+	// initialize process manager
+
+	PsInitPhase0
+
+	// become page zeroing thread
+
+	MmZeroPageWorker
+end
+
+extern MmSwapWorkerInit { -- }
+
+fn ExInitPhase1 { context1 context2 -- }
+	fnsection "INIT$text"
+
+	KeThreadCurrent@ ExiBalanceManagerThread!
+
+	// initialize virtual memory.
+
+	MmInitPhase1
+
+	// insert system process in PID table now.
+	// this couldn't be done in the process creation function because it is
+	// called by the idle thread who can't take faults on paged pool.
+
+	auto ok
+	PsFinishSystemProcess ok!
+
+	if (ok@)
+		ok@ "ExInitPhase1: failed to finish system process creation (%i)\n" KeCrash
+	end
+
+	// initialize object manager
+
+	ObInitPhase1
+	
+	// initialize ViewCache
+
+	VcInitPhase1
+
+	// initialize I/O
+
+	IOInitPhase1
+
+	// initialize IPC
+
+	IPCInitPhase1
+
+	// initialize and draw video console
+
+	CoVideoConsoleInit
+
+	// jettison unused boot resources
+
+	MmResourceJettison
+
+	// initialize executive dispatch object wrappers
+
+	ExiEventInit
+	ExiSemaphoreInit
+	ExiMutexInit
+	ExiTimerInit
+
+	// initialize the swap worker
+
+	MmSwapWorkerInit
+
+	// initialize OSDLL and the SystemInit.exe process
+
+	PsInitPhase1
+
+	// become the balance manager thread
+
+	ExBalanceManager
+end
+
+externptr ExBuildDate
+
+fn ExiMakeBuildString { -- }
+	fnsection "INIT$text"
+
+	ExReleaseName // dest
+	"0.1" // src
+	strcpy
+
+	auto str
+	ExBuildString str!
+
+	str@ // dest
+	"MINTIA " // src
+	strcpy
+
+	str@ str@ strlen + // dest
+	ExReleaseName // src
+	strcpy
+
+	str@ str@ strlen + // dest
+	" [" // src
+	strcpy
+
+	str@ str@ strlen + // dest
+	HALCPUModel // src
+	strcpy
+
+	if (DEBUGCHECKS)
+		str@ str@ strlen + // dest
+		"-chk" // src
+		strcpy
+	end else
+		str@ str@ strlen + // dest
+		"-fre" // src
+		strcpy
+	end
+
+	str@ str@ strlen + // dest
+	"] " // src
+	strcpy
+
+	str@ str@ strlen + // dest
+	ExBuildDate // src
+	strcpy
+end
+
+fn ExiNvramLock { -- }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	0 // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	ExNvramMutex // object
+	KeThreadWaitForObject drop
+end
+
+fn ExiNvramUnlock { -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	ExNvramMutex // mutex
+	KeMutexRelease drop
+end

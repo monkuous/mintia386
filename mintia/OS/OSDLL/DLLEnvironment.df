@@ -1,0 +1,238 @@
+//
+// Implements environment variable management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSEnvironment.h"
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "OSDLL.h"
+
+fn DLLFindEnvironmentVariable { name envblock -- entry env ok }
+	STATUS_ENVIRON_NOT_FOUND ok!
+
+	auto p
+	envblock@ p!
+
+	auto endp
+	p@ OSENVIRONMENTSIZE + endp!
+
+	-1 ok!
+
+	while (p@ endp@ <)
+		if (p@ gb)
+			p@ entry!
+
+			while (p@ gb)
+				if (p@ gb '=' ==)
+					if (entry@ name@ p@ entry@ - strncmp)
+						p@ 1 + env!
+
+						0 ok!
+
+						return
+					end else
+						while (p@ gb)
+							1 p +=
+
+							if (p@ endp@ >=)
+								return
+							end
+						end
+
+						break
+					end
+				end
+
+				1 p +=
+
+				if (p@ endp@ >=)
+					return
+				end
+			end
+		end else
+			1 p +=
+		end
+	end
+end
+
+fn DLLGetEnvironmentVariable { env name bufsize envblock -- ok }
+	auto buf
+	name@ envblock@ DLLFindEnvironmentVariable ok! buf! drop
+
+	if (ok@)
+		return
+	end
+
+	env@ // dest
+	buf@ // src
+	bufsize@ 1 - // max
+	strncpy
+end
+
+fn DLLSetEnvironmentVariable { env name envblock -- ok }
+	auto envlen
+	env@ strlen envlen!
+
+	auto namelen
+	name@ strlen namelen!
+
+	auto requiredlen
+	envlen@ namelen@ + requiredlen!
+	1 requiredlen += // for the equals sign
+
+	auto buf
+	name@ envblock@ DLLFindEnvironmentVariable ok! drop buf!
+
+	if (ok@ ~~)
+		// already set, see if the spot is big enough
+
+		if (buf@ strlen requiredlen@ >=)
+			// yup, overwrite it
+
+			buf@ // dest
+			name@ // name
+			strcpy
+
+			'=' buf@ namelen@ + sb
+
+			buf@ namelen@ + 1 + // dest
+			env@ // src
+			strcpy
+
+			return
+		end else
+			// nope, murder it
+
+			buf@ strzero
+		end
+	end
+
+	STATUS_ENVIRON_TOO_LARGE ok!
+
+	auto p
+	envblock@ p!
+
+	auto endp
+	p@ OSENVIRONMENTSIZE + endp!
+
+	2 requiredlen += // for the zero after and maybe a zero before
+
+	auto foundlen
+	0 foundlen!
+
+	p@ buf!
+
+	while (p@ endp@ <)
+		if (p@ gb)
+			p@ 2 + buf!
+			0 foundlen!
+		end else
+			1 foundlen +=
+
+			if (foundlen@ requiredlen@ >=)
+				// found a spot, write it
+
+				0 ok!
+
+				buf@ // dest
+				name@ // name
+				strcpy
+
+				'=' buf@ namelen@ + sb
+
+				buf@ namelen@ + 1 + // dest
+				env@ // src
+				strcpy
+
+				return
+			end
+		end
+
+		1 p +=
+	end
+end
+
+fn DLLDeleteEnvironmentVariable { name envblock -- ok }
+	auto entry
+
+	name@ // name
+	envblock@ // envblock
+	DLLFindEnvironmentVariable ok! drop entry!
+
+	if (ok@)
+		return
+	end
+
+	entry@ strzero
+end
+
+fn DLLEnumerateEnvironment { func envblock -- ok }
+	0 ok!
+
+	auto p
+	envblock@ p!
+
+	auto endp
+	p@ OSENVIRONMENTSIZE + endp!
+
+	auto entry
+	0 entry!
+
+	-1 ok!
+
+	while (p@ endp@ <)
+		if (p@ gb)
+			if (entry@ ~~)
+				p@ entry!
+
+				entry@ // entry
+				func@ OSEnumerateEnvironmentF ok!
+
+				if (ok@)
+					return
+				end
+			end
+		end else
+			0 entry!
+		end
+
+		1 p +=
+	end
+end
+
+fn OSFindEnvironmentVariable { name -- entry env ok }
+	name@ // name
+	OSPEB OSPEBs_Environment + // envblock
+	DLLFindEnvironmentVariable ok! env! entry!
+end
+
+fn OSGetEnvironmentVariable { env name bufsize -- ok }
+	env@ name@ bufsize@
+	OSPEB OSPEBs_Environment + // envblock
+	DLLGetEnvironmentVariable ok!
+end
+
+fn OSSetEnvironmentVariable { env name -- ok }
+	env@ name@
+	OSPEB OSPEBs_Environment + // envblock
+	DLLSetEnvironmentVariable ok!
+end
+
+fn OSDeleteEnvironmentVariable { name -- ok }
+	name@
+	OSPEB OSPEBs_Environment + // envblock
+	DLLDeleteEnvironmentVariable ok!
+end
+
+fn OSEnumerateEnvironment { func -- ok }
+	func@ // func
+	OSPEB OSPEBs_Environment + // envblock
+	DLLEnumerateEnvironment ok!
+end

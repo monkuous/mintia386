@@ -1,0 +1,170 @@
+//
+// Implements IO cancellation functions.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+fn IOThreadRundown { -- }
+	fnsection "PAGE$text"
+
+	// cancel all the IO requests pending for the current thread and wait for
+	// them to fully disappear before returning.
+
+	auto current
+	KeThreadCurrent@ current!
+
+	auto ipl
+	IPLAPC KeIPLRaise ipl!
+
+	auto iop
+	current@ PsThread_IOListHead + @ iop!
+
+	while (iop@)
+		auto cancelfunc
+		iop@ IOPacketHeaderUserAsync_FileObject + @
+		IOFile_FileControlBlock + @
+		IOFileControlBlock_DispatchTable + @
+		IODispatchTable_Cancel + @ cancelfunc!
+
+		if (cancelfunc@)
+			iop@ // iop
+			cancelfunc@ IODispatchCancelFunction drop
+		end
+
+		iop@ IOPacketHeaderUserAsync_ThreadListNext + @ iop!
+	end
+
+	ipl@ KeIPLLower
+
+	while (current@ PsThread_IOListHead + @)
+		// there are some requests taking a while so wait a bit for them to
+		// complete.
+
+		100 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+	end
+end
+
+fn IOFileCancelIOObject { wait fileobject -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	// wait until the current thread has no more pending requests with
+	// matching file objects.
+
+	auto current
+	KeThreadCurrent@ current!
+
+	auto ipl
+	IPLAPC KeIPLRaise ipl!
+
+	auto iop
+	current@ PsThread_IOListHead + @ iop!
+
+	while (iop@)
+		if (iop@ IOPacketHeaderUserAsync_FileObject + @ fileobject@ ==)
+			auto cancelfunc
+			iop@ IOPacketHeaderUserAsync_FileObject + @
+			IOFile_FileControlBlock + @
+			IOFileControlBlock_DispatchTable + @
+			IODispatchTable_Cancel + @ cancelfunc!
+
+			if (cancelfunc@)
+				iop@ // iop
+				cancelfunc@ IODispatchCancelFunction drop
+			end
+		end
+
+		iop@ IOPacketHeaderUserAsync_ThreadListNext + @ iop!
+	end
+
+	ipl@ KeIPLLower
+
+	// wait for the cancellation to completely finish if needed.
+
+	while (1)
+		IPLAPC KeIPLRaise ipl!
+
+		current@ PsThread_IOListHead + @ iop!
+
+		while (iop@)
+			if (iop@ IOPacketHeaderUserAsync_FileObject + @ fileobject@ ==)
+				break
+			end
+
+			iop@ IOPacketHeaderUserAsync_ThreadListNext + @ iop!
+		end
+
+		ipl@ KeIPLLower
+
+		if (iop@ ~~)
+			// no matching IOP was found.
+			break
+		end
+
+		if (wait@ ~~)
+			// report that the cancellation was incomplete.
+
+			STATUS_IO_CANCEL_INCOMPLETE ok!
+
+			break
+		end else
+			// there are some requests taking a while so wait a bit for them
+			// to complete.
+
+			100 // ms
+			KERNELMODE // waitmode
+			0 // alertable
+			KeThreadSleep drop
+		end
+	end
+end
+
+fn IOFileCancelIO { wait filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	wait@ // wait
+	fileobject@ // fileobject
+	IOFileCancelIOObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end

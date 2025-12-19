@@ -1,0 +1,71 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+buffer MemoryInformation OSMemoryInformation_SIZEOF
+
+fn Main { ... -- ret }
+	0 ret!
+
+	if (argc@ 2 ==)
+		auto handle
+		OSFILETYPE_ANY // filetype
+		0 // flags
+		ACCESS_READ // access
+		[1]argv@ // path
+		OSFileOpen ret! handle!
+
+		if (ret@)
+			ret@ OSStatusGetName [1]argv@ "sync: %s: %s\n" OSError
+		end
+
+		1 // purge
+		handle@ // filehandle
+		OSFileFlush ret!
+
+		if (ret@)
+			ret@ OSStatusGetName [1]argv@ "sync: couldn't flush %s: %s\n" OSError
+		end
+
+		handle@ OSClose drop
+
+		return
+	end
+
+	OSFlushModifiedPages ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "sync: %s\n" OSError
+	end
+
+	auto tries
+	50 tries!
+
+	while (tries@)
+		MemoryInformation OSMemoryQuery ret!
+
+		if (ret@)
+			ret@ OSStatusGetName "sync: %s\n" OSError
+		end
+
+		if (MemoryInformation OSMemoryInformation_DirtyFileCount + @ ~~)
+			// complete flush
+
+			return
+		end
+
+		OSFlushModifiedPages ret!
+
+		if (ret@)
+			ret@ OSStatusGetName "sync: %s\n" OSError
+		end
+
+		// incomplete flush, wait 100ms and try again
+
+		100 OSThreadSleep drop
+
+		1 tries -=
+	end
+
+	"sync: incomplete flush\n" OSGetStdErr FPrintf
+end

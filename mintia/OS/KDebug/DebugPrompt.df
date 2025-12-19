@@ -1,0 +1,705 @@
+//
+// Implements the KDebug prompt.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALLog.h"
+
+#include "<inc>/DebugIO.h"
+#include "<inc>/DebugSymbols.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "../OSLoader/OSLoaderGlobal.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/DebugTrace.h"
+
+#include "../OSKernel/Memory/MmInternal.h"
+
+externptr KiThreadPriorityQueueHeads
+
+const COMMANDS 17
+
+table DebugCommands
+	"help"
+	"Displays this help text."
+	pointerof DebugCommandHelp
+
+	"exit"
+	"Exits from the debugger prompt."
+	pointerof DebugCommandExit
+
+	"show"
+	"[module!symbol] Shows the value of a symbol."
+	pointerof DebugCommandShow
+
+	"procs"
+	"Lists the active processes."
+	pointerof DebugCommandProc
+
+	"pcsym"
+	"[pc] Find the function a program counter is part of."
+	pointerof DebugCommandPcsym
+
+	"ready"
+	"Print all of the ready queues."
+	pointerof DebugCommandReady
+
+	"threads"
+	"[proc] Lists the threads of a process."
+	pointerof DebugCommandThread
+
+	"wait"
+	"[thread] Prints the wait information of a thread."
+	pointerof DebugCommandWait
+
+	"dispatch"
+	"[dispatchobject] Prints wait information for a dispatch object."
+	pointerof DebugCommandDispatch
+
+	"crash"
+	"Cause a crash."
+	pointerof DebugCommandCrash
+
+	"mutexes"
+	"[thread] List held mutexes of a thread."
+	pointerof DebugCommandMutexes
+
+	"heapcheck"
+	"Check the heap."
+	pointerof DebugCommandCheckHeap
+
+	"heapblock"
+	"[heapblock] Print information about a heap block."
+	pointerof DebugCommandHeapBlock
+
+	"map"
+	"[proc] Print mappings of a process."
+	pointerof DebugCommandMap
+
+	"trace"
+	"[thread] Stack trace a thread."
+	pointerof DebugCommandTrace
+
+	"dumpheap"
+	"Dump the blocks on the heap."
+	pointerof DebugCommandDumpHeap
+
+	"thread"
+	"[thread] Dump information about a thread."
+	pointerof DebugCommandThreadShow
+endtable
+
+struct Command
+	4 Name
+	4 Description
+	4 Func
+endstruct
+
+fnptr CommandFunc { p -- halt }
+
+buffer DebugPromptBuffer 256
+
+buffer DebugWordBuffer 256
+
+fn DebugPrompt { -- }
+	auto running
+	1 running!
+
+	while (running@)
+		">> " Printf
+		DebugPromptBuffer 255 DebugGets
+
+		auto p
+		DebugPromptBuffer DebugWordBuffer ' ' strtok p!
+
+		if (DebugWordBuffer gb)
+			auto tp
+			DebugCommands tp!
+
+			auto i
+			0 i!
+
+			auto found
+			0 found!
+
+			while (i@ COMMANDS <)
+				if (tp@ Command_Name + @ DebugWordBuffer strcmp)
+					p@ tp@ Command_Func + @ CommandFunc ~~ running!
+					1 found!
+					break
+				end
+
+				1 i +=
+				Command_SIZEOF tp +=
+			end
+
+			if (found@ ~~)
+				"unrecognized command\n" Printf
+			end
+		end
+	end
+end
+
+fn (CommandFunc) DebugCommandHelp { p -- halt }
+	auto tp
+	DebugCommands tp!
+
+	auto i
+	0 i!
+
+	while (i@ COMMANDS <)
+		tp@ Command_Description + @ tp@ Command_Name + @ " \[[33m%10s\[[0m%s\n" Printf
+
+		1 i +=
+		Command_SIZEOF tp +=
+	end
+
+	0 halt!
+end
+
+fn (CommandFunc) DebugCommandExit { p -- halt }
+	1 halt!
+end
+
+fn (CommandFunc) DebugCommandShow { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify both a module and symbol name\n" Printf
+		return
+	end
+
+	1 p +=
+
+	if (p@ gb '#' ==)
+		1 p +=
+
+		auto vaddr
+		p@ atoi vaddr!
+
+		if (vaddr@ MmVirtualAddressIsValid ~~)
+			"invalid address\n" Printf
+			return
+		end
+
+		vaddr@@ "0x%x\n" Printf
+
+		return
+	end
+
+	auto ref
+	0 ref!
+
+	if (p@ gb '@' ==)
+		1 ref!
+		1 p +=
+	end
+
+	auto modname
+	p@ modname!
+
+	while (p@ gb '!' ~=)
+		if (p@ gb ~~)
+			"please specify both a module and symbol name\n" Printf
+			return
+		end
+
+		1 p +=
+	end
+
+	0 p@ sb
+
+	auto symname
+	p@ 1 + symname!
+
+	if (symname@ gb ~~)
+		"please specify both a module and symbol name\n" Printf
+		return
+	end
+
+	auto dll
+	modname@ DebugGetDLL dll!
+
+	if (dll@ ~~)
+		modname@ "module '%s' not found\n" Printf
+		return
+	end
+
+	auto ok
+
+	auto addr
+	symname@ dll@ DebugGetSymbolAddress ok! addr!
+
+	if (ok@)
+		modname@ symname@ "symbol '%s' not found in module '%s'\n" Printf
+		return
+	end
+
+	if (ref@)
+		addr@@ dup symname@ modname@ "@%s!%s = 0x%08x (%d)\n" Printf
+	end else
+		addr@ dup symname@ modname@ "%s!%s = 0x%08x\n" Printf
+	end
+end
+
+fn DebugCommandProc { p -- halt }
+	0 halt!
+
+	auto proc
+	PsProcessListHead@ proc!
+
+	auto count
+	20 count!
+
+	"NAME" "PTR" "%10s %22s\n" Printf
+
+	while (proc@ count@ &&)
+		proc@ KeProcess_Name + proc@ "0x%08x %22s\n" Printf
+
+		proc@ PsProcess_GlobalListNext + @ proc!
+		1 count -=
+	end
+end
+
+fn DebugCommandPcsym { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a program counter value\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto pc
+	p@ atoi pc!
+
+	auto symname
+	auto symbase
+	auto dll
+
+	auto ok
+	pc@ DebugGetSymDLL ok! drop symname! symbase! dll!
+
+	if (ok@)
+		"UNKNOWN\n" Printf
+	end else
+		pc@ symbase@ - symname@ dll@ ComDLL_Name + @ "%s!%s + 0x%x\n" Printf
+	end
+end
+
+fn DebugCommandReady { p -- halt }
+	0 halt!
+
+	auto i
+	PRIORITIES i!
+
+	while (i@)
+		1 i -=
+
+		auto thread
+		[i@]KiThreadPriorityQueueHeads@ thread!
+
+		if (thread@)
+			i@ "[%d] " Printf
+
+			while (thread@)
+				thread@ "%x " Printf
+
+				thread@ KeThread_QueueNext + @ thread!
+			end
+
+			'\n' Putc
+		end
+	end
+end
+
+table StatusNames
+	"Zero"
+	"Initial"
+	"Ready"
+	"Suspend"
+	"Running"
+	"WaitAlrt"
+	"WitUAlrt"
+	"Killed"
+	"Balanced"
+endtable
+
+fn DebugCommandThread { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a process pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto proc
+	p@ atoi proc!
+
+	auto thr
+	proc@ KeProcess_ThreadListHead + @ thr!
+
+	"PRI" "STATUS" "NAME" "PTR" "%10s %22s %8s %4s\n" Printf
+
+	while (thr@)
+		thr@ KeThread_PriorityB + gb [thr@ KeThread_StatusB + gb]StatusNames@ thr@ KeThread_Name + thr@ "0x%08x %22s %8s %4d\n" Printf
+
+		thr@ KeThread_ProcessNext + @ thr!
+	end
+end
+
+fn DebugCommandDispatch { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a dispatch object pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto object
+	p@ atoi object!
+
+	auto waitblock
+	object@ KeDispatchHeader_WaitBlockListHead + @ waitblock!
+
+	while (waitblock@)
+		auto thread
+		waitblock@ KeDispatchWaitBlock_Thread + @ thread!
+
+		thread@ KeThread_Name + thread@ waitblock@ "(0x%08x) waited on by 0x%08x '%s'\n" Printf
+
+		waitblock@ KeDispatchWaitBlock_Next + @ waitblock!
+	end
+end
+
+fn DebugCommandWait { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a thread pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto thread
+	p@ atoi thread!
+
+	auto timer
+	thread@ KeThread_Timer + timer!
+
+	auto name
+	timer@ KeDispatchHeader_Name + @ name!
+
+	if (name@ ~~)
+		"NO NAME" name!
+	end
+
+	name@ timer@ "thread timer: 0x%08x '%s'" Printf
+
+	if (timer@ KeTimer_Enqueued + @)
+		" (enqueued)\n" Printf
+	end else
+		"\n" Printf
+	end
+
+	auto waitblock
+	thread@ KeThread_TimeoutWaitBlock + waitblock!
+
+	auto object
+	waitblock@ KeDispatchWaitBlock_Object + @ object!
+
+	if (object@)
+		"wait(timeout)\n" Printf
+	end
+
+	thread@ KeThread_WaitBlocks + waitblock!
+
+	auto i
+	0 i!
+
+	while (i@ THREADWAITBLOCKS <)
+		waitblock@ KeDispatchWaitBlock_Object + @ object!
+
+		if (object@)
+			object@ KeDispatchHeader_Name + @ name!
+
+			if (name@ ~~)
+				"NO NAME" name!
+			end
+
+			name@ object@ i@ "wait(%d): 0x%08x '%s'\n" Printf
+		end
+
+		1 i +=
+		KeDispatchWaitBlock_SIZEOF waitblock +=
+	end
+end
+
+fn DebugCommandMutexes { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a thread pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto thread
+	p@ atoi thread!
+
+	auto h
+	thread@ KeThread_MutexListHead + @ h!
+
+	while (h@)
+		h@ KeDispatchHeader_Name + @ h@ "0x%08x '%s'\n" Printf
+
+		h@ KeMutex_Next + @ h!
+	end
+end
+
+externptr DebugCrashLater
+
+fn DebugCommandCrash { p -- halt }
+	1 DebugCrashLater!
+	1 halt!
+end
+
+fn DebugCommandCheckHeap { p -- halt }
+	0 halt!
+
+	MmHeapCheck
+end
+
+fn DebugCommandHeapBlock { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a heapblock pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto heapblock
+	p@ atoi heapblock!
+
+	heapblock@ MmHeapDumpBlockInfo
+end
+
+table DebugProtBits
+	"---"
+	"--x"
+	"-w-"
+	"-wx"
+	"r--"
+	"r-x"
+	"rw-"
+	"rwx"
+	"-c-"
+	"-cx"
+	"-?-"
+	"-?x"
+	"rc-"
+	"rcx"
+	"r?-"
+	"r?x"
+endtable
+
+fn DebugCommandMap { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a process pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto proc
+	p@ atoi proc!
+
+	auto vad
+	proc@ PsProcess_PagedArea + @ PsProcessPaged_VadTree + ExAvlTreeNodeFirst vad!
+
+	"OBJECT" "PROT" "SECTOFF" "ENDVA" "STARTVA" "VAD" "%8s %8s %8s %8s %4s %8s\n" Printf
+
+	while (vad@)
+		MiVAD_Parent vad -=
+
+		vad@ MiVAD_PageProtection + @
+		vad@ MiVAD_OffsetInSection + @
+		vad@ MiVAD_EndVA + @
+		vad@ MiVAD_StartVA + @
+		vad@
+		"%08x %08x %08x %08x " Printf
+
+		if (vad@ MiVAD_PageProtection + @ PAGEACCESS_NONCACHED &)
+			'n' Putc
+		end else
+			'-' Putc
+		end
+
+		[vad@ MiVAD_PageProtection + @ 15 &]DebugProtBits@ "%s " Printf
+
+		if (vad@ MiVAD_MappedObject + @ ~~)
+			"(private)\n" Printf
+		end elseif (vad@ MiVAD_Flags + @ MMVADFLAG_SECTION &)
+			vad@ MiVAD_MappedObject + @ "%08x (anon)\n" Printf
+		end else
+			auto fobj
+			vad@ MiVAD_MappedObject + @ fobj!
+
+			if (fobj@)
+				if (fobj@ IOFile_OpenedPath + @)
+					fobj@ IOFile_OpenedPath + @ "%s\n" Printf
+				end else
+					fobj@ "%08x (file)\n" Printf
+				end
+			end
+		end
+
+		vad@ MiVAD_Parent + ExAvlTreeNodeNext vad!
+	end
+end
+
+fn DebugCommandTrace { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a thread pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto thread
+	p@ atoi thread!
+
+	if (thread@ KeThread_KernelStackResidentB + gb ~~)
+		"kernel stack not resident\n" Printf
+		return
+	end
+
+#ifdef XR17032
+	thread@ KeThread_Context + @ OSContext_lr + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF + // link
+	"0x%08x 0x%08x\n" Printf
+
+	thread@ KeThread_Context + @ OSContext_lr + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF + // link
+	25 // rows
+	80 // cols
+	DebugTrace
+#endif
+
+#ifdef FOX32
+	thread@ KeThread_Context + @ OSContext_epc + @ // pc
+	thread@ KeThread_Context + @ OSContext_fp + @
+	"0x%08x 0x%08x\n" Printf
+
+	thread@ KeThread_Context + @ OSContext_epc + @ // pc
+	thread@ KeThread_Context + @ OSContext_fp + @ // link
+	25 // rows
+	80 // cols
+	DebugTrace
+#endif
+
+#ifdef I386
+	thread@ KeThread_Context + @ OSContext_eip + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF +
+	"0x%08x 0x%08x\n" Printf
+
+	thread@ KeThread_Context + @ OSContext_eip + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF + // link
+	25 // rows
+	80 // cols
+	DebugTrace
+#endif
+end
+
+fn PrintTag { tag -- }
+	auto shf
+	32 shf!
+
+	while (shf@)
+		8 shf -=
+
+		auto c
+		tag@ shf@ >> 0xFF & c!
+
+		if (c@ 0x80 & ~~ c@ 0x20 >= &&)
+			c@ Putc
+		end else
+			'!' Putc
+		end
+	end
+end
+
+fn DebugCommandDumpHeap { p -- halt }
+	0 halt!
+
+	auto tag
+	0 tag!
+
+	if (p@)
+		1 p +=
+
+		while (p@ gb)
+			8 tag <<=
+			p@ gb tag |=
+
+			1 p +=
+		end
+	end
+
+	auto usage
+	tag@ MmPoolDump usage!
+
+	usage@ "\n%d bytes used\n" Printf
+end
+
+fn DebugCommandThreadShow { p -- halt }
+	0 halt!
+
+	if (p@ ~~)
+		"please specify a thread pointer\n" Printf
+		return
+	end
+
+	1 p +=
+
+	auto thread
+	p@ atoi thread!
+
+	auto process
+	thread@ KeThread_Process + @ process!
+
+	thread@ KeThread_Name +
+	process@ KeProcess_Name +
+	process@
+	"0x%x/%s: %s\n" Printf
+end

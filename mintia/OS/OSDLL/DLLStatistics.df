@@ -1,0 +1,112 @@
+//
+// Implements statistics query dumping.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSProcess.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSSignal.h"
+#include "<ll>/OSDLL/OSMemory.h"
+#include "<ll>/OSDLL/OSStatistics.h"
+
+#include "OSDLL.h"
+
+// only the first 10 are dumped
+table HALIPLNames
+	"IPLLOW"         // 00
+	"IPLAPC"         // 01
+	"IPLDPC"         // 02
+	0                // 03
+	"IPLKBD"         // 04
+	"IPLBRD"         // 05
+	"IPLSRL"         // 06
+	"IPLDSK"         // 07
+	0                // 08
+	0                // 09
+endtable
+
+fn OSStatisticsDump { diffquery query -- }
+	auto pquery
+
+	if (diffquery@)
+		OSStatistics_SIZEOF alloc pquery!
+
+		// subtract the diffquery from the query.
+
+		auto i
+		0 i!
+
+		while (i@ OSSTATISTICSCOUNT <)
+			query@ i@ 4 * + @ diffquery@ i@ 4 * + @ -
+			pquery@ i@ 4 * + !
+
+			1 i +=
+		end
+	end else
+		query@ pquery!
+	end
+
+	pquery@ OSStatistics_ClockTicks + @
+	"       ticks: %d\n" Printf
+
+	pquery@ OSStatistics_Interrupts + @ pquery@ OSStatistics_ClockTicks + @ -
+	"  interrupts: %d\n" Printf
+
+	pquery@ OSStatistics_Preemptions + @
+	" preemptions: %d\n" Printf
+
+	pquery@ OSStatistics_QuantumEnds + @
+	"quantum ends: %d\n" Printf
+
+	pquery@ OSStatistics_SystemCalls + @
+	"    syscalls: %d\n" Printf
+
+	pquery@ OSStatistics_DPCTimeMs + @
+	"    DPC time: %dms\n" Printf
+
+	'\n' Putc
+
+	0 i!
+
+	while (i@ 9 <)
+		if ([i@]HALIPLNames@)
+			[i@]HALIPLNames@ "%6s     " Printf
+		end
+
+		1 i +=
+	end
+
+	'\n' Putc
+
+	auto ipltime
+	pquery@ OSStatistics_IPLTimes + ipltime!
+
+	0 i!
+
+	auto ipltbuf
+	16 alloc ipltbuf!
+
+	while (i@ 9 <)
+		if ([i@]HALIPLNames@)
+			ipltime@@ ipltbuf@ itoa
+
+			ipltbuf@ strlen ipltbuf@ + // dest
+			"ms" // src
+			strcpy
+
+			ipltbuf@ "%10s " Printf
+		end
+
+		1 i +=
+		4 ipltime +=
+	end
+
+	"\n" Printf
+end

@@ -1,0 +1,166 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSConsoleControl.h"
+
+#include "<ll>/MCL/Mcl.h"
+
+var CmdMachine 0
+
+fn (OSSignalHandler) SignalInterrupt { context signum -- }
+	CmdMachine@ MclInterrupt
+end
+
+fn CmdIgnoreSignals { -- }
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_INT // signum
+	OSSignalSetAction drop
+
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_QUIT // signum
+	OSSignalSetAction drop
+end
+
+fn CmdResetSignals { -- }
+	pointerof SignalInterrupt // action
+	OSSIGNAL_INT // signum
+	OSSignalSetAction drop
+
+	pointerof SignalInterrupt // action
+	OSSIGNAL_QUIT // signum
+	OSSignalSetAction drop
+end
+
+fn Main { ... -- ret }
+	auto pwd
+	auto ok
+	0 ok!
+
+	if (argc@ 1 >)
+		argc@ // argcn
+		argv // argvt
+		ExecuteScript ret!
+
+		if (ret@)
+			ret@ OSStatusGetName
+			[1]argv@
+			"cmd: couldn't execute script %s: %s\n" OSError
+		end
+
+		return
+	end
+
+	// query console so it gets cached in environment
+	OSGetStdOut OSConsoleQuerySize ok! drop drop
+
+	if (ok@)
+		ok@ OSStatusGetName "couldn't cache tty size: %s
+You may encounter strange effects.\n" OSGetStdErr FPrintf
+		0 ok!
+	end
+
+	CmdResetSignals
+
+	auto machine
+	MclMachineCreate ok! machine!
+
+	if (ok@)
+		ok@ OSStatusGetName "cmd: couldn't create mcl machine: %s\n" OSError
+	end
+
+	machine@ CmdMachine!
+
+	auto query
+	OSHeapInformation_SIZEOF alloc query!
+
+	while (1)
+		"PWD" OSFindEnvironmentVariable ok! pwd! drop
+
+		if (ok@)
+			"?" pwd!
+		end else
+			pwd@ OSLastComponent pwd!
+		end
+
+//		query@ OSHeapQuery
+//		query@ OSHeapInformation_UsedExternally + @
+//		query@ OSHeapInformation_UsedInternally + @
+//		"1 %d/%d\n" Printf
+
+		pwd@ "%s # " Printf
+		OSFlushLine
+
+		auto rootblock
+		"stdin" // filename
+		1 // interactive
+		OSGetStdIn // streamhandle
+		machine@ // machine
+		MclMachineParseFile ok! rootblock!
+
+//		query@ OSHeapQuery
+//		query@ OSHeapInformation_UsedExternally + @
+//		query@ OSHeapInformation_UsedInternally + @
+//		"2 %d/%d\n" Printf
+
+		if (ok@)
+			if (ok@ STATUS_SIGNALLED ==)
+				"\n" Printf
+			end elseif (ok@ STATUS_END_OF_FILE ==)
+				0 ret!
+				return
+			end elseif (ok@ STATUS_SYNTAX_ERROR ==)
+
+			end else
+				ok@ OSStatusGetName "%s\n" OSGetStdErr FPrintf
+			end
+		end else
+			auto value
+			0 // capture
+			rootblock@ // node
+			machine@ // machine
+			MclMachineEvaluateNode ok! value!
+
+//		query@ OSHeapQuery
+//		query@ OSHeapInformation_UsedExternally + @
+//		query@ OSHeapInformation_UsedInternally + @
+//		"3 %d/%d\n" Printf
+
+			rootblock@ MclParseSubtreeFree
+
+//		query@ OSHeapQuery
+//		query@ OSHeapInformation_UsedExternally + @
+//		query@ OSHeapInformation_UsedInternally + @
+//		"4 %d/%d\n" Printf
+
+			if (ok@)
+				if (ok@ STATUS_SIGNALLED ==)
+					"\n" Printf
+				end elseif (ok@ STATUS_SYNTAX_ERROR ==)
+
+				end else
+					ok@ OSStatusGetName "%s\n" OSGetStdErr FPrintf
+				end
+			end else
+				if (value@)
+					value@ MclValueContents "[%s]\n" Printf
+
+					value@ MclFreeValue
+				end
+			end
+		end
+	end
+end
+
+fn ExecuteScript { argcn argvt -- ok }
+	auto value
+	argcn@ 2 - // argcn
+	argvt@ 8 + // argvt
+	argvt@ 4 + @ // filename
+	MclRunScript ok! value!
+
+	if (ok@ ~~)
+		if (value@)
+			value@ MclFreeValue
+		end
+	end
+end

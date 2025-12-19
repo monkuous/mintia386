@@ -1,0 +1,914 @@
+//
+// Implements filesystem volume management.
+// Non-volume-based filesystems (i.e. network redirectors) do not go through
+// here.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+var IOFilesystemListHead 0
+public IOFilesystemListHead
+
+var IOMountListHead 0
+public IOMountListHead
+
+var IOMountCount 0
+public IOMountCount
+
+fn IOFilesystemRegister { filesystem -- ok }
+	fnsection "INIT$text"
+
+	// assumes being run single-threaded (i.e. in a DriverInit routine)...
+
+	0 ok!
+
+	IOFilesystemListHead@ filesystem@ IOFilesystem_Next + !
+	filesystem@ IOFilesystemListHead!
+end
+
+fn IOFilesystemMount { flags handle fsname -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ // access
+	ACCESS_EXEC // permission
+	SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	if (flags@ OSMOUNT_READONLY & ~~)
+		access@ // access
+		ACCESS_WRITE // permission
+		SeCheckAccess ok!
+
+		if (ok@)
+			fileobject@ ObObjectDereferenceByPointer drop
+
+			return
+		end
+	end
+
+	flags@ // flags
+	fileobject@ // fileobject
+	fsname@ // fsname
+	IOMountObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOMountObject { flags fileobject fsname -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	auto filetype
+	fcbp@ IOFileControlBlockPaged_FileType + @ filetype!
+
+	if (filetype@ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (filetype@ OSFILETYPE_BLOCKDEVICE ~=)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	auto filesystem
+	0 filesystem!
+
+	if (fsname@)
+		IOFilesystemListHead@ filesystem!
+
+		while (filesystem@)
+			if (filesystem@ IOFilesystem_Driver + @ IODriver_Name + @ fsname@ strcmp)
+				break
+			end
+
+			filesystem@ IOFilesystem_Next + @ filesystem!
+		end
+
+		if (filesystem@ ~~)
+			STATUS_NO_SUCH_FILESYSTEM ok!
+
+			return
+		end
+	end
+
+	1 IOLockDeviceDatabase ok!
+
+	if (ok@)
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock ok!
+
+	if (ok@)
+		IOUnlockDeviceDatabase
+
+		return
+	end
+
+	auto devobj
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ devobj!
+
+	if (devobj@ IODevice_AttachedBy + @)
+		fcb@ IOFileControlBlockUnlock
+		IOUnlockDeviceDatabase
+
+		STATUS_DEVICE_BUSY ok!
+
+		return
+	end
+
+	if (devobj@ IODevice_RelevantMount + @)
+		fcb@ IOFileControlBlockUnlock
+		IOUnlockDeviceDatabase
+
+		STATUS_DEVICE_BUSY ok!
+
+		return
+	end
+
+	auto fsdevobj
+
+	STATUS_BAD_FILESYSTEM ok!
+
+	auto mountfunc
+
+	if (filesystem@ ~~)
+		// no filesystem was explicitly given.
+		// try any
+
+		IOFilesystemListHead@ filesystem!
+
+		while (filesystem@)
+			if (filesystem@ IOFilesystem_Flags + @ IOFSFLAG_NOAUTO & ~~)
+				filesystem@ IOFilesystem_MountFunction + @ mountfunc!
+
+				if (DEBUGCHECKS)
+					if (mountfunc@ ~~)
+						"IOMountObject: filesystem had no mount function 1\n" KeCrash
+					end
+				end
+
+				auto thisok
+				flags@ // flags
+				devobj@ // deviceobject
+				mountfunc@ IOFilesystemMountFunction thisok! fsdevobj!
+
+				if (thisok@ ~~)
+					// successfully mounted as this filesystem
+
+					0 ok!
+
+					break
+				end
+
+				if (ok@ ~~)
+					thisok@ ok!
+				end elseif (thisok@ STATUS_BAD_FILESYSTEM ~=)
+					thisok@ ok!
+				end
+			end
+
+			filesystem@ IOFilesystem_Next + @ filesystem!
+		end
+	end else
+		filesystem@ IOFilesystem_MountFunction + @ mountfunc!
+
+		if (DEBUGCHECKS)
+			if (mountfunc@ ~~)
+				"IOMountObject: filesystem had no mount function 2\n" KeCrash
+			end
+		end
+
+		flags@ // flags
+		devobj@ // deviceobject
+		mountfunc@ IOFilesystemMountFunction ok! fsdevobj!
+	end
+
+	if (ok@)
+		fcb@ IOFileControlBlockUnlock
+		IOUnlockDeviceDatabase
+
+		// did not successfully mount
+
+		return
+	end
+
+	auto mount
+	fsdevobj@ IODevice_RelevantMount + @ mount!
+
+	// add to head of mount list
+
+	auto h
+	IOMountListHead@ h!
+
+	if (h@)
+		mount@ h@ IOMount_Prev + !
+	end
+
+	h@ mount@ IOMount_Next + !
+	mount@ IOMountListHead!
+
+	1 IOMountCount +=
+
+	fcb@ IOFileControlBlockUnlock
+	IOUnlockDeviceDatabase
+end
+
+fn IOFilesystemUnmount { handle -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ // access
+	ACCESS_EXEC // permission
+	SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	fileobject@ // fileobject
+	IOUnmountObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOUnmountObject { fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	auto filetype
+	fcbp@ IOFileControlBlockPaged_FileType + @ filetype!
+
+	if (filetype@ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (filetype@ OSFILETYPE_BLOCKDEVICE ~=)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	1 IOLockDeviceDatabase ok!
+
+	if (ok@)
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock ok!
+
+	if (ok@)
+		IOUnlockDeviceDatabase
+
+		return
+	end
+
+	auto fsdevobj
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ fsdevobj!
+
+	auto mount
+	fsdevobj@ IODevice_RelevantMount + @ mount!
+
+	if (mount@ ~~)
+		fcb@ IOFileControlBlockUnlock
+		IOUnlockDeviceDatabase
+
+		STATUS_NOT_MOUNTED ok!
+
+		return
+	end
+
+	mount@ IOMount_FsDeviceObject + @ fsdevobj!
+
+	auto filesystem
+	mount@ IOMount_Filesystem + @ filesystem!
+
+	auto unmountfunc
+	filesystem@ IOFilesystem_UnmountFunction + @ unmountfunc!
+
+	if (DEBUGCHECKS)
+		if (unmountfunc@ ~~)
+			"IOUnmountObject: filesystem had no unmount function\n" KeCrash
+		end
+	end
+
+	fsdevobj@ // fsdevobj
+	unmountfunc@ IOFilesystemUnmountFunction ok!
+
+	if (ok@)
+		// failed to unmount
+
+		fcb@ IOFileControlBlockUnlock
+		IOUnlockDeviceDatabase
+
+		return
+	end
+
+	// remove from mount list
+	auto n
+	mount@ IOMount_Next + @ n!
+
+	if (n@)
+		mount@ IOMount_Prev + @ n@ IOMount_Prev + !
+	end
+
+	auto p
+	mount@ IOMount_Prev + @ p!
+
+	if (p@)
+		mount@ IOMount_Next + @ p@ IOMount_Next + !
+	end else // no prev means we were the head
+		mount@ IOMount_Next + @ IOMountListHead!
+	end
+
+	1 IOMountCount -=
+
+	fsdevobj@ IOVolumeDeviceUninitialize
+
+	fcb@ IOFileControlBlockUnlock
+	IOUnlockDeviceDatabase
+end
+
+fn IOMountUpdateFlags { newflags handle -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ // access
+	ACCESS_EXEC // permission
+	SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	newflags@ // newflags
+	fileobject@ // fileobject
+	IOMountUpdateFlagsObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOMountUpdateFlagsObject { newflags fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	auto filetype
+	fcbp@ IOFileControlBlockPaged_FileType + @ filetype!
+
+	if (filetype@ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (filetype@ OSFILETYPE_BLOCKDEVICE ~=)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto fsdevobj
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ fsdevobj!
+
+	auto mount
+	fsdevobj@ IODevice_RelevantMount + @ mount!
+
+	if (mount@ ~~)
+		fcb@ IOFileControlBlockUnlock
+
+		STATUS_NOT_MOUNTED ok!
+
+		return
+	end
+
+	mount@ IOMount_FsDeviceObject + @ fsdevobj!
+
+	auto oldflags
+	mount@ IOMount_Flags + @ oldflags!
+
+	if (oldflags@ newflags@ ==)
+		fcb@ IOFileControlBlockUnlock
+
+		return
+	end
+
+	auto filesystem
+	mount@ IOMount_Filesystem + @ filesystem!
+
+	auto updatefunc
+	filesystem@ IOFilesystem_UpdateFlagsFunction + @ updatefunc!
+
+	if (DEBUGCHECKS)
+		if (updatefunc@ ~~)
+			"IOMountUpdateFlagsObject: filesystem had no update flags function\n" KeCrash
+		end
+	end
+
+	newflags@ // newflags
+	oldflags@ // oldflags
+	fsdevobj@ // fsdeviceobject
+	updatefunc@ IOFilesystemUpdateFlagsFunction ok!
+
+	if (ok@ ~~)
+		newflags@ mount@ IOMount_Flags + !
+	end
+
+	fcb@ IOFileControlBlockUnlock
+end
+
+fn IOMountGetFilesystemName { buffer handle -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ // access
+	ACCESS_READ // permission
+	SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	buffer@ // buffer
+	fileobject@ // fileobject
+	IOMountGetFilesystemNameObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOMountGetFilesystemNameObject { buffer fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	auto filetype
+	fcbp@ IOFileControlBlockPaged_FileType + @ filetype!
+
+	if (filetype@ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (filetype@ OSFILETYPE_BLOCKDEVICE ~=)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	buffer@ // ptr
+	OBNAMEMAX // size
+	0 // word
+	memset
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLockShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto fsdevobj
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ fsdevobj!
+
+	auto mount
+	fsdevobj@ IODevice_RelevantMount + @ mount!
+
+	if (mount@ ~~)
+		fcb@ IOFileControlBlockUnlock
+
+		STATUS_NOT_MOUNTED ok!
+
+		return
+	end
+
+	mount@ IOMount_FsDeviceObject + @ fsdevobj!
+
+	buffer@ // dest
+	mount@ IOMount_Filesystem + @ IOFilesystem_Driver + @ IODriver_Name + @ // src
+	OBNAMEMAX 1 -
+	strncpy
+
+	fcb@ IOFileControlBlockUnlock
+end
+
+fn IOMountQueryAll { buffer maxquery -- count ok }
+	fnsection "PAGE$text"
+
+	buffer@ // ptr
+	maxquery@ OSMountInformation_SIZEOF * // size
+	0 // word
+	memset
+
+	1 IOLockDeviceDatabaseShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto mount
+	IOMountListHead@ mount!
+
+	0 count!
+
+	while (mount@)
+		if (maxquery@ ~~)
+			break
+		end
+
+		auto name
+		mount@ IOMount_UnderlyingDeviceObject + @ ObObjectName name!
+
+		if (name@)
+			buffer@ OSMountInformation_VolumeName + // dest
+			name@ // src
+			OBNAMEMAX 1 - // max
+			strncpy
+		end else
+			0 buffer@ OSMountInformation_VolumeName + sb
+		end
+
+		mount@ IOMount_Flags + @ buffer@ OSMountInformation_Flags + !
+
+		buffer@ OSMountInformation_FilesystemName + // dest
+		mount@ IOMount_Filesystem + @ IOFilesystem_Driver + @ IODriver_Name + @ // src
+		OBNAMEMAX 1 -
+		strncpy
+
+		if (mount@ IOMount_Filesystem + @ IOFilesystem_VolumeQueryFunction + @)
+			buffer@ // query
+			mount@ IOMount_FsDeviceObject + @ // fsdeviceobject
+			mount@ IOMount_Filesystem + @ IOFilesystem_VolumeQueryFunction + @ IOFilesystemVolumeQueryFunction drop
+		end
+
+		1 count +=
+		1 maxquery -=
+		OSMountInformation_SIZEOF buffer +=
+		mount@ IOMount_Next + @ mount!
+	end
+
+	IOUnlockDeviceDatabase
+end
+
+fn IOMountSetObject { query fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	auto filetype
+	fcbp@ IOFileControlBlockPaged_FileType + @ filetype!
+
+	if (filetype@ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (filetype@ OSFILETYPE_BLOCKDEVICE ~=)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto fsdevobj
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ fsdevobj!
+
+	auto mount
+	fsdevobj@ IODevice_RelevantMount + @ mount!
+
+	if (mount@ ~~)
+		fcb@ IOFileControlBlockUnlock
+
+		STATUS_NOT_MOUNTED ok!
+
+		return
+	end
+
+	mount@ IOMount_FsDeviceObject + @ fsdevobj!
+
+	auto filesystem
+	mount@ IOMount_Filesystem + @ filesystem!
+
+	auto setfunc
+	filesystem@ IOFilesystem_VolumeSetFunction + @ setfunc!
+
+	if (setfunc@ ~~)
+		fcb@ IOFileControlBlockUnlock
+
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	query@ // query
+	fsdevobj@ // fsdeviceobject
+	setfunc@ IOFilesystemVolumeSetFunction ok!
+
+	fcb@ IOFileControlBlockUnlock
+end
+
+fn IOMountSet { query handle -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ // access
+	ACCESS_WRITE // permission
+	SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	query@ // query
+	fileobject@ // fileobject
+	IOMountSetObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOiFilesystemSyncAll { shutdown -- ok }
+	fnsection "PAGE$text"
+
+	1 IOLockDeviceDatabaseShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto mount
+	IOMountListHead@ mount!
+
+	while (mount@)
+		auto filesystem
+		mount@ IOMount_Filesystem + @ filesystem!
+
+		auto flushfunc
+		filesystem@ IOFilesystem_FlushFunction + @ flushfunc!
+
+		if (flushfunc@)
+			shutdown@ // shutdown
+			mount@ IOMount_FsDeviceObject + @ // fsdeviceobject
+			flushfunc@ IOFilesystemFlushFunction drop
+		end
+
+		mount@ IOMount_Next + @ mount!
+	end
+
+	IOUnlockDeviceDatabase
+end
+
+fn IOiFilesystemReclaimFCB { -- }
+	fnsection "PAGE$text"
+
+	// iterate all of the mounted filesystems to find an FCB to reclaim.
+	// if the mount has been reclaimed from recently, skip it.
+
+	// NOTE: THIS MAY RECURSIVELY LOCK THE MOUNT LIST AND
+	// FILESYSTEM-SPECIFIC STRUCTURES.
+
+	auto count
+	IOFileControlBlockCount@ IOFileControlBlockPreferred@ - count!
+
+	if (count@ z<)
+		return
+	end
+
+	if (count@ ~~)
+		return
+	end
+
+	auto filesystem
+	auto reclaimfunc
+
+	auto trimmed
+
+	auto actual
+	0 actual!
+
+	auto skipped
+	0 skipped!
+
+	auto ok
+	0 IOLockDeviceDatabaseShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto mount
+	IOMountListHead@ mount!
+
+	while (mount@)
+		if (mount@ IOMount_ReclaimedFrom + @ ~~)
+			mount@ IOMount_Filesystem + @ filesystem!
+
+			filesystem@ IOFilesystem_ReclaimFunction + @ reclaimfunc!
+
+			if (reclaimfunc@)
+				count@ actual@ - // preferredcount
+				mount@ IOMount_FsDeviceObject + @ // fsdeviceobject
+				reclaimfunc@ IOFilesystemReclaimFunction trimmed!
+
+				if (trimmed@)
+					1 mount@ IOMount_ReclaimedFrom + !
+				end
+
+				trimmed@ actual +=
+
+				if (actual@ count@ >=)
+					break
+				end
+			end
+		end else
+			1 skipped +=
+		end
+
+		mount@ IOMount_Next + @ mount!
+	end
+
+	if (actual@ count@ >=)
+		IOUnlockDeviceDatabase
+
+		return
+	end
+
+	// we failed to reclaim enough.
+
+	if (skipped@ ~~)
+		// we didn't skip any mounts, so that can't be why.
+
+		IOUnlockDeviceDatabase
+
+		return
+	end
+
+	// iterate all the mounts again, this time we don't care if the mount has
+	// already been reclaimed from. we continue to iterate even after finding
+	// an FCB so that we can reset all of their ReclaimedFrom fields.
+
+	IOMountListHead@ mount!
+
+	while (mount@)
+		0 mount@ IOMount_ReclaimedFrom + !
+
+		if (actual@ count@ <)
+			mount@ IOMount_Filesystem + @ filesystem!
+
+			filesystem@ IOFilesystem_ReclaimFunction + @ reclaimfunc!
+
+			if (reclaimfunc@)
+				count@ actual@ - // preferredcount
+				mount@ IOMount_FsDeviceObject + @ // fsdeviceobject
+				reclaimfunc@ IOFilesystemReclaimFunction trimmed!
+
+				trimmed@ actual +=
+			end
+		end
+
+		mount@ IOMount_Next + @ mount!
+	end
+
+	IOUnlockDeviceDatabase
+end

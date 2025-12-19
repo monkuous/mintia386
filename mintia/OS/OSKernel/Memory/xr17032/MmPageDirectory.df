@@ -1,0 +1,113 @@
+//
+// Implements page directory management for the xr17032 architecture.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "../MmInternal.h"
+
+fn MiPageDirectoryDestroy { process -- }
+	fnsection "PAGE$text"
+
+	process@ KeProcess_PageDirectory + MiSystemPageFree
+
+	auto quotablock
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	1 // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUnchargeWS
+end
+
+fn MiPageDirectoryAlloc { process -- ok }
+	fnsection "PAGE$text"
+
+	auto quotablock
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	1 // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargeWS ok!
+
+	if (ok@)
+		return
+	end
+
+	auto pfdbe
+	ZEROMUST // pri
+	process@ KeProcess_PageDirectory + // pteaddr
+	MiSystemPageAllocate pfdbe!
+
+	pfdbe@ MmPFDBEToPhysicalAddress MiPageDirectoryCopy
+end
+
+fn MiPageDirectoryCopy { pdir -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto qp
+	pdir@ MiMapQuickPage qp!
+
+	qp@ 2048 + // dest
+	PAGEDIRECTORY 2048 + // src
+	2048 // size
+	memcpy
+
+	// create recursive mapping of page tables
+
+	pdir@ 12 >> 5 << PTE_V | PTE_W | PTE_K |
+	qp@ PAGETABLE 22 >> 2 << + !
+
+	qp@ MiUnmapQuickPage
+
+	ipl@ KeIPLLower
+end
+
+fn MiPageDirectoryReference { process -- }
+	auto pfdbe
+	PAGEDIRECTORY // vaddr
+	process@ KeProcess_PageDirectory + // pteaddr
+	MiSystemPageIn pfdbe!
+
+	auto pdir
+	pfdbe@ MmPFDBEToPhysicalAddress pdir!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto qp
+	pdir@ MiMapQuickPage qp!
+
+	// re-create recursive mapping of page tables since the physical
+	// address of the page directory may have changed.
+
+	pdir@ PAGESHIFT >> 5 << PTE_V | PTE_W | PTE_K |
+	qp@ PAGETABLE 22 >> 2 << + !
+
+	qp@ MiUnmapQuickPage
+
+	ipl@ KeIPLLower
+end
+
+fn MiPageDirectoryDereference { process -- }
+	process@ KeProcess_PageDirectory + MiSystemPageOut
+end

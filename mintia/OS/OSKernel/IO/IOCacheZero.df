@@ -1,0 +1,205 @@
+//
+// Implements efficient zeroing of newly allocated file space.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+const IOCACHEZEROMAXPAGES (IOCACHEZEROMAX PAGESHIFT >>)
+
+fn IOCacheZeroData { size offset flags fcb -- ok }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (offset@ fcb@ IOFileControlBlock_SizeInBytes + @ >=)
+			"IOCacheZeroData: offset >= filesize\n" KeCrash
+		end
+	end
+
+	// zeroes the specified range in the FCB. intended for use in efficiently
+	// zeroing new file allocations.
+	//
+	// if there are plentiful pages, it is done directly in the page cache by
+	// allocating zeroed pages for the range and marking them as modified.
+	// if the range is too large, or the file is uncached, the zeroes are
+	// written by direct (uncached) I/O to the driver.
+	//
+	// expects the FCB to be locked exclusively.
+
+	auto pagestozero
+	offset@ PAGEOFFSETMASK & size@ + PAGEOFFSETMASK + PAGESHIFT >> pagestozero!
+
+	if (flags@ OSFILEFLAG_NOCACHE & ~~)
+		if (fcb@ IOFileControlBlock_CacheInfoBlock + @)
+			if (pagestozero@ IOCACHEZEROMAXPAGES <=)
+				if (MmAvailablePageCount@ pagestozero@ + MmSufficientAvailablePageCount@ >=)
+					// all conditions for zeroing in the cache are met.
+
+					size@ // size
+					offset@ // offset
+					fcb@ // fcb
+					IOiCacheZeroInCache ok!
+
+					if (ok@ ~~)
+						// succeeded, return
+
+						return
+					end
+
+					// failed. drop down to the direct I/O codepath.
+				end
+			end
+		end
+	end
+
+	// some condition for zeroing in the cache was not met. zero the data with
+	// direct noncached I/O requests. We can also get here if zeroing in the
+	// cache failed for some reason.
+
+	size@ // size
+	offset@ // offset
+	fcb@ // fcb
+	IOCacheZeroDirectIO ok!
+end
+
+fn IOCacheZeroDirectIO { size offset fcb -- ok }
+	fnsection "PAGE$text"
+
+	// use direct IO with our funky constant zero page to obliterate the
+	// specified range.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	auto mdl
+	MmMDLHeader_SIZEOF IOCLUSTERMAX PAGESHIFT >> 1 + 4 * + alloc mdl!
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	// initialize all the MDL page frames to point to the zero page.
+
+	auto pagecount
+	IOCLUSTERMAX PAGESHIFT >> pagecount!
+
+	while (pagecount@)
+		MmConstantZeroPage@ mdlpos@!
+
+		4 mdlpos +=
+		1 pagecount -=
+	end
+
+	-1 mdlpos@!
+
+	while (size@ IOCLUSTERMAX >=)
+		KeThreadCurrent@ KeThreadAcceptKill drop
+
+		if (KeThreadCurrent@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+			// Keep the thread responsive to termination by checking this each
+			// iteration.
+
+			STATUS_KILLED ok!
+
+			return
+		end
+
+		KeThreadCurrent@ KeThreadIgnoreKill drop
+
+		IOCLUSTERMAX // length
+		offset@ PAGEOFFSETMASK & // vaddr
+		IOKFLAG_URGENT // kflags
+		mdl@ // mdl
+		MmMDLInitialize
+
+		MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+		0 // iop
+		0 // completionroutine
+		IODISPATCH_WRITE // functioncode
+		0 // flags
+		IOKFLAG_URGENT // kflags
+		mdl@ // mdl
+		offset@ // offset
+		fcb@ // fcb
+		IOMDLTransfer ok! drop
+
+		if (ok@)
+			KeThreadCurrent@ KeThreadAcceptKill drop
+
+			return
+		end
+
+		IOCLUSTERMAX offset +=
+		IOCLUSTERMAX size -=
+	end
+
+	if (size@)
+		size@ // length
+		offset@ PAGEOFFSETMASK & // vaddr
+		IOKFLAG_URGENT // kflags
+		mdl@ // mdl
+		MmMDLInitialize
+
+		MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+		0 // iop
+		0 // completionroutine
+		IODISPATCH_WRITE // functioncode
+		0 // flags
+		IOKFLAG_URGENT // kflags
+		mdl@ // mdl
+		offset@ // offset
+		fcb@ // fcb
+		IOMDLTransfer ok! drop
+	end
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn IOiCacheZeroInCache { size offset fcb -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	auto pagestozero
+	offset@ PAGEOFFSETMASK & size@ + PAGEOFFSETMASK + PAGESHIFT >> pagestozero!
+
+	while (pagestozero@)
+		MmThrottle
+
+		1 // modify
+		offset@ // offset
+		fcb@ // fcb
+		IOCacheAddZeroPage
+
+		1 pagestozero -=
+		PAGESIZE offset +=
+	end
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end

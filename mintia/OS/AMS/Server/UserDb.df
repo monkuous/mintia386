@@ -1,0 +1,461 @@
+//
+// Management of the user information database.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSCrypt.h"
+
+#include "AmsServer.h"
+
+// We use a pair of .cfg files as the "database". This is not efficient. We
+// could at least cache the lookups.
+
+var AmsDbUserConfig 0
+var AmsDbGroupConfig 0
+
+var AmsDbUserNextUIDKey 0
+var AmsDbUserNextUID 0
+
+var AmsDbGroupNextGIDKey 0
+var AmsDbGroupNextGID 0
+
+fn AmsDbOpen { -- ok }
+	"/mintia/users.cfg" // path
+	0 // create
+	1 // write
+	OSConfigFileLoad ok! AmsDbUserConfig!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to open users.cfg: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	auto meta
+	"" // sectionname
+	AmsDbUserConfig@ // config
+	OSConfigGetSection ok! meta!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to find meta section: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	"nextuid" // keyname
+	meta@ // section
+	OSConfigGetKey ok! meta!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to find nextuid: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	meta@ AmsDbUserNextUIDKey!
+
+	meta@ OSConfigGetKeyValue meta!
+
+	if (meta@)
+		meta@ atoi meta!
+	end
+
+	meta@ AmsDbUserNextUID!
+
+	"/mintia/groups.cfg" // path
+	0 // create
+	1 // write
+	OSConfigFileLoad ok! AmsDbGroupConfig!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to open groups.cfg: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	"" // sectionname
+	AmsDbGroupConfig@ // config
+	OSConfigGetSection ok! meta!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to find meta section: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	"nextgid" // keyname
+	meta@ // section
+	OSConfigGetKey ok! meta!
+
+	if (ok@)
+		ok@ OSStatusGetName "\namssrv: failed to find nextgid: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	meta@ AmsDbGroupNextGIDKey!
+
+	meta@ OSConfigGetKeyValue meta!
+
+	if (meta@)
+		meta@ atoi meta!
+	end
+
+	meta@ AmsDbGroupNextGID!
+end
+
+fn AmsDbClose { -- }
+	AmsDbUserConfig@ OSConfigFileFree
+	AmsDbGroupConfig@ OSConfigFileFree
+end
+
+fn AmsDbUserWrite { -- ok }
+	// mask out termination while writing the db.
+
+	auto sigact
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction sigact!
+
+	AmsDbUserConfig@ OSConfigFileWrite ok!
+
+	sigact@ // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction drop
+
+	if (ok@)
+		"amssrv: warning: failed to writeback user db!\n" OSGetStdErr FPrintf
+	end
+end
+
+fn AmsDbGroupWrite { -- ok }
+	// mask out termination while writing the db.
+
+	auto sigact
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction sigact!
+
+	AmsDbGroupConfig@ OSConfigFileWrite ok!
+
+	sigact@ // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction drop
+
+	if (ok@)
+		"amssrv: warning: failed to writeback group db!\n" OSGetStdErr FPrintf
+	end
+end
+
+fn AmsDbUserCreate { username -- uid userptr ok }
+	AmsDbUserNextUID@ uid!
+
+	username@ // sectionname
+	AmsDbUserConfig@ // config
+	OSConfigCreateSection ok! userptr!
+
+	if (ok@)
+		return
+	end
+
+	uid@ // value
+	"uid" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	1 AmsDbUserNextUID +=
+
+	auto nuid
+	16 alloc nuid!
+
+	AmsDbUserNextUID@ // n
+	nuid@ // str
+	itoa
+
+	nuid@ // valueptr
+	AmsDbUserNextUIDKey@ // key
+	OSConfigSetKey ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		1 AmsDbUserNextUID -=
+
+		return
+	end
+end
+
+fn AmsDbUserDelete { userptr -- }
+	userptr@ OSConfigDeleteSection
+end
+
+fn AmsDbUserGetByName { username -- userptr ok }
+	if (username@ "" strcmp)
+		STATUS_NO_SUCH_USER ok!
+		return
+	end
+
+	username@ // sectionname
+	AmsDbUserConfig@ // config
+	OSConfigGetSection ok! userptr!
+
+	if (ok@)
+		STATUS_NO_SUCH_USER ok!
+	end
+end
+
+fn AmsDbUserGetByUID { uid -- userptr ok }
+	auto iterator
+	AmsDbUserConfig@ OSConfigGetSectionIterator ok! iterator!
+
+	while (iterator@)
+		iterator@ // iterator
+		AmsDbUserConfig@ // config
+		OSConfigNextSection ok! iterator! userptr!
+
+		if (ok@)
+			return
+		end
+
+		if (userptr@ OSConfigGetSectionName "" strcmp)
+			continue
+		end
+
+		auto key
+		"uid" // keyname
+		userptr@ // section
+		OSConfigGetKey ok! key!
+
+		if (ok@ ~~)
+			auto chkuid
+			key@ OSConfigGetKeyValue chkuid!
+
+			if (chkuid@ ~~)
+				continue
+			end
+
+			chkuid@ atoi chkuid!
+
+			if (chkuid@ uid@ ==)
+				return
+			end
+		end
+	end
+
+	STATUS_NO_SUCH_USER ok!
+end
+
+fn AmsDbUserGetName { userptr -- username }
+	userptr@ OSConfigGetSectionName username!
+end
+
+fn AmsDbUserGetPropertyNumeric { property userptr -- value ok }
+	property@ // property
+	userptr@ // userptr
+	AmsDbUserGetProperty ok! value!
+
+	if (ok@)
+		return
+	end
+
+	value@ atoi value!
+end
+
+fn AmsDbUserGetProperty { property userptr -- value ok }
+	auto key
+	property@ // keyname
+	userptr@ // section
+	OSConfigGetKey ok! key!
+
+	if (ok@)
+		return
+	end
+
+	key@ OSConfigGetKeyValue value!
+
+	if (value@ ~~)
+		-1 ok!
+	end
+end
+
+fn AmsDbUserSetPropertyNumeric { value property userptr -- ok }
+	auto str
+	16 alloc str!
+
+	value@ // n
+	str@ // str
+	itoa
+
+	str@ // value
+	property@ // property
+	userptr@ // userptr
+	AmsDbUserSetProperty ok!
+end
+
+fn AmsDbUserSetProperty { value property userptr -- ok }
+	value@ // valueptr
+	property@ // keyname
+	userptr@ // section
+	OSConfigCreateKey ok! drop
+end
+
+fn AmsDbUserGetIterator { -- iterator ok }
+	AmsDbUserConfig@ OSConfigGetSectionIterator ok! iterator!
+end
+
+fn AmsDbUserNext { iterator -- userptr nextiterator ok }
+	iterator@ // iterator
+	AmsDbUserConfig@ // config
+	OSConfigNextSection ok! nextiterator! userptr!
+end
+
+fn AmsDbUserSetName { name userptr -- }
+	name@ // name
+	userptr@ // section
+	OSConfigSetSectionName
+end
+
+// groups
+
+fn AmsDbGroupCreate { groupname -- gid groupptr ok }
+	AmsDbGroupNextGID@ gid!
+
+	groupname@ // sectionname
+	AmsDbGroupConfig@ // config
+	OSConfigCreateSection ok! groupptr!
+
+	if (ok@)
+		return
+	end
+
+	gid@ // value
+	"gid" // property
+	groupptr@ // groupptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		groupptr@ AmsDbGroupDelete
+
+		return
+	end
+
+	1 AmsDbGroupNextGID +=
+
+	auto ngid
+	16 alloc ngid!
+
+	AmsDbGroupNextGID@ // n
+	ngid@ // str
+	itoa
+
+	ngid@ // valueptr
+	AmsDbGroupNextGIDKey@ // key
+	OSConfigSetKey ok!
+
+	if (ok@)
+		groupptr@ AmsDbGroupDelete
+
+		1 AmsDbGroupNextGID -=
+
+		return
+	end
+end
+
+fn AmsDbGroupDelete { groupptr -- }
+	groupptr@ OSConfigDeleteSection
+end
+
+fn AmsDbGroupGetByName { groupname -- groupptr ok }
+	if (groupname@ "" strcmp)
+		STATUS_NO_SUCH_GROUP ok!
+		return
+	end
+
+	groupname@ // sectionname
+	AmsDbGroupConfig@ // config
+	OSConfigGetSection ok! groupptr!
+
+	if (ok@)
+		STATUS_NO_SUCH_GROUP ok!
+	end
+end
+
+fn AmsDbGroupGetByGID { gid -- groupptr ok }
+	auto iterator
+	AmsDbGroupConfig@ OSConfigGetSectionIterator ok! iterator!
+
+	while (iterator@)
+		iterator@ // iterator
+		AmsDbGroupConfig@ // config
+		OSConfigNextSection ok! iterator! groupptr!
+
+		if (ok@)
+			return
+		end
+
+		if (groupptr@ OSConfigGetSectionName "" strcmp)
+			continue
+		end
+
+		auto key
+		"gid" // keyname
+		groupptr@ // section
+		OSConfigGetKey ok! key!
+
+		if (ok@ ~~)
+			auto chkgid
+			key@ OSConfigGetKeyValue chkgid!
+
+			if (chkgid@ ~~)
+				continue
+			end
+
+			chkgid@ atoi chkgid!
+
+			if (chkgid@ gid@ ==)
+				return
+			end
+		end
+	end
+
+	STATUS_NO_SUCH_GROUP ok!
+end
+
+fn AmsDbGroupGetName { groupptr -- groupname }
+	groupptr@ OSConfigGetSectionName groupname!
+end
+
+fn AmsDbGroupGetProperty { property groupptr -- value ok }
+	auto key
+	property@ // keyname
+	groupptr@ // section
+	OSConfigGetKey ok! key!
+
+	if (ok@)
+		return
+	end
+
+	key@ OSConfigGetKeyValue value!
+
+	if (value@ ~~)
+		-1 ok!
+	end
+end
+
+fn AmsDbGroupGetIterator { -- iterator ok }
+	AmsDbGroupConfig@ OSConfigGetSectionIterator ok! iterator!
+end
+
+fn AmsDbGroupNext { iterator -- groupptr nextiterator ok }
+	iterator@ // iterator
+	AmsDbGroupConfig@ // config
+	OSConfigNextSection ok! nextiterator! groupptr!
+end
+
+fn AmsDbGroupSetName { name groupptr -- }
+	name@ // name
+	groupptr@ // section
+	OSConfigSetSectionName
+end

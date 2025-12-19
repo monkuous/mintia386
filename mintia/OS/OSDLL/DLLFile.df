@@ -1,0 +1,120 @@
+//
+// Implements userspace file object management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSMount.h"
+
+#include "OSDLL.h"
+
+fn OSSetUMask { umask -- }
+	umask@ OSPEB OSPEBs_UMask + !
+end
+
+fn OSGetUMask { -- umask }
+	OSPEB OSPEBs_UMask + @ umask!
+end
+
+fn OSRequestInitialize { requestblock -- }
+	requestblock@ // ptr
+	OSRequest_SIZEOF // sz
+	0 // word
+	memset
+
+	OSNONE requestblock@ OSRequest_PortHandle + !
+	OSNONE requestblock@ OSRequest_EventHandle + !
+end
+
+fn OSFileInformationInitialize { info -- }
+	// initialize a file information structure to a no-op state
+
+	info@ // ptr
+	OSFileInformation_SIZEOF // sz
+	0 // word
+	memset
+
+	// -1 in the ms part indicates we don't want to change this timestamp.
+	// this is obviously a normally impossible value since ms only ranges
+	// between 0 and 999.
+
+	-1 info@ OSFileInformation_ATimeMsPart + !
+	-1 info@ OSFileInformation_MTimeMsPart + !
+	-1 info@ OSFileInformation_CTimeMsPart + !
+	-1 info@ OSFileInformation_CreationTimeMsPart + !
+end
+
+fn OSMountInformationInitialize { info -- }
+	// initialize a mount information structure to a no-op state
+
+	info@ // ptr
+	OSMountInformation_SIZEOF // sz
+	0 // word
+	memset
+end
+
+fn OSFileCreateRelative { filetype permissions flags access initialobjecthandle path -- handle ok }
+	filetype@ // filetype
+	permissions@ OSPEB OSPEBs_UMask + @ ~ & // permissions
+	flags@ // flags
+	access@ // access
+	initialobjecthandle@ // initialobjecthandle
+	path@ // path
+	SysCreateRelative ok! handle!
+end
+
+fn OSFileCreate { filetype permissions flags access path -- handle ok }
+	auto dirh
+	path@ DLLPathToHandleAndRelativePath ok! path! dirh!
+
+	if (ok@)
+		return
+	end
+
+	filetype@ // filetype
+	permissions@ // permissions
+	flags@ // flags
+	access@ // access
+	dirh@ // initialobjecthandle
+	path@ // path
+	OSFileCreateRelative ok! handle!
+end
+
+fn OSFileOpenRelative { filetype flags access initialobjecthandle path -- handle ok }
+	if (flags@ OSFILEFLAG_CREATE &)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	filetype@ // filetype
+	OSTYPE_FILE // objecttype
+	flags@ // flags
+	access@ // access
+	initialobjecthandle@ // initialobjecthandle
+	path@ // path
+	OSOpenRelative ok! handle!
+end
+
+fn OSFileOpen { filetype flags access path -- handle ok }
+	auto dirh
+	path@ DLLPathToHandleAndRelativePath ok! path! dirh!
+
+	if (ok@)
+		return
+	end
+
+	filetype@ // filetype
+	flags@ // flags
+	access@ // access
+	dirh@ // initialobjecthandle
+	path@ // path
+	OSFileOpenRelative ok! handle!
+end

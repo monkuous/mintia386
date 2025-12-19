@@ -1,0 +1,863 @@
+//
+// Implements disk block management for the AisixFS driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "AisixFS.h"
+
+fn AFSBlockBitmapReadFAT { mount -- ok }
+	fnsection "PAGE$text"
+
+	// read the entire FAT page-by-page to construct an in-memory bitmap of
+	// free blocks.
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto blocks
+	afsdata@ AFSData_VolSize + @ blocks!
+
+	auto usedblocks
+	0 usedblocks!
+
+	auto runlength
+	0 runlength!
+
+	auto runtype
+	1 runtype!
+
+	auto runstart
+	0 runstart!
+
+	auto blkno
+	0 blkno!
+
+	auto fatbcb
+	0 fatbcb!
+
+	auto diskoff
+	0 diskoff!
+
+	auto mappedpage
+	-1 mappedpage!
+
+	auto volfcb
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ volfcb!
+
+	auto fatdata
+
+	while (blkno@ blocks@ <)
+		afsdata@ AFSData_FATStart + @ AFSBLOCKSHIFT << blkno@ 2 << + diskoff!
+
+		if (diskoff@ FILEVIEWNUMBERMASK & mappedpage@ FILEVIEWNUMBERMASK & ~=)
+			// must read in a new FAT block
+
+			if (fatbcb@)
+				fatbcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			diskoff@ // offset
+			volfcb@ // fcb
+			VcFileControlBlockMapAndPin ok! fatbcb! fatdata!
+
+			if (ok@)
+				return
+			end
+
+			diskoff@ mappedpage!
+		end
+
+		auto type
+		fatdata@@ type!
+
+		if (type@ ~~)
+			if (runtype@)
+				if (AFSDEBUG)
+					runlength@ runstart@ "setrun start=%d length=%d\n" Printf
+				end
+
+				runlength@ usedblocks +=
+
+				runlength@ // runlength
+				runstart@ // index
+				afsdata@ AFSData_FreeBlockBitmap + // header
+				ComBitmapSetBits
+
+				0 runtype!
+				1 runlength!
+				blkno@ runstart!
+			end else
+				1 runlength +=
+			end
+		end elseif (runtype@ ~~)
+			if (AFSDEBUG)
+				runlength@ runstart@ "clearrun start=%d length=%d\n" Printf
+			end
+
+			runlength@ // runlength
+			runstart@ // index
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapClearBits
+
+			1 runtype!
+			1 runlength!
+			blkno@ runstart!
+		end else
+			1 runlength +=
+		end
+
+		4 fatdata +=
+		1 blkno +=
+	end
+
+	if (runlength@)
+		if (runtype@)
+			if (AFSDEBUG)
+				runlength@ runstart@ "final setrun start=%d length=%d\n" Printf
+			end
+
+			runlength@ usedblocks +=
+
+			runlength@ // runlength
+			runstart@ // index
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapSetBits
+		end else
+			if (AFSDEBUG)
+				runlength@ runstart@ "final clearrun start=%d length=%d\n" Printf
+			end
+
+			runlength@ // runlength
+			runstart@ // index
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapClearBits
+		end
+	end
+
+	if (fatbcb@)
+		fatbcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	if (AFSDEBUG 2 >=)
+		blocks@ "total blocks=%d\n" Printf
+
+		2000 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+	end
+
+	usedblocks@ afsdata@ AFSData_DataStart + @ -
+	afsdata@ AFSData_UsedBlocks + !
+end
+
+fn AFSBlockBitmapInitialize { mount -- ok }
+	fnsection "PAGE$text"
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto blocks
+	afsdata@ AFSData_VolSize + @ blocks!
+
+	0 afsdata@ AFSData_FreeBlockHint + !
+
+	auto bmpsz
+	blocks@ 7 + 3 >> bmpsz!
+
+	auto bmp
+	bmpsz@ // size
+	'AFSb' // tag
+	PAGED // flags
+	MmAllocWithTag ok! bmp!
+
+	if (ok@)
+		return
+	end
+
+	blocks@ // sizeinbits
+	bmp@ // data
+	afsdata@ AFSData_FreeBlockBitmap + // header
+	ComBitmapInitialize
+
+	"AFSBlockBitmapMutex" // name
+	KERNELMODE // mode
+	afsdata@ AFSData_FreeBlockBitmapMutex + // mutex
+	KeMutexInitialize
+
+	mount@ AFSBlockBitmapReadFAT ok!
+
+	if (ok@)
+		bmp@ MmFree
+	end
+end
+
+fn AFSBlockBitmapUninitialize { mount -- }
+	fnsection "PAGE$text"
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto blocks
+	afsdata@ AFSData_VolSize + @ blocks!
+
+	auto bmpsz
+	blocks@ 7 + 3 >> bmpsz!
+
+	afsdata@ AFSData_FreeBlockBitmap + ComBitmapGetData MmFree
+end
+
+fn AFSBlockBitmapLock { alertable mount -- ok }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	mount@ IOMount_Extension + @ AFSData_FreeBlockBitmapMutex + // object
+	KeThreadWaitForObject ok!
+end
+
+fn AFSBlockBitmapUnlock { mount -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	mount@ IOMount_Extension + @ AFSData_FreeBlockBitmapMutex + // mutex
+	KeMutexRelease drop
+end
+
+fn AFSWalkFAT { startcount startblkno mount -- blkno ok }
+	startblkno@ blkno!
+
+	auto fatbcb
+	0 fatbcb!
+
+	auto diskoff
+	0 diskoff!
+
+	auto mappedpage
+	-1 mappedpage!
+
+	auto volfcb
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ volfcb!
+
+	0 ok!
+
+	auto fatdata
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	while (startcount@)
+		if (blkno@ 0xFFFFFFFF ==)
+			"AFSWalkFAT: blkno == 0xFFFFFFFF\n" KeCrash
+		end
+
+		afsdata@ AFSData_FATStart + @ AFSBLOCKSHIFT << blkno@ 2 << + diskoff!
+
+		if (diskoff@ FILEVIEWNUMBERMASK & mappedpage@ FILEVIEWNUMBERMASK & ~=)
+			// must read in a new FAT block
+
+			if (fatbcb@)
+				fatbcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			diskoff@ FILEVIEWNUMBERMASK & // offset
+			volfcb@ // fileobject
+			VcFileControlBlockMapAndPin ok! fatbcb! fatdata!
+
+			if (ok@)
+				return
+			end
+
+			diskoff@ mappedpage!
+		end
+
+		fatdata@ diskoff@ FILEVIEWOFFSETMASK & + @ blkno!
+
+		1 startcount -=
+	end
+
+	if (fatbcb@)
+		fatbcb@ VcBufferDecrementMapAndUnpin
+	end
+end
+
+fn AFSBlockDeallocateChain { first blkno mount -- }
+	fnsection "PAGE$text"
+
+	0 // alertable
+	mount@ // mount
+	AFSBlockBitmapLock drop
+
+	auto fatbcb
+	0 fatbcb!
+
+	auto diskoff
+	0 diskoff!
+
+	auto mappedpage
+	-1 mappedpage!
+
+	auto volfcb
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ volfcb!
+
+	auto blocks
+	0 blocks!
+
+	auto ok
+
+	auto fatdata
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	while (blkno@ 0xFFFFFFFF ~=)
+		afsdata@ AFSData_FATStart + @ AFSBLOCKSHIFT << blkno@ 2 << + diskoff!
+
+		if (diskoff@ FILEVIEWNUMBERMASK & mappedpage@ FILEVIEWNUMBERMASK & ~=)
+			// must read in a new FAT block
+
+			if (fatbcb@)
+				fatbcb@ VcBufferDirty
+				fatbcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			diskoff@ FILEVIEWNUMBERMASK & // offset
+			volfcb@ // fcb
+			VcFileControlBlockMapAndPin ok! fatbcb! fatdata!
+
+			if (ok@)
+				ok@ "AFSBlockDeallocateChain: failed to read FAT block (%i)\n" Printf
+
+				mount@ AFSBlockBitmapUnlock
+
+				return
+			end
+
+			diskoff@ mappedpage!
+		end
+
+		if (first@ ~~)
+			1 blocks +=
+
+			1 // runlength
+			blkno@ // index
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapClearBits
+		end
+
+		fatdata@ diskoff@ FILEVIEWOFFSETMASK & + @ blkno!
+
+		if (first@)
+			0xFFFFFFFF fatdata@ diskoff@ FILEVIEWOFFSETMASK & + !
+			0 first!
+		end else
+			0 fatdata@ diskoff@ FILEVIEWOFFSETMASK & + !
+		end
+	end
+
+	if (fatbcb@)
+		fatbcb@ VcBufferDirty
+		fatbcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	blocks@ afsdata@ AFSData_UsedBlocks + -=
+
+	mount@ AFSBlockBitmapUnlock
+end
+
+fn AFSBlockAllocateChain { pintable blocks lastblkno zero mount -- startblkno ok }
+	fnsection "PAGE$text"
+
+	0 // alertable
+	mount@ // mount
+	AFSBlockBitmapLock drop
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto run
+
+	auto blkno
+	afsdata@ AFSData_FreeBlockHint + @ // hint
+	blocks@ // runlength
+	afsdata@ AFSData_FreeBlockBitmap + // header
+	ComBitmapFindRun ok! blkno!
+
+	if (ok@ ~~)
+		// we were able to allocate the whole thing in one run!
+
+		blocks@ // runlength
+		blkno@ // index
+		afsdata@ AFSData_FreeBlockBitmap + // header
+		ComBitmapSetBits
+
+		blkno@ afsdata@ AFSData_FreeBlockHint + !
+
+		blocks@ afsdata@ AFSData_UsedBlocks + +=
+
+		// don't need to keep the bitmap locked since we don't need to use it
+		// now that we already found a big run.
+
+		mount@ AFSBlockBitmapUnlock
+
+		1 run!
+	end else
+		// need to allocate one block at a time.
+
+		0 run!
+	end
+
+	auto fatbcb
+	0 fatbcb!
+
+	auto diskoff
+	0 diskoff!
+
+	auto mappedpage
+	-1 mappedpage!
+
+	auto volfcb
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ volfcb!
+
+	auto first
+
+	// if we fail and need to undo the allocation chain we already did,
+	// does AFSBlockDeallocateChain need to write back a 0xFFFFFFFF or not?
+	// we decide that here.
+
+	if (lastblkno@ -1 ==)
+		0 first!
+		-1 startblkno!
+	end else
+		afsdata@ AFSData_FATStart + @ AFSBLOCKSHIFT << lastblkno@ 2 << + diskoff!
+
+		diskoff@ FILEVIEWNUMBERMASK & // offset
+		volfcb@ // fcb
+		VcFileControlBlockMapAndPin ok! fatbcb! fatdata!
+
+		if (ok@)
+			ok@ "AFSBlockAllocateChain: failed to read FAT block (%i)\n" Printf
+
+			return
+		end
+
+		diskoff@ mappedpage!
+
+		if (DEBUGCHECKS)
+			if (fatdata@ diskoff@ FILEVIEWOFFSETMASK & + @ 0xFFFFFFFF ~=)
+				fatdata@ diskoff@ FILEVIEWOFFSETMASK & + @
+				"AFSBlockAllocateChain: final block had link %x\n" KeCrash
+			end
+		end
+
+		1 first!
+		lastblkno@ startblkno!
+	end
+
+	auto killstart
+	lastblkno@ killstart!
+
+	auto i
+	0 i!
+
+	auto fatdata
+
+	while (i@ blocks@ <)
+		if (run@ ~~)
+			// allocate next block
+
+			afsdata@ AFSData_FreeBlockHint + @ // hint
+			1 // runlength
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapFindRun ok! blkno!
+
+			if (ok@)
+				// no space left on disk.
+				// undo the allocations we already did.
+
+				mount@ AFSBlockBitmapUnlock
+
+				if (fatbcb@)
+					fatbcb@ VcBufferDirty
+					fatbcb@ VcBufferDecrementMapAndUnpin
+				end
+
+				if (killstart@ -1 ~=)
+					first@ // first
+					killstart@ // blkno
+					mount@ // mount
+					AFSBlockDeallocateChain
+				end
+
+				STATUS_END_OF_DISK ok!
+
+				return
+			end
+
+			1 // runlength
+			blkno@ // index
+			afsdata@ AFSData_FreeBlockBitmap + // header
+			ComBitmapSetBits
+
+			blkno@ afsdata@ AFSData_FreeBlockHint + !
+
+			1 afsdata@ AFSData_UsedBlocks + +=
+		end
+
+		if (pintable@)
+			blkno@ pintable@!
+			4 pintable +=
+		end
+
+		if (fatbcb@)
+			blkno@ fatdata@ diskoff@ FILEVIEWOFFSETMASK & + !
+		end else
+			if (DEBUGCHECKS)
+				if (startblkno@ -1 ~=)
+					"AFSBlockAllocateChain: startblkno != -1\n" KeCrash
+				end
+			end
+
+			blkno@ killstart!
+		end
+
+		if (startblkno@ -1 ==)
+			blkno@ startblkno!
+		end
+
+		afsdata@ AFSData_FATStart + @ AFSBLOCKSHIFT << blkno@ 2 << + diskoff!
+
+		if (diskoff@ FILEVIEWNUMBERMASK & mappedpage@ FILEVIEWNUMBERMASK & ~=)
+			// must read in a new FAT block
+
+			if (fatbcb@)
+				fatbcb@ VcBufferDirty
+				fatbcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			diskoff@ FILEVIEWNUMBERMASK & // offset
+			volfcb@ // fcb
+			VcFileControlBlockMapAndPin ok! fatbcb! fatdata!
+
+			if (ok@)
+				ok@ "AFSBlockAllocateChain: failed to read FAT block (%i)\n" Printf
+
+				if (run@ ~~)
+					mount@ AFSBlockBitmapUnlock
+				end
+
+				return
+			end
+
+			diskoff@ mappedpage!
+		end
+
+		0xFFFFFFFF fatdata@ diskoff@ FILEVIEWOFFSETMASK & + !
+		blkno@ lastblkno!
+
+		if (run@)
+			1 blkno +=
+		end
+
+		1 i +=
+	end
+
+	if (fatbcb@)
+		fatbcb@ VcBufferDirty
+		fatbcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	if (run@ ~~)
+		mount@ AFSBlockBitmapUnlock
+	end
+end
+
+fn AFSBlockMap { blkoff fcb -- blkno ok }
+	// convert a block offset within an FCB to an absolute disk block number.
+
+	// we use two FAT lookup reference points: the file's first block number,
+	// and that of the last successful lookup. if blkoff is >= the last
+	// successful lookup, we can use it as a jumping off point to speed
+	// things up. if thats not the case, we have to start at the first block
+	// number.
+
+	0 ok!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto fcbnp
+	fcbdata@ AFSFCBData_Nonpaged + @ fcbnp!
+
+	auto firstlink
+	fcbdata@ AFSFCBData_FirstFATLink + @ firstlink!
+
+	auto fcbblocks
+	fcb@ IOFileControlBlock_SizeInBytes + @ AFSBLOCKOFFMASK + AFSBLOCKSHIFT >> fcbblocks!
+
+	if (blkoff@ fcbblocks@ >=)
+		"AFSBlockMap: blkoff > size in blocks\n" KeCrash
+	end
+
+	if (blkoff@ 0 ==)
+		// bit of a fast path
+
+		firstlink@ blkno!
+
+		return
+	end
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto lastlookup
+	fcbnp@ AFSFCBDataNonpaged_LastFATLinkBlkOff + @ lastlookup!
+
+	auto walkcount
+	auto walkstart
+
+	if (blkoff@ lastlookup@ >=)
+		blkoff@ lastlookup@ - walkcount!
+		fcbnp@ AFSFCBDataNonpaged_LastFATLinkValue + @ walkstart!
+	end else
+		blkoff@ walkcount!
+		firstlink@ walkstart!
+	end
+
+	rs@ HALCPUInterruptRestore
+
+	walkcount@ // startcount
+	walkstart@ // startblkno
+	fcb@ FSFileControlBlockGetMount // mount
+	AFSWalkFAT ok! blkno!
+
+	if (ok@)
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (blkno@ 0xFFFFFFFF ==)
+			"AFSBlockMap: blkno=0xFFFFFFFF\n" KeCrash
+		end
+	end
+
+	HALCPUInterruptDisable rs!
+
+	if (blkoff@ lastlookup@ >= blkoff@ 8 >= ||)
+		blkoff@ fcbnp@ AFSFCBDataNonpaged_LastFATLinkBlkOff + !
+		blkno@ fcbnp@ AFSFCBDataNonpaged_LastFATLinkValue + !
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn AFSUpdateHint { fcbnp link op -- }
+	// nonpaged helper function
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (op@)
+		// we grew the file above zero size, so we want to make sure the hint
+		// points to the new first block correctly.
+
+		if (fcbnp@ AFSFCBDataNonpaged_LastFATLinkBlkOff + @ ~~)
+			link@ fcbnp@ AFSFCBDataNonpaged_LastFATLinkValue + !
+		end
+	end else
+		// we shrunk the file, so we want to reset the hint.
+
+		0 fcbnp@ AFSFCBDataNonpaged_LastFATLinkBlkOff + !
+		link@ fcbnp@ AFSFCBDataNonpaged_LastFATLinkValue + !
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn AFSBlockTruncate { pintable newblocks oldblocks zero flags fcb -- ok }
+	fnsection "PAGE$text"
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto fcbnp
+	fcbdata@ AFSFCBData_Nonpaged + @ fcbnp!
+
+	auto firstlink
+	fcbdata@ AFSFCBData_FirstFATLink + @ firstlink!
+
+	auto walkcount
+	auto walkstart
+
+	0 ok!
+
+	if (newblocks@ oldblocks@ <)
+		// truncating, we need to seek to the new last block
+
+		if (newblocks@)
+			newblocks@ 1 - walkcount!
+		end else
+			0 walkcount!
+		end
+
+		firstlink@ walkstart!
+	end else
+		// growing, we need to seek to the last block
+
+		if (oldblocks@)
+			oldblocks@ 1 - walkcount!
+			firstlink@ walkstart!
+		end else
+			-1 walkcount!
+		end
+	end
+
+	auto blkno
+
+	if (walkcount@)
+		if (walkcount@ -1 ~=)
+			walkcount@ // startcount
+			walkstart@ // startblkno
+			fcb@ FSFileControlBlockGetMount // mount
+			AFSWalkFAT ok! blkno!
+
+			if (ok@)
+				return
+			end
+		end else
+			-1 blkno!
+		end
+	end else
+		walkstart@ blkno!
+	end
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	if (newblocks@ oldblocks@ <)
+		if (DEBUGCHECKS)
+			if (blkno@ -1 ==)
+				"AFSBlockTruncate: blkno == -1\n" KeCrash
+			end
+		end
+
+		if (newblocks@)
+			1 // first
+			blkno@ // blkno
+			fcb@ FSFileControlBlockGetMount // mount
+			AFSBlockDeallocateChain
+		end else
+			0 // first
+			blkno@ // blkno
+			fcb@ FSFileControlBlockGetMount // mount
+			AFSBlockDeallocateChain
+
+			0xFFFFFFFF fcbdata@ AFSFCBData_FirstFATLink + !
+		end
+
+		fcbnp@ // fcbnp
+		firstlink@ // link
+		0 // op
+		AFSUpdateHint
+	end else
+		auto startblock
+
+		pintable@ // pintable
+		newblocks@ oldblocks@ - // blocks
+		blkno@ // lastblock
+		zero@ // zero
+		fcb@ FSFileControlBlockGetMount // mount
+		AFSBlockAllocateChain ok! startblock!
+
+		if (ok@)
+			KeThreadCurrent@ KeThreadAcceptKill drop
+
+			return
+		end
+
+		if (fcbdata@ AFSFCBData_FirstFATLink + @ -1 ==)
+			if (startblock@ -1 ==)
+				"AFSBlockTruncate: startblock == -1\n" KeCrash
+			end
+
+			startblock@ fcbdata@ AFSFCBData_FirstFATLink + !
+
+			fcbnp@ // fcbnp
+			startblock@ // link
+			1 // op
+			AFSUpdateHint
+		end
+
+		if (zero@)
+			// zero out the chain now that we know it was allocated.
+
+			KeThreadCurrent@ KeThreadAcceptKill drop
+
+			0 fcb@ IOFileControlBlockUnlockForPaging
+
+			if (zero@ 1 ==)
+				newblocks@ oldblocks@ - AFSBLOCKSHIFT << // size
+				oldblocks@ AFSBLOCKSHIFT << // offset
+				flags@ // flags
+				fcb@ // fcb
+				IOCacheZeroData ok!
+			end else
+				// only zero the last block
+
+				AFSBLOCKSIZE // size
+				newblocks@ 1 - AFSBLOCKSHIFT << // offset
+				flags@ // flags
+				fcb@ // fcb
+				IOCacheZeroData ok!
+			end
+
+			0 fcb@ IOFileControlBlockLockForPaging
+
+			KeThreadCurrent@ KeThreadIgnoreKill drop
+
+			if (ok@)
+				if (oldblocks@)
+					1 // first
+					startblock@ // blkno
+					fcb@ FSFileControlBlockGetMount // mount
+					AFSBlockDeallocateChain
+				end else
+					0 // first
+					startblock@ // blkno
+					fcb@ FSFileControlBlockGetMount // mount
+					AFSBlockDeallocateChain
+
+					0xFFFFFFFF fcbdata@ AFSFCBData_FirstFATLink + !
+				end
+			end
+		end
+	end
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end

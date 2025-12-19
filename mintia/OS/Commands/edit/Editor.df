@@ -1,0 +1,246 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "Edit.h"
+
+var EditorFileName 0
+public EditorFileName
+
+var EditorFileHandle OSNONE
+public EditorFileHandle
+
+var EditorFileAccess 0
+public EditorFileAccess
+
+var EditorFileModified 0
+public EditorFileModified
+
+var EditorBuffer 0
+public EditorBuffer
+
+var EditorRunning 0
+public EditorRunning
+
+fn (OSSignalHandler) EditorSignalTerm { context signum -- }
+	// we receive this signal from amssrv when it decides to murder our
+	// session, and also from the kernel when it is shutting down. we want
+	// to take this opportunity to quicksave the file into the user's home
+	// directory if we can.
+
+	if (EditorFileModified@ ~~)
+		OSSIGNAL_TERM 128 + OSExit
+
+		return
+	end
+
+	// explicitly mask this signal so it doesn't get unmasked when we return,
+	// i.e. we don't want to do this twice.
+
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction drop
+
+	// clear terminal
+
+	TermResetMode
+
+	"\[[0m\[[1;1H\[[2J" OSGetStdErr FPrintf
+
+	// try to create a path to quicksave into.
+
+	auto qspath
+	OSFILEPATHMAX alloc qspath!
+
+	0 qspath@ sb
+
+	qspath@ // env
+	"HOME" // name
+	OSFILEPATHMAX 64 - // bufsize
+	OSGetEnvironmentVariable drop
+
+	qspath@ qspath@ strlen + // dest
+	"/" // src
+	strcpy
+
+	qspath@ qspath@ strlen + // dest
+	EditorFileName@ OSLastComponent // src
+	strcpy
+
+	qspath@ qspath@ strlen + // dest
+	".sav" // src
+	strcpy
+
+	// perform the quicksave
+
+	qspath@ "edit: quicksaving into %s...\n" OSGetStdErr FPrintf
+
+	auto ok
+	1 // quicksave
+	OSNONE // filehandle
+	qspath@ // path
+	EditorBuffer@ // buffer
+	BufferSave ok!
+
+	if (ok@)
+		ok@ OSStatusGetName "edit: quicksave failed: %s\n" OSGetStdErr FPrintf
+	end
+
+	// exit
+
+	OSSIGNAL_TERM 128 + OSExit
+end
+
+fn Editor { -- }
+	auto ok
+
+	TermInit
+
+	BufferCreate ok! EditorBuffer!
+
+	if (ok@)
+		ok@ OSStatusGetName "edit: couldn't create buffer: %s\n" OSError
+	end
+
+	if (EditorFileHandle@ OSNONE ~=)
+		EditorFileHandle@ // filehandle
+		EditorBuffer@ // buffer
+		BufferPopulate ok!
+
+		if (ok@)
+			ok@ OSStatusGetName "edit: couldn't populate buffer: %s\n" OSError
+		end
+	end
+
+	ScreenInit
+
+	TermSetMode
+
+	DrawAll
+
+	// make it so OSSIGNAL_TERM will only be delivered when we next wait.
+
+	OSSIGNAL_TERM // signal
+	OSCURRENTTHREAD // threadhandle
+	OSThreadDeliverOnWaitSignal drop
+
+	pointerof EditorSignalTerm // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction drop
+
+	1 EditorRunning!
+
+	InputLoop
+
+	TermResetMode
+
+	"\[[0m\[[1;1H\[[2J" Printf
+	OSFlushLine
+end
+
+fn InputLoop { -- }
+	auto charbuf
+	4 alloc charbuf!
+
+	while (EditorRunning@)
+		auto ok
+		OSWAIT_TIMEOUTINFINITE // timeout
+		0 // flags
+		1 // length
+		charbuf@ // buffer
+		OSGetStdOut // filehandle
+		OSFileRead ok! drop
+
+		if (ok@)
+			ok@ OSStatusGetName "edit: failed to read stdout: %s\n" OSError
+		end
+
+		charbuf@ gb InputCharacter
+	end
+end
+
+const INPUTMODE_NORMAL 0
+const INPUTMODE_ESC0   1
+const INPUTMODE_ESC1   2
+
+var InputMode INPUTMODE_NORMAL
+
+fn InputCharacter { c -- }
+	auto update
+	0 update!
+
+	if (InputMode@ INPUTMODE_NORMAL ==)
+		if (c@ 0x03 ==) // ^C
+			if (EditorFileModified@ ~~ UIMode@ UIMODIFIED == ||)
+				0 EditorRunning!
+			end else
+				UIMODIFIED SetUIMode
+			end
+		end elseif (c@ 0x1B ==) // ^[
+			INPUTMODE_ESC0 InputMode!
+		end elseif (EditorFileAccess@ ACCESS_WRITE &)
+			if (c@ '\b' ==)
+				ScreenBackspace update!
+				UINORMAL SetUIMode
+			end elseif (c@ '\r' ==)
+				'\n' ScreenInsert update!
+				UINORMAL SetUIMode
+			end elseif (c@ 0 ==)
+				'\[' ScreenInsert update!
+				UINORMAL SetUIMode
+			end elseif (c@ 21 ==)
+				ScreenLineKill update!
+				UINORMAL SetUIMode
+			end elseif (c@ 0x20 >= c@ 0x7F <= &&)
+				c@ ScreenInsert update!
+				UINORMAL SetUIMode
+			end elseif (c@ 19 ==)
+				auto ok
+
+				0 // quicksave
+				EditorFileHandle@ // filehandle
+				EditorFileName@ // path
+				EditorBuffer@ // buffer
+				BufferSave ok!
+
+				if (ok@)
+					ok@ OSStatusGetName UISaveMessage!
+					UISAVEFAIL SetUIMode
+				end else
+					UINORMAL SetUIMode
+				end
+			end
+		end
+	end elseif (InputMode@ INPUTMODE_ESC0 ==)
+		if (c@ '[' ==)
+			INPUTMODE_ESC1 InputMode!
+		end else
+			INPUTMODE_NORMAL InputMode!
+		end
+	end elseif (InputMode@ INPUTMODE_ESC1 ==)
+		INPUTMODE_NORMAL InputMode!
+		c@ InputNavigationalKey update!
+	end
+
+	if (update@)
+		ScreenCursorX@
+		ScreenCursorY@ SCREENROW +
+		TermSetCursorPosition
+
+		TermFinishDrawing
+	end
+end
+
+fn InputNavigationalKey { c -- update }
+	0 update!
+
+	if (c@ 'D' ==)
+		0 ScreenNavigateX update!
+	end elseif (c@ 'C' ==)
+		1 ScreenNavigateX update!
+	end elseif (c@ 'B' ==)
+		1 0 ScreenNavigateY update!
+	end elseif (c@ 'A' ==)
+		0 0 ScreenNavigateY update!
+	end
+end

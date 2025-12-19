@@ -1,0 +1,161 @@
+//
+// Implements the system calls for the console subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Video.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "CoDuplex.h"
+
+fn CoConsoleByFileHandle { requiredaccess filehandle -- consoleobject ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	auto fcb
+	obj@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	if (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_CHARDEVICE ~=)
+		obj@ ObObjectDereferenceByPointer drop
+
+		STATUS_NOT_A_CONSOLE ok!
+
+		return
+	end
+
+	fcbp@ IOFileControlBlockPaged_DeviceObject + @ consoleobject!
+
+	if (DEBUGCHECKS)
+		if (consoleobject@ ~~)
+			"CoConsoleByFileHandle: FCB had no deviceobject\n" KeCrash
+		end
+	end
+
+	if (consoleobject@ IODevice_ConsoleHeader + @ ~~)
+		obj@ ObObjectDereferenceByPointer drop
+
+		STATUS_NOT_A_CONSOLE ok!
+
+		return
+	end
+
+	// check access last so we can get a STATUS_NOT_A_CONSOLE for checking if
+	// a file handle refers to a console.
+
+	access@ requiredaccess@ SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	consoleobject@ ObObjectReferenceByPointer drop
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn OSSetSystemConsole { filehandle -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	// NOTHING!
+end
+
+fn OSConsoleSignal { signal filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto consoleobject
+	ACCESS_EXEC // requiredaccess
+	filehandle@ // filehandle
+	CoConsoleByFileHandle ok! consoleobject!
+
+	if (ok@)
+		return
+	end
+
+	signal@ // signal
+	consoleobject@ IODevice_Extension + @ // duplex
+	CoDuplexSignal ok!
+
+	consoleobject@ ObObjectDereferenceByPointer drop
+end
+
+fn OSDuplexCreate { flags name permissions -- duplexhandle filehandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	flags@ // flags
+	kname@ // name
+	permissions@ // permissions
+	CoDuplexCreate ok! filehandle! duplexhandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSIsAConsole { filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto consoleobject
+	0 // requiredaccess
+	filehandle@ // filehandle
+	CoConsoleByFileHandle ok! consoleobject!
+
+	if (ok@)
+		return
+	end
+
+	consoleobject@ ObObjectDereferenceByPointer drop
+end

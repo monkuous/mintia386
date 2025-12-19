@@ -1,0 +1,993 @@
+//
+// Implements basic kernel video support.
+// Used primarily by CoVideoConsole.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALResource.h"
+#include "<inc>/HALCrash.h"
+
+table HALfox32IndexPalette
+	0xff000000
+	0xff220022
+	0xff440000
+	0xff660022
+	0xff880000
+	0xffaa0022
+	0xffcc0000
+	0xffee0022
+	0xff000044
+	0xff220066
+	0xff440044
+	0xff660066
+	0xff880044
+	0xffaa0066
+	0xffcc0044
+	0xffee0066
+	0xff000088
+	0xff2200aa
+	0xff440088
+	0xff6600aa
+	0xff880088
+	0xffaa00aa
+	0xffcc0088
+	0xffee00aa
+	0xff0000cc
+	0xff2200ee
+	0xff4400cc
+	0xff6600ee
+	0xff8800cc
+	0xffaa00ee
+	0xffcc00cc
+	0xffee00ee
+	0xff002200
+	0xff222222
+	0xff442200
+	0xff662222
+	0xff882200
+	0xffaa2222
+	0xffcc2200
+	0xffee2222
+	0xff002244
+	0xff222266
+	0xff442244
+	0xff662266
+	0xff882244
+	0xffaa2266
+	0xffcc2244
+	0xffee2266
+	0xff002288
+	0xff2222aa
+	0xff442288
+	0xff6622aa
+	0xff882288
+	0xffaa22aa
+	0xffcc2288
+	0xffee22aa
+	0xff0022cc
+	0xff2222ee
+	0xff4422cc
+	0xff6622ee
+	0xff8822cc
+	0xffaa22ee
+	0xffcc22cc
+	0xffee22ee
+	0xff004400
+	0xff224422
+	0xff444400
+	0xff664422
+	0xff884400
+	0xffaa4422
+	0xffcc4400
+	0xffee4422
+	0xff004444
+	0xff224466
+	0xff444444
+	0xff664466
+	0xff884444
+	0xffaa4466
+	0xffcc4444
+	0xffee4466
+	0xff004488
+	0xff2244aa
+	0xff444488
+	0xff6644aa
+	0xff884488
+	0xffaa44aa
+	0xffcc4488
+	0xffee44aa
+	0xff0044cc
+	0xff2244ee
+	0xff4444cc
+	0xff6644ee
+	0xff8844cc
+	0xffaa44ee
+	0xffcc44cc
+	0xffee44ee
+	0xff006600
+	0xff226622
+	0xff446600
+	0xff666622
+	0xff886600
+	0xffaa6622
+	0xffcc6600
+	0xffee6622
+	0xff006644
+	0xff226666
+	0xff446644
+	0xff666666
+	0xff886644
+	0xffaa6666
+	0xffcc6644
+	0xffee6666
+	0xff006688
+	0xff2266aa
+	0xff446688
+	0xff6666aa
+	0xff886688
+	0xffaa66aa
+	0xffcc6688
+	0xffee66aa
+	0xff0066cc
+	0xff2266ee
+	0xff4466cc
+	0xff6666ee
+	0xff8866cc
+	0xffaa66ee
+	0xffcc66cc
+	0xffee66ee
+	0xff008800
+	0xff228822
+	0xff448800
+	0xff668822
+	0xff888800
+	0xffaa8822
+	0xffcc8800
+	0xffee8822
+	0xff008844
+	0xff228866
+	0xff448844
+	0xff668866
+	0xff888844
+	0xffaa8866
+	0xffcc8844
+	0xffee8866
+	0xff008888
+	0xff2288aa
+	0xff448888
+	0xff6688aa
+	0xff888888
+	0xffaa88aa
+	0xffcc8888
+	0xffee88aa
+	0xff0088cc
+	0xff2288ee
+	0xff4488cc
+	0xff6688ee
+	0xff8888cc
+	0xffaa88ee
+	0xffcc88cc
+	0xffee88ee
+	0xff00aa00
+	0xff22aa22
+	0xff44aa00
+	0xff66aa22
+	0xff88aa00
+	0xffaaaa22
+	0xffccaa00
+	0xffeeaa22
+	0xff00aa44
+	0xff22aa66
+	0xff44aa44
+	0xff66aa66
+	0xff88aa44
+	0xffaaaa66
+	0xffccaa44
+	0xffeeaa66
+	0xff00aa88
+	0xff22aaaa
+	0xff44aa88
+	0xff66aaaa
+	0xff88aa88
+	0xffaaaaaa
+	0xffccaa88
+	0xffeeaaaa
+	0xff00aacc
+	0xff22aaee
+	0xff44aacc
+	0xff66aaee
+	0xff88aacc
+	0xffaaaaee
+	0xffccaacc
+	0xffeeaaee
+	0xff00cc00
+	0xff22cc22
+	0xff44cc00
+	0xff66cc22
+	0xff88cc00
+	0xffaacc22
+	0xffcccc00
+	0xffeecc22
+	0xff00cc44
+	0xff22cc66
+	0xff44cc44
+	0xff66cc66
+	0xff88cc44
+	0xffaacc66
+	0xffcccc44
+	0xffeecc66
+	0xff00cc88
+	0xff22ccaa
+	0xff44cc88
+	0xff66ccaa
+	0xff88cc88
+	0xffaaccaa
+	0xffcccc88
+	0xffeeccaa
+	0xff00cccc
+	0xff22ccee
+	0xff44cccc
+	0xff66ccee
+	0xff88cccc
+	0xffaaccee
+	0xffcccccc
+	0xffeeccee
+	0xff00ee00
+	0xff22ee22
+	0xff44ee00
+	0xff66ee22
+	0xff88ee00
+	0xffaaee22
+	0xffccee00
+	0xffeeee22
+	0xff00ee44
+	0xff22ee66
+	0xff44ee44
+	0xff66ee66
+	0xff88ee44
+	0xffaaee66
+	0xffccee44
+	0xffeeee66
+	0xff00ee88
+	0xff22eeaa
+	0xff44ee88
+	0xff66eeaa
+	0xff88ee88
+	0xffaaeeaa
+	0xffccee88
+	0xffeeeeaa
+	0xff00eecc
+	0xff22eeee
+	0xff44eecc
+	0xff66eeee
+	0xff88eecc
+	0xffaaeeee
+	0xffcceecc
+	0xfffffffe
+endtable
+public HALfox32IndexPalette
+
+externptr HALLoaderInfo
+
+var FBAddr 0
+var FBSize 0
+var FBModulo 0
+
+fn KVInit { -- }
+	fnsection "INIT$text"
+
+	if (HALLoaderInfo@ LdrInfo_HALConsoleFBFormat + @ OSBOOTFBFORMAT_RGBA32 ~=)
+		0 FBAddr!
+		return
+	end
+
+	if (HALConsoleWidthPix@ ~~)
+		0 FBAddr!
+		return
+	end
+
+	HALLoaderInfo@ LdrInfo_HALConsoleFBAddr + @ FBAddr!
+	HALConsoleWidthPix@ HALConsoleHeightPix@ * 4 * FBSize!
+	HALConsoleWidthPix@ HALConsoleFontWidth@ - 4 * FBModulo!
+end
+
+fn KVQuery { -- w h ok }
+	if (FBAddr@ ~~)
+		-1 ok!
+		return
+	end
+
+	0 ok!
+
+	HALConsoleWidthPix@ w!
+	HALConsoleHeightPix@ h!
+end
+
+fn KVFontGet { name -- font ok }
+	auto rsrc
+	name@ HALResourceByName rsrc!
+
+	if (rsrc@ ~~)
+		-1 ok!
+		return
+	end
+
+	rsrc@ LdrBootResource_Data + @ font!
+
+	if (font@ HCFHeader_Magic + @ HCFMAGIC ~=)
+		-1 ok!
+		return
+	end
+
+	0 ok!
+
+	rsrc@ HALResourceWire
+end
+
+fn KVFontQuery { font -- width height }
+	font@ HCFHeader_Width + @ width!
+	font@ HCFHeader_Height + @ height!
+end
+
+fn KVI8ToNative { i8 -- nativecolor }
+	[i8@]HALfox32IndexPalette@ nativecolor!
+end
+
+fn KVClearScreen { nativecolor -- }
+	FBAddr@ FBSize@ nativecolor@ memset
+end
+
+fn KVDrawFilledRectangle { nativecolor x y w h -- }
+	auto row
+	0 row!
+
+	auto gw
+	HALConsoleWidthPix@ gw!
+
+	auto fb
+	FBAddr@ fb!
+
+	auto ptr
+	y@ gw@ * 4 * x@ 4 * + fb@ + ptr!
+
+	auto mod
+	gw@ 4 * mod!
+
+	auto rowsz
+	w@ 4 * rowsz!
+
+	while (row@ h@ <)
+		ptr@ rowsz@ nativecolor@ memset
+
+		1 row +=
+		mod@ ptr +=
+	end
+end
+
+fn KVDrawEmptyRectangle { nativecolor x y w h -- }
+	auto gw
+	HALConsoleWidthPix@ gw!
+
+	auto mod
+	gw@ 4 * mod!
+
+	auto kptr
+	y@ gw@ * 4 * x@ 4 * + FBAddr@ + kptr!
+
+	auto rowsz
+	w@ 4 * rowsz!
+
+	// top edge
+	kptr@ rowsz@ nativecolor@ memset
+
+	if (h@ 1 >)
+		auto bptr
+		h@ 1 - gw@ * 4 * kptr@ + bptr!
+
+		// bottom edge
+		bptr@ rowsz@ nativecolor@ memset
+	end
+
+	auto ptr
+	kptr@ ptr!
+
+	auto hk
+	h@ hk!
+
+	// left edge
+	while (hk@)
+		nativecolor@ ptr@ !
+
+		mod@ ptr +=
+		1 hk -=
+	end
+
+	if (w@ 1 >)
+		kptr@ w@ 1 - 4 * + ptr!
+
+		h@ hk!
+
+		// right edge
+		while (hk@)
+			nativecolor@ ptr@ !
+
+			mod@ ptr +=
+			1 hk -=
+		end
+	end
+end
+
+fn KVDrawCharacter { char nativefg nativebg x y font -- }
+	auto gw
+	HALConsoleWidthPix@ gw!
+
+	auto w
+	font@ HCFHeader_Width + @ w!
+
+	auto h
+	font@ HCFHeader_Height + @ h!
+
+	auto dest
+	y@ gw@ * 4 * x@ 4 * + FBAddr@ + dest!
+
+	auto mod
+	gw@ w@ - 4 * mod!
+
+	auto bmp
+	w@ 7 + 3 >> h@ * char@ * font@ HCFHeader_SIZEOF + + bmp!
+
+	auto bitd
+	font@ HCFHeader_Flags + @ HCFFLAG_REVERSE & ~~ bitd!
+
+	if (nativefg@ -1 ==)
+		if (nativebg@ -1 ==)
+			return
+		end
+
+		if (bitd@)
+			nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsBG
+		end else
+			nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBG
+		end
+	end elseif (nativebg@ -1 ==)
+		if (bitd@)
+			nativefg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsFG
+		end else
+			nativefg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastFG
+		end
+	end else
+		if (bitd@)
+			nativefg@ nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsFGBG
+		end else
+			nativefg@ nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastFGBG
+		end
+	end
+end
+
+// mountains of redundant functions for various bit blit ops
+
+fn KVBlitBitsFastFG { fg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@)
+				if (byte@ 128 &)
+					fg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBG { bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 & ~~)
+					bg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 & ~~)
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 & ~~)
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 & ~~)
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 & ~~)
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 & ~~)
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 & ~~)
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 & ~~)
+					bg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ & ~~)
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastFGBG { fg bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 &)
+					fg@ dest@ 28 + !
+				end else
+					bg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 24 + !
+				end else
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 20 + !
+				end else
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 16 + !
+				end else
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 12 + !
+				end else
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 8 + !
+				end else
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 4 + !
+				end else
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+// reversed ones
+
+fn KVBlitBitsFastBackwardsFG { fg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@)
+				if (byte@ 128 &)
+					fg@ dest@ !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBackwardsBG { bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 & ~~)
+					bg@ dest@ !
+				end
+
+				if (byte@ 64 & ~~)
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 & ~~)
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 & ~~)
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 & ~~)
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 & ~~)
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 & ~~)
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 & ~~)
+					bg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ & ~~)
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBackwardsFGBG { fg bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 4 + !
+				end else
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 8 + !
+				end else
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 12 + !
+				end else
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 16 + !
+				end else
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 20 + !
+				end else
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 24 + !
+				end else
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ 28 + !
+				end else
+					bg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end

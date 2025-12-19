@@ -1,0 +1,834 @@
+//
+// Implements the pipeline evaluator for the MINTIA Command Language.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/MCL/Mcl.h"
+
+#include "<ll>/OSDLL/OSConsoleControl.h"
+
+#include "Mcl.h"
+
+fn MclpMakePipe { -- serverhandle clienthandle ok }
+	auto duplexhandle
+
+	OSDUPLEXFLAG_PIPE // flags
+	0 // name
+	ACCESS_OWNER_ALL // permissions
+	OSDuplexCreate ok! serverhandle! duplexhandle!
+
+	if (ok@)
+		return
+	end
+
+	// get a file object from the device object.
+
+	0 // filetype
+	OSTYPE_ANY // objecttype
+	0 // flags
+	ACCESS_ALL // access
+	duplexhandle@ // initialobjecthandle
+	"" // path
+	OSOpenRelative ok! clienthandle!
+
+	duplexhandle@ OSClose drop
+
+	if (ok@)
+		serverhandle@ OSClose drop
+
+		return
+	end
+end
+
+fn MclpEvaluatePipeline { node machine -- value ok }
+	//
+	// create a pipeline by spawning the specified commands in sequence and
+	// connecting their stdio to the server and client end of duplex objects.
+	//
+	// the final command's stdio has a few cases, checked in this order:
+	//  1. there is redirection to a file.
+	//  2. capture depth > 0, meaning we need to shove its stdout into our
+	//     value string.
+	//  3. neither of the above, so it inherits our stdio.
+	//
+	// for case #1, we open one or more files and redirect stdin/stdout/stderr
+	// to them.
+	//
+	// for case #2, we create a duplex object and redirect its stdout to it.
+	// we then have to sit here and wait for it to EOF, and during that time
+	// we read it into a series of buffers. finally, we append all of our
+	// buffers into one big buffer and return that as the value.
+	//
+	// for case #3, we don't need to do anything special.
+	//
+	// there are also two cases for whether we wait for pipeline completion or
+	// not:
+	//  1. & was specified, so we don't wait. this is overridden by case #2 of
+	//     redirection, since we have to wait for EOF on the duplex object.
+	//  2. & was not specified, so we wait for pipeline completion.
+	//
+
+	0 value!
+
+	auto count
+	node@ MclpParseNodePipeline_Count + @ count!
+
+	auto cmdnode
+	node@ MclpParseNodePipeline_CmdListHead + @ cmdnode!
+
+	auto nextstdin
+	OSNONE nextstdin!
+
+	auto phandle
+
+	auto stdout
+	auto stdin
+	auto stderr
+
+	while (cmdnode@)
+		if (count@ 1 ==)
+			// final command in the pipeline, special case
+			break
+		end
+
+		nextstdin@ stdin!
+
+		MclpMakePipe ok! nextstdin! stdout!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			return
+		end
+
+		stdin@ // stdin
+		stdout@ // stdout
+		OSNONE // stderr
+		0 // builtin
+		cmdnode@ // node
+		machine@ // machine
+		MclpSpawnCommand ok! phandle!
+
+		stdout@ OSClose drop
+
+		if (stdin@ OSNONE ~=)
+			stdin@ OSClose drop
+		end
+
+		if (ok@)
+			nextstdin@ OSClose drop
+
+			return
+		end
+
+		phandle@ OSClose drop
+
+		1 count -=
+		cmdnode@ MclpParseNode_Next + @ cmdnode!
+	end
+
+	// final command, check redirection cases
+
+	auto capturehandle
+	nextstdin@ // pipestdin
+	node@ // pipenode
+	machine@ // machine
+	MclpProcessRedirection ok! stderr! stdout! stdin! capturehandle!
+
+	if (ok@)
+		return
+	end
+
+	stdin@ // stdin
+	stdout@ // stdout
+	stderr@ // stderr
+	0 // builtin
+	cmdnode@ // node
+	machine@ // machine
+	MclpSpawnCommand ok! phandle!
+
+	if (stdin@ OSNONE ~=)
+		stdin@ OSClose drop
+	end
+
+	if (stdout@ OSNONE ~=)
+		stdout@ OSClose drop
+	end
+
+	if (stderr@ OSNONE ~=)
+		stderr@ OSClose drop
+	end
+
+	if (ok@)
+		if (capturehandle@ OSNONE ~=)
+			capturehandle@ OSClose drop
+		end
+
+		return
+	end
+
+	if (capturehandle@ OSNONE ~=)
+		capturehandle@ MclpBuildBufferFromStream ok! value!
+
+		if (ok@)
+			0 // alertable
+			OSWAIT_TIMEOUTINFINITE // timeout
+			phandle@ // objecthandle
+			OSWaitForObject drop
+
+			phandle@ OSClose drop
+
+			return
+		end
+	end
+
+	if (node@ MclpParseNodePipeline_Flags + @ PIPELINEFLAG_ASYNC & ~~)
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		phandle@ // objecthandle
+		OSWaitForObject ok!
+
+		if (ok@)
+			if (value@)
+				value@ MclpFreeValue
+			end
+
+			phandle@ OSClose drop
+			return
+		end
+
+		auto status
+		phandle@ // processhandle
+		OSProcessReadStatus ok! status!
+
+		phandle@ OSClose drop
+
+		if (stdin@ OSNONE ==)
+			if (machine@ MclpMachine_Interactive + @)
+				0 // arg2
+				OSCONSOLEIOCONTROL_RESETMODE // arg1
+				OSGetStdIn // filehandle
+				OSIOControl drop drop
+			end
+		end
+
+		if (ok@)
+			if (value@)
+				value@ MclpFreeValue
+			end
+
+			return
+		end
+
+		auto statusval
+		LEXTOK_LITERAL // tokflag
+		16 // len
+		0 // contents
+		VALTYPE_INLINE // type
+		MclpValueNew ok! statusval!
+
+		if (ok@)
+			if (value@)
+				value@ MclpFreeValue
+			end
+
+			0 ok!
+			return
+		end
+
+		status@ statusval@ MclpValueContents itoa
+
+		statusval@ // value
+		SYMTYPE_VALUE // type
+		"?" // name
+		machine@ MclpMachine_CurrentScope + @ // symboltable
+		MclpSymbolSet ok! drop
+
+		if (ok@)
+			if (value@)
+				value@ MclpFreeValue
+			end
+
+			statusval@ MclpFreeValue
+			return
+		end
+	end else
+		phandle@ OSClose drop
+	end
+end
+
+fn MclpProcessRedirection { pipestdin pipenode machine -- capturehandle stdin stdout stderr ok }
+	0 ok!
+
+	OSNONE capturehandle!
+
+	auto flags
+
+	auto pathval
+
+	if (pipestdin@ OSNONE ~=)
+		pipestdin@ stdin!
+	end elseif (pipenode@ MclpParseNodePipeline_StdInRedirectionPath + @)
+		1 // capture
+		pipenode@ MclpParseNodePipeline_StdInRedirectionPath + @ // node
+		machine@ // machine
+		MclpEvaluateNode ok! pathval!
+
+		if (ok@)
+			return
+		end
+
+		OSFILETYPE_ANY_STREAM // filetype
+		0 // flags
+		ACCESS_READ // access
+		pathval@ MclpValueContents // path
+		OSFileOpen ok! stdin!
+
+		if (ok@)
+			ok@ OSStatusGetName
+			pathval@ MclValueContents
+			"%s: failed to open: %s\n" // fmt
+			pipenode@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			pathval@ MclpFreeValue
+
+			STATUS_SYNTAX_ERROR ok!
+
+			return
+		end
+
+		pathval@ MclpFreeValue
+	end else
+		OSNONE stdin!
+	end
+
+	if (pipenode@ MclpParseNodePipeline_StdOutRedirectionPath + @)
+		1 // capture
+		pipenode@ MclpParseNodePipeline_StdOutRedirectionPath + @ // node
+		machine@ // machine
+		MclpEvaluateNode ok! pathval!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			return
+		end
+
+		if (pipenode@ MclpParseNodePipeline_Flags + @ PIPELINEFLAG_OUTAPPEND &)
+			OSFILEFLAG_APPENDONLY flags!
+		end else
+			0 flags!
+		end
+
+		OSFILETYPE_ANY_STREAM // filetype
+		OSDEFAULTFILEPERMISSIONS // flags
+		flags@ // flags
+		ACCESS_WRITE // access
+		pathval@ MclpValueContents // path
+		OSFileCreate ok! stdout!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			ok@ OSStatusGetName
+			pathval@ MclpValueContents
+			"%s: failed to create: %s\n" // fmt
+			pipenode@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			pathval@ MclpFreeValue
+
+			return
+		end
+
+		pathval@ MclpFreeValue
+
+		if (pipenode@ MclpParseNodePipeline_Flags + @ PIPELINEFLAG_OUTAPPEND & ~~)
+			0 // newsize
+			0 // growing
+			stdout@ // handle
+			OSFileTruncate ok! drop
+
+			if (ok@)
+				if (ok@ STATUS_NOT_SUPPORTED ==)
+					// that's ok
+				end else
+					stdout@ OSClose drop
+
+					OSNONE stdout!
+
+					ok@ OSStatusGetName
+					"couldn't truncate: %s\n" // fmt
+					pipenode@ // node
+					0 // ctx
+					MclpParseDiagnostic
+				end
+
+				0 ok!
+			end
+		end
+	end elseif (machine@ MclpMachine_CaptureDepth + @)
+		MclpMakePipe ok! capturehandle! stdout!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			return
+		end
+	end else
+		OSNONE stdout!
+	end
+
+	if (pipenode@ MclpParseNodePipeline_StdErrRedirectionPath + @)
+		1 // capture
+		pipenode@ MclpParseNodePipeline_StdErrRedirectionPath + @ // node
+		machine@ // machine
+		MclpEvaluateNode ok! pathval!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			if (stdout@ OSNONE ~=)
+				stdout@ OSClose drop
+			end
+
+			if (capturehandle@ OSNONE ~=)
+				capturehandle@ OSClose drop
+			end
+
+			return
+		end
+
+		if (pipenode@ MclpParseNodePipeline_Flags + @ PIPELINEFLAG_ERRAPPEND &)
+			OSFILEFLAG_APPENDONLY flags!
+		end else
+			0 flags!
+		end
+
+		OSFILETYPE_ANY_STREAM // filetype
+		OSDEFAULTFILEPERMISSIONS // flags
+		flags@ // flags
+		ACCESS_WRITE // access
+		pathval@ MclpValueContents // path
+		OSFileCreate ok! stderr!
+
+		if (ok@)
+			if (stdin@ OSNONE ~=)
+				stdin@ OSClose drop
+			end
+
+			if (stdout@ OSNONE ~=)
+				stdout@ OSClose drop
+			end
+
+			if (capturehandle@ OSNONE ~=)
+				capturehandle@ OSClose drop
+			end
+
+			ok@ OSStatusGetName
+			pathval@ MclpValueContents
+			"%s: failed to create: %s\n" // fmt
+			pipenode@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			pathval@ MclpFreeValue
+
+			return
+		end
+
+		pathval@ MclpFreeValue
+
+		if (pipenode@ MclpParseNodePipeline_Flags + @ PIPELINEFLAG_ERRAPPEND & ~~)
+			0 // newsize
+			0 // growing
+			stderr@ // handle
+			OSFileTruncate ok! drop
+
+			if (ok@)
+				if (ok@ STATUS_NOT_SUPPORTED ==)
+					// that's ok
+				end else
+					stderr@ OSClose drop
+
+					OSNONE stderr!
+
+					ok@ OSStatusGetName
+					"couldn't truncate: %s\n" // fmt
+					pipenode@ // node
+					0 // ctx
+					MclpParseDiagnostic
+				end
+
+				0 ok!
+			end
+		end
+	end else
+		OSNONE stderr!
+	end
+end
+
+fn MclpSpawnCommand { stdin stdout stderr builtin node machine -- processhandle ok }
+	auto creationparams
+	OSCreationParams_SIZEOF alloc creationparams!
+
+	creationparams@ OSCreationBlockInitialize
+
+	stdin@ creationparams@ OSCreationParams_StdIn + !
+	stdout@ creationparams@ OSCreationParams_StdOut + !
+	stderr@ creationparams@ OSCreationParams_StdErr + !
+
+	auto nameval
+	1 // capture
+	node@ MclpParseNodeCommand_Name + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! nameval!
+
+	if (ok@)
+		return
+	end
+
+	if (nameval@ ~~)
+		STATUS_NOT_FOUND ok!
+		return
+	end
+
+	// construct list of arguments
+
+	auto contents
+
+	auto arglist
+	auto argptr
+	auto argvalptr
+	auto cnt
+
+	if (node@ MclpParseNodeCommand_ArgCount + @)
+		node@ MclpParseNodeCommand_ArgCount + @ 3 << OSHeapAllocate ok! arglist!
+
+		if (ok@)
+			nameval@ MclpFreeValue
+
+			return
+		end
+
+		auto argnode
+		auto argval
+
+		node@ MclpParseNodeCommand_ArgListHead + @ argnode!
+
+		arglist@ argptr!
+		arglist@ node@ MclpParseNodeCommand_ArgCount + @ 2 << + argvalptr!
+
+		0 cnt!
+
+		while (argnode@)
+			1 // capture
+			argnode@ // node
+			machine@ // machine
+			MclpEvaluateNode ok! argval!
+
+			if (ok@)
+				break
+			end
+
+			if (argval@ ~~)
+				LEXTOK_LITERAL // tokflag
+				0 // len
+				"" // contents
+				VALTYPE_INLINE // type
+				MclpValueNew ok! argval!
+
+				if (ok@)
+					break
+				end
+			end
+
+			argval@ MclpValueContents contents!
+
+			argval@ argvalptr@!
+			contents@ argptr@!
+
+			4 argvalptr +=
+			4 argptr +=
+			1 cnt +=
+			argnode@ MclpParseNode_Next + @ argnode!
+		end
+	end else
+		0 arglist!
+		0 ok!
+	end
+
+	if (ok@ ~~)
+		// spawn command
+
+		nameval@ MclpValueContents contents!
+
+		if (builtin@)
+			node@ MclpParseNodeCommand_ArgCount + @ // argcn
+			arglist@ // argvt
+			contents@ // name
+			node@ // node
+			MclpDoBuiltinCmd ok!
+		end else
+			node@ MclpParseNodeCommand_ArgCount + @ // argcn
+			arglist@ // argvt
+			contents@ // progname
+			0 // creationflags
+			creationparams@ // creationparams
+			ACCESS_OWNER_ALL // permissions
+			0 // name
+			OSSpawnByNameV ok! processhandle! argptr!
+
+			if (ok@)
+				if (ok@ STATUS_NOT_FOUND ==)
+					contents@
+					"%s: command not found\n" // fmt
+					node@ // node
+					0 // ctx
+					MclpParseDiagnostic
+				end else
+					ok@ OSStatusGetName creationparams!
+
+					creationparams@
+					contents@
+					"%s: %s\n" // fmt
+					node@ // node
+					0 // ctx
+					MclpParseDiagnostic
+				end
+
+				STATUS_SYNTAX_ERROR ok!
+			end else
+				// actually a thread handle
+				argptr@ OSClose drop
+			end
+		end
+	end
+
+	nameval@ MclpFreeValue
+
+	if (arglist@)
+		arglist@ node@ MclpParseNodeCommand_ArgCount + @ 2 << + argvalptr!
+
+		while (cnt@)
+			argvalptr@@ MclpFreeValue
+
+			4 argvalptr +=
+			1 cnt -=
+		end
+
+		arglist@ OSHeapFree
+	end
+end
+
+struct BufferHeader
+	4 Next
+	4 Length
+endstruct
+
+const BUFMAX 16384
+
+fn MclpBuildBufferFromStream { capturehandle -- value ok }
+	auto bufsize
+	1024 bufsize!
+
+	auto bufleft
+	0 bufleft!
+
+	auto totalsize
+	0 totalsize!
+
+	auto buflisthead
+	0 buflisthead!
+
+	auto bufcurrent
+	0 bufcurrent!
+
+	auto bufs
+	0 bufs!
+
+	auto bufptr
+
+	while (1)
+		if (bufleft@ ~~)
+			auto newbuf
+			bufsize@ BufferHeader_SIZEOF + OSHeapAllocate ok! newbuf!
+
+			if (ok@)
+				break
+			end
+
+			if (buflisthead@ ~~)
+				newbuf@ buflisthead!
+			end
+
+			0 newbuf@ BufferHeader_Length + !
+			0 newbuf@ BufferHeader_Next + !
+
+			if (bufcurrent@)
+				newbuf@ bufcurrent@ BufferHeader_Next + !
+			end
+
+			newbuf@ BufferHeader_SIZEOF + bufptr!
+
+			newbuf@ bufcurrent!
+
+			bufsize@ bufleft!
+
+			1 bufs +=
+
+			1 bufsize <<=
+
+			if (bufsize@ BUFMAX >)
+				BUFMAX bufsize!
+			end
+		end
+
+		auto bytesread
+		OSWAIT_TIMEOUTINFINITE // timeout
+		0 // flags
+		bufleft@ // length
+		bufptr@ // buffer
+		capturehandle@ // filehandle
+		OSFileRead ok! bytesread!
+
+		if (ok@)
+			break
+		end
+
+		if (bytesread@ ~~)
+			break
+		end
+
+		bytesread@ totalsize +=
+		bytesread@ bufleft -=
+		bytesread@ bufptr +=
+		bytesread@ bufcurrent@ BufferHeader_Length + +=
+	end
+
+	if (ok@ ~~)
+		if (totalsize@)
+			if (bufs@ 1 ==)
+				0 buflisthead@ BufferHeader_SIZEOF + totalsize@ + sb
+
+				LEXTOK_LITERAL // tokflag
+				buflisthead@ // heapcookie
+				totalsize@ // len
+				buflisthead@ BufferHeader_SIZEOF + // contents
+				VALTYPE_EXLINE // type
+				MclpValueNewX ok! value!
+
+				if (ok@ ~~)
+					return
+				end
+			end else
+				LEXTOK_LITERAL // tokflag
+				totalsize@ // len
+				0 // contents
+				VALTYPE_INLINE // type
+				MclpValueNew ok! value!
+
+				if (ok@ ~~)
+					value@ MclpValueContents bufptr!
+				end
+			end
+		end else
+			0 value!
+		end
+	end
+
+	buflisthead@ bufcurrent!
+
+	while (bufcurrent@)
+		auto nbuf
+		bufcurrent@ BufferHeader_Next + @ nbuf!
+
+		if (ok@ ~~)
+			if (totalsize@)
+				bufptr@ // dest
+				bufcurrent@ BufferHeader_SIZEOF + // src
+				bufcurrent@ BufferHeader_Length + @ // sz
+				memcpy
+
+				bufcurrent@ BufferHeader_Length + @ bufptr +=
+			end
+		end
+
+		bufcurrent@ OSHeapFree
+
+		nbuf@ bufcurrent!
+	end
+end
+
+fn MclpDoBuiltinCmd { argcn argvt name node -- ok }
+	0 ok!
+
+	if (name@ "cd" strcmp)
+		if (argcn@ 1 <)
+			"cd requires 1 argument\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			return
+		end
+
+		argvt@@ OSChangeCWD ok!
+
+		if (ok@)
+			ok@ OSStatusGetName
+			argvt@@
+			"%s: %s\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			return
+		end
+	end elseif (name@ "umask" strcmp)
+		if (argcn@ ~~)
+			auto umask
+			OSGetUMask umask!
+
+			umask@ "umask=%d\n" Printf
+
+			return
+		end
+
+		if (argcn@ 1 ~=)
+			"umask requires 0 or 1 arguments\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			return
+		end
+
+		argvt@@ atoi OSSetUMask
+	end
+end

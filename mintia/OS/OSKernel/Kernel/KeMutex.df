@@ -1,0 +1,189 @@
+//
+// Implements the kernel mutex object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "KeInternal.h"
+
+fn KeMutexInitialize { name mode mutex -- }
+	name@ DISPATCHOBJECT_MUTEX mutex@ KiDispatchInitialize
+
+	0 mutex@ KeMutex_OwningThread + !
+	mode@ mutex@ KeMutex_Mode + !
+
+	0 mutex@ KeMutex_Prev + !
+	0 mutex@ KeMutex_Next + !
+
+	1 mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Signaled + !
+end
+
+fn KeMutexRelease { abandon mutex -- ok }
+	0 ok!
+
+	// Note that if this is a KERNELMODE mutex, there is no possible error
+	// condition, so, when unlocking, it's safe to drop the return value.
+
+	auto current
+	KeThreadCurrent@ current!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (DEBUGCHECKS)
+		if (KeDPCActive@)
+			"KeMutexRelease: DPC active\n" KeCrash
+		end
+
+		if (abandon@)
+			if (mutex@ KeMutex_Mode + @ KERNELMODE ==)
+				"KeMutexRelease: attempt to abandon kernel mutex\n" KeCrash
+			end
+		end
+
+		if (mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Type + @ DISPATCHOBJECT_MUTEX ~=)
+			"KeMutexRelease: not a mutex\n" KeCrash
+		end
+	end
+
+	auto count
+
+	if (abandon@)
+		mutex@ KeMutex_OwningThread + @ current!
+
+		if (current@ ~~)
+			ipl@ KeIPLLower
+
+			STATUS_MUTEX_NOT_OWNED ok!
+
+			return
+		end
+
+		0 count!
+	end else
+		mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Signaled + @ count!
+
+		if (mutex@ KeMutex_OwningThread + @ current@ ~=)
+			// we didn't own it...
+
+			if (mutex@ KeMutex_Mode + @ KERNELMODE ==)
+				mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Name + @
+				current@ KeThread_Name +
+				"KeMutexRelease: thread '%s' didn't own mutex '%s'\n" KeCrash
+			end else
+				ipl@ KeIPLLower
+
+				STATUS_MUTEX_NOT_OWNED ok!
+
+				return
+			end
+		end
+	end
+
+	if (DEBUGCHECKS)
+		if (count@ z>)
+			// it wasn't locked...
+
+			mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Name + @
+			current@ KeThread_Name +
+			"KeMutexRelease: thread '%s' owns mutex '%s' but lockcount=0\n" KeCrash
+		end
+	end
+
+	1 count +=
+
+	if (count@ z> ~~)
+		count@ mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Signaled + !
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	// just unlocked it, remove it from the thread's owned mutex list
+
+	auto ls
+	mutex@ KeMutex_Prev + @ ls!
+
+	auto ns
+	mutex@ KeMutex_Next + @ ns!
+
+	if (ls@)
+		ns@ ls@ KeMutex_Next + !
+	end else
+		ns@ current@ KeThread_MutexListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ KeMutex_Prev + !
+	end
+
+	0 mutex@ KeMutex_Prev + !
+	0 mutex@ KeMutex_Next + !
+
+	// try to wake up a waiter.
+
+	auto wokenthread
+	0 // waitstatus
+	1 // priboost
+	mutex@ // object
+	1 // signal
+	KiDispatchSatisfyFirst wokenthread!
+
+	if (wokenthread@)
+		// we woke up a thread who was waiting. make them the owner of the
+		// mutex
+
+		wokenthread@ // thread
+		mutex@ // mutex
+		KiMutexOwnerSet
+	end else
+		// just unown the mutex
+		0 mutex@ KeMutex_OwningThread + !
+	end
+
+	if (mutex@ KeMutex_Mode + @ KERNELMODE ==)
+		1 current@ KeThread_APCDisableCount + -=
+
+		if (current@ KeThread_APCDisableCount + @ ~~)
+			if (current@ KeThread_APCListHead + @)
+				IPLAPC KiSoftwareInterruptRequest
+			end
+		end
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn KeMutexIsLocked { mutex -- locked }
+	mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Signaled + @ z> locked!
+end
+
+fn KiMutexOwnerSet { thread mutex -- }
+	if (mutex@ KeMutex_Mode + @ KERNELMODE ==)
+		1 thread@ KeThread_APCDisableCount + +=
+	end
+
+	thread@ mutex@ KeMutex_OwningThread + !
+
+	auto h
+	thread@ KeThread_MutexListHead + @ h!
+
+	h@ mutex@ KeMutex_Next + !
+
+	if (h@)
+		mutex@ h@ KeMutex_Prev + !
+	end
+
+	mutex@ thread@ KeThread_MutexListHead + !
+
+	0 mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Signaled + !
+end

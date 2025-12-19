@@ -1,0 +1,156 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSConsoleControl.h"
+#include "<ll>/AMS/Ams.h"
+
+fn Main { ... -- ret }
+	AmsInit ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "passwd: couldn't connect to AMS: %s\n" OSError
+	end
+
+	auto pinfo
+	OSObjectQuery_SIZEOF alloc pinfo!
+
+	OSCURRENTPROCESS // handle
+	pinfo@ // query
+	OSQuery ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "passwd: failed to query self: %s\n" OSError
+	end
+
+	auto myuid
+	pinfo@ OSObjectQuery_UID + @ myuid!
+
+	auto username
+	auto uid
+
+	if (argc@ 2 >=)
+		[1]argv@ username!
+
+		username@
+		AmsQueryUIDByName ret! uid!
+
+		if (ret@)
+			ret@ OSStatusGetName username@ "passwd: %s: %s\n" OSError
+		end
+	end else
+		auto userquery
+		AmsUserInformation_SIZEOF alloc userquery!
+
+		myuid@ uid!
+
+		userquery@ // info
+		uid@ // uid
+		AmsQueryByUID ret!
+
+		if (ret@)
+			ret@ OSStatusGetName "passwd: failed to query name: %s\n" OSError
+		end
+
+		userquery@ AmsUserInformation_UserName + username!
+	end
+
+	uid@ username@ "Changing password for '%s' (uid=%d)\n" Printf
+
+	auto oldpassword
+	AMSPASSWORDMAX alloc oldpassword!
+
+	auto newpassword
+	AMSPASSWORDMAX alloc newpassword!
+
+	auto confirmnewpassword
+	AMSPASSWORDMAX alloc confirmnewpassword!
+
+	OSCONSOLEMODE_NOECHO // arg2
+	OSCONSOLEIOCONTROL_SETMODE // arg1
+	OSGetStdIn // filehandle
+	OSIOControl drop drop
+
+	if (myuid@ uid@ == myuid@ UID_SYSTEM ~= &&)
+		"Old password: " Printf
+
+		if (oldpassword@ AMSPASSWORDMAX 1 - OSReadline)
+			0 // arg2
+			OSCONSOLEIOCONTROL_RESETMODE // arg1
+			OSGetStdIn // filehandle
+			OSIOControl drop drop
+
+			'\n' Putc
+			return
+		end
+
+		'\n' Putc
+	end else
+		0 oldpassword@ sb
+	end
+
+	"New password: " Printf
+
+	if (newpassword@ AMSPASSWORDMAX 1 - OSReadline)
+		0 // arg2
+		OSCONSOLEIOCONTROL_RESETMODE // arg1
+		OSGetStdIn // filehandle
+		OSIOControl drop drop
+
+		'\n' Putc
+		return
+	end
+
+	"\nConfirm new password: " Printf
+
+	if (confirmnewpassword@ AMSPASSWORDMAX 1 - OSReadline)
+		0 // arg2
+		OSCONSOLEIOCONTROL_RESETMODE // arg1
+		OSGetStdIn // filehandle
+		OSIOControl drop drop
+
+		'\n' Putc
+		return
+	end
+
+	'\n' Putc
+
+	0 // arg2
+	OSCONSOLEIOCONTROL_RESETMODE // arg1
+	OSGetStdIn // filehandle
+	OSIOControl drop drop
+
+	if (confirmnewpassword@ newpassword@ strcmp ~~)
+		"passwd: new password confirmation didn't match\n" OSError
+	end
+
+	"Do you want to end all sessions for this user [y]? " Printf
+	OSFlushLine
+
+	auto response
+	16 alloc response!
+
+	response@ // s
+	15 // max
+	Gets
+
+	auto flags
+	0 flags!
+
+	if (response@ gb ~~ response@ "y" strcmp ||)
+		AMSCHANGEPASSWORD_ENDSESSIONS flags!
+	end
+
+	flags@ // flags
+	oldpassword@ // oldpassword
+	newpassword@ // newpassword
+	uid@ // uid
+	AmsChangePassword ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "passwd: failed to change password: %s\n" OSError
+	end
+
+	if (flags@ AMSCHANGEPASSWORD_ENDSESSIONS & ~~ myuid@ uid@ ~= ||)
+		"Succeeded.\n" Printf
+	end
+end

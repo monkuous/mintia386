@@ -1,0 +1,208 @@
+//
+// Implements A3X Partition Table (APT) support.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+table IOPartitionAPT
+	"APT"                            // name
+	pointerof IOPartitionAPTDetect   // detect
+	0                                // reserved
+	0                                // reserved
+endtable
+public IOPartitionAPT
+
+struct APT_VDB
+	16 Label
+	128 PartitionTable
+	4 Magic
+endstruct
+
+struct APT_VDB_VARIANT
+	15 BootCode
+	1 FFIfVariant
+	128 PartitionTable
+	4 Magic
+	16 Label
+endstruct
+
+struct APT_PTE
+	8 Label
+	4 Blocks
+	4 Status
+endstruct
+
+const APT_VDBMAGIC 0x4E4D494D
+
+fn (IOPartitionDetectFunction) IOPartitionAPTDetect { devobject -- partitiontable ok }
+	fnsection "PAGE$text"
+
+	// try to detect this disk as APT-formatted.
+	// if it is, attempt to parse it into a heap-allocated partition table.
+	// freeing this partition table after use is the responsibility of the caller.
+
+	STATUS_NOT_AVAILABLE ok!
+
+	auto driver
+	devobject@ IODevice_Driver + @ driver!
+
+	auto blockbuf
+
+	PAGESIZE
+	1 devobject@ IODevice_BlockLog + @ << max // bytes
+	'APTb' // tag
+	0 // flags
+	MmAllocWithTag ok! blockbuf!
+
+	if (ok@)
+		return
+	end
+
+	IODISPATCH_READ // functioncode
+	0 // flags
+	0 // kflags
+	blockbuf@ // buf
+	1 devobject@ IODevice_BlockLog + @ << // length
+	0 // offset
+	devobject@ IODevice_FileControlBlock + @ // fcb
+	IOSystemBufferTransfer ok! drop
+
+	if (ok@)
+		blockbuf@ MmFree
+
+		return
+	end
+
+	STATUS_NOT_AVAILABLE ok!
+
+	auto variant
+	0 variant!
+
+	if (blockbuf@ APT_VDB_Magic + @ APT_VDBMAGIC ~=)
+		// magic is wrong, not APT
+
+		blockbuf@ MmFree
+
+		return
+	end
+
+	if (blockbuf@ APT_VDB_VARIANT_FFIfVariant + gb 0xFF ==)
+		1 variant!
+	end
+
+	// magic is correct, assume APT at our own risk
+
+	auto pte
+	blockbuf@ APT_VDB_PartitionTable + pte!
+
+	auto pcount
+	0 pcount!
+
+	// count the number of partitions
+
+	auto i
+	0 i!
+
+	while (i@ 8 <)
+		if (pte@ APT_PTE_Status + @ 0 ~=)
+			1 pcount +=
+		end
+
+		APT_PTE_SIZEOF pte +=
+		1 i +=
+	end
+
+	// allocate partition table block
+
+	pcount@ IOPartitionEntry_SIZEOF * IOPartitionTable_SIZEOF + // bytes
+	'APTt' // tag
+	0 // flags
+	MmAllocWithTag ok! partitiontable!
+
+	if (ok@)
+		// allocation failed, return
+
+		blockbuf@ MmFree
+
+		return
+	end
+
+	// fill in label and partition count
+
+	IOPartitionAPT partitiontable@ IOPartitionTable_Format + !
+
+	if (variant@)
+		partitiontable@ IOPartitionTable_Label + // dest
+		blockbuf@ APT_VDB_VARIANT_Label + // src
+		15 // max
+		strncpy
+	end else
+		partitiontable@ IOPartitionTable_Label + // dest
+		blockbuf@ APT_VDB_Label + // src
+		15 // max
+		strncpy
+	end
+
+	pcount@ partitiontable@ IOPartitionTable_PartitionCount + !
+
+	// fill in partition information
+
+	blockbuf@ APT_VDB_PartitionTable + pte!
+
+	0 i!
+
+	0 pcount!
+
+	auto offset
+	4 offset!
+
+	auto pbase
+	partitiontable@ IOPartitionTable_SIZEOF + pbase!
+
+	while (i@ 8 <)
+		if (pte@ APT_PTE_Status + @ 0 ~=)
+			pbase@ IOPartitionEntry_Label + // dest
+			pte@ APT_PTE_Label + // src
+			7 // max
+			strncpy
+
+			offset@ pbase@ IOPartitionEntry_BlockOffset + !
+			pte@ APT_PTE_Blocks + @ pbase@ IOPartitionEntry_SizeInBlocks + !
+			pcount@ pbase@ IOPartitionEntry_ID + !
+
+			pte@ APT_PTE_Blocks + @ offset +=
+			IOPartitionEntry_SIZEOF pbase +=
+			1 pcount +=
+		end
+
+		APT_PTE_SIZEOF pte +=
+		1 i +=
+	end
+
+	blockbuf@ MmFree
+end

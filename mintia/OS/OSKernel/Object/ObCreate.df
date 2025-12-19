@@ -1,0 +1,558 @@
+//
+// Implements executive object creation.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ObInternal.h"
+
+externptr ObFullyNonpagedObjects
+
+fn ObiObjectNameValidate { name -- ok }
+	fnsection "PAGE$text"
+
+	// validates an object name.
+
+	0 ok!
+
+	if (name@ "." strcmp)
+		STATUS_ALREADY_EXISTS ok!
+
+		return
+	end
+
+	if (name@ ".." strcmp)
+		STATUS_ALREADY_EXISTS ok!
+
+		return
+	end
+
+	if (name@ gb ~~)
+		STATUS_ALREADY_EXISTS ok!
+
+		return
+	end
+
+	auto length
+	0 length!
+
+	while (name@ gb)
+		if (length@ OSFILEPATHMAX >=)
+			STATUS_NAME_TOO_LONG ok!
+
+			return
+		end
+
+		if (name@ gb 0x20 < name@ gb 0x7F >= ||)
+			STATUS_ILLEGAL_NAME ok!
+
+			return
+		end
+
+		if (name@ gb '/' ==)
+			STATUS_ILLEGAL_NAME ok!
+
+			return
+		end
+
+		1 length +=
+		1 name +=
+	end
+end
+
+fn ObObjectCreate { name flags permissions npquotabias pquotabias bodysize type -- object ok }
+	fnsection "PAGE$text"
+
+	auto paged
+	auto tag
+	auto pheader
+	auto npheader
+	auto cheader
+	auto obname
+	auto npcharge
+	auto pcharge
+	auto namelen
+
+	0 ok!
+
+	if (type@)
+		type@ ObiType_Tag + @ tag!
+		type@ ObiType_Paged + @ paged!
+	end else
+		'Objt' tag!
+		0 paged!
+	end
+
+	if (name@)
+		name@ strlen namelen!
+		namelen@ 1 + 3 + 3 ~ & namelen!
+
+		name@ ObiObjectNameValidate ok!
+
+		if (ok@)
+			return
+		end
+	end else
+		0 namelen!
+	end
+
+	// Calculate the sizes of the paged and nonpaged part of the object.
+	// See Object.h for an explanation of these structures.
+
+	if (ObFullyNonpagedObjects@)
+		ObiNonpagedHeader_SIZEOF
+		ObiPagedHeader_SIZEOF +
+		namelen@ +
+		ObiCommonHeader_SIZEOF +
+		bodysize@ + npcharge!
+
+		0 pcharge!
+	end elseif (paged@)
+		ObiNonpagedHeader_SIZEOF npcharge!
+
+		ObiPagedHeader_SIZEOF
+		namelen@ +
+		ObiCommonHeader_SIZEOF +
+		bodysize@ + pcharge!
+	end else
+		ObiNonpagedHeader_SIZEOF
+		ObiCommonHeader_SIZEOF +
+		bodysize@ + npcharge!
+
+		ObiPagedHeader_SIZEOF
+		namelen@ + pcharge!
+	end
+
+	// Charge quota to the current process before we do any allocations.
+
+	pcharge@ // pagedpart
+	npcharge@ // nonpagedpart
+	pquotabias@ // pagedbias
+	npquotabias@ // nonpagedbias
+	ObiChargeForObject ok!
+
+	if (ok@)
+		return
+	end
+
+	if (ObFullyNonpagedObjects@)
+		npcharge@ // bytes
+		tag@ // tag
+		CANBLOCK // flags
+		MmAllocWithTag ok! npheader!
+
+		if (ok@)
+			pcharge@ // pagedpart
+			npcharge@ // nonpagedpart
+			pquotabias@ // pagedbias
+			npquotabias@ // nonpagedbias
+			ObiUnchargeForObject
+
+			return
+		end
+
+		npheader@ ObiNonpagedHeader_SIZEOF + pheader!
+		pheader@ ObiPagedHeader_SIZEOF + obname!
+		obname@ namelen@ + cheader!
+		cheader@ ObiCommonHeader_SIZEOF + object!
+
+		npheader@ MmBlockChargeGet npcharge!
+		0 pcharge!
+	end elseif (paged@)
+		pcharge@ // bytes
+		tag@ // tag
+		PAGED // flags
+		MmAllocWithTag ok! pheader!
+
+		if (ok@)
+			pcharge@ // pagedpart
+			npcharge@ // nonpagedpart
+			pquotabias@ // pagedbias
+			npquotabias@ // nonpagedbias
+			ObiUnchargeForObject
+
+			return
+		end
+
+		pheader@ ObiPagedHeader_SIZEOF + obname!
+		obname@ namelen@ + cheader!
+		cheader@ ObiCommonHeader_SIZEOF + object!
+
+		npcharge@ // bytes
+		'ObNH' // tag
+		CANBLOCK // flags
+		MmAllocWithTag ok! npheader!
+
+		if (ok@)
+			pheader@ MmFree
+
+			pcharge@ // pagedpart
+			npcharge@ // nonpagedpart
+			pquotabias@ // pagedbias
+			npquotabias@ // nonpagedbias
+			ObiUnchargeForObject
+
+			return
+		end
+
+		npheader@ MmBlockChargeGet npcharge!
+		pheader@ MmBlockChargeGet pcharge!
+	end else
+		npcharge@ // bytes
+		tag@ // tag
+		CANBLOCK // flags
+		MmAllocWithTag ok! npheader!
+
+		if (ok@)
+			pcharge@ // pagedpart
+			npcharge@ // nonpagedpart
+			pquotabias@ // pagedbias
+			npquotabias@ // nonpagedbias
+			ObiUnchargeForObject
+
+			return
+		end
+
+		npheader@ ObiNonpagedHeader_SIZEOF + cheader!
+		cheader@ ObiCommonHeader_SIZEOF + object!
+
+		pcharge@ // bytes
+		'ObPH' // tag
+		PAGED // flags
+		MmAllocWithTag ok! pheader!
+
+		if (ok@)
+			npheader@ MmFree
+
+			pcharge@ // pagedpart
+			npcharge@ // nonpagedpart
+			pquotabias@ // pagedbias
+			npquotabias@ // nonpagedbias
+			ObiUnchargeForObject
+
+			return
+		end
+
+		pheader@ ObiPagedHeader_SIZEOF + obname!
+
+		npheader@ MmBlockChargeGet npcharge!
+		pheader@ MmBlockChargeGet pcharge!
+	end
+
+	if (name@ ~~)
+		0 obname!
+	end else
+		obname@ // dest
+		name@ // src
+		strcpy
+	end
+
+	npquotabias@ npcharge +=
+	pquotabias@ pcharge +=
+
+	pheader@ cheader@ ObiCommonHeader_PagedHeader + !
+	npheader@ cheader@ ObiCommonHeader_NonpagedHeader + !
+	obname@ cheader@ ObiCommonHeader_Name + !
+
+	type@ npheader@ ObiNonpagedHeader_TypeObject + !
+	0 npheader@ ObiNonpagedHeader_HandleCount + !
+	1 npheader@ ObiNonpagedHeader_PointerCount + !
+
+	0 pheader@ ObiPagedHeader_TypeListNext + !
+	0 pheader@ ObiPagedHeader_TypeListPrev + !
+
+	0 pheader@ ObiPagedHeader_DirectoryListNext + !
+	0 pheader@ ObiPagedHeader_DirectoryListPrev + !
+	0 pheader@ ObiPagedHeader_DirectoryObject + !
+
+	flags@ pheader@ ObiPagedHeader_Flags + !
+
+	KeProcessCurrent PsProcess_PagedArea + @ flags!
+
+	flags@ PsProcessPaged_UID + @ pheader@ ObiPagedHeader_UID + !
+	flags@ PsProcessPaged_GID + @ pheader@ ObiPagedHeader_GID + !
+	permissions@ ACCESS_ALL_ALL & pheader@ ObiPagedHeader_Permissions + !
+
+	flags@ PsProcessPaged_QuotaBlock + @ MmQuotaBlockReference
+	flags@ PsProcessPaged_QuotaBlock + @ npheader@ ObiNonpagedHeader_QuotaBlock + !
+
+	pcharge@ pheader@ ObiPagedHeader_PagedQuotaCharge + !
+	npcharge@ pheader@ ObiPagedHeader_NonpagedQuotaCharge + !
+
+	if (type@)
+		type@ ObiTypeLock
+
+		type@ ObiType_ObjectListHead + @ flags!
+
+		if (flags@)
+			flags@ pheader@ ObiPagedHeader_TypeListNext + !
+			object@ flags@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_TypeListPrev + !
+		end
+
+		object@ type@ ObiType_ObjectListHead + !
+
+		type@ ObiTypeUnlock
+	end
+end
+
+fn ObiChargeForObject { pagedpart nonpagedpart pagedbias nonpagedbias -- ok }
+	fnsection "PAGE$text"
+
+	// This is only a separate function due to limitations in the dragonfruit
+	// compiler.
+
+	auto quotablock
+	KeProcessCurrent PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	pagedpart@ MmChargeBytesGet pagedpart!
+	nonpagedpart@ MmChargeBytesGet nonpagedpart!
+
+	pagedpart@ pagedbias@ + // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargePaged ok!
+
+	if (ok@)
+		return
+	end
+
+	nonpagedpart@ nonpagedbias@ + // charge
+	quotablock@ // quotablock
+	MmQuotaBlockCharge ok!
+
+	if (ok@)
+		pagedpart@ pagedbias@ + // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargePaged
+
+		return
+	end
+end
+
+fn ObiUnchargeForObject { pagedpart nonpagedpart pagedbias nonpagedbias -- }
+	fnsection "PAGE$text"
+
+	// This is only a separate function due to limitations in the dragonfruit
+	// compiler.
+
+	auto quotablock
+	KeProcessCurrent PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	pagedpart@ MmChargeBytesGet pagedpart!
+	nonpagedpart@ MmChargeBytesGet nonpagedpart!
+
+	pagedpart@ pagedbias@ + // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUnchargePaged
+
+	nonpagedpart@ nonpagedbias@ + // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUncharge
+end
+
+fn ObObjectFree { object -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	ObiCommonHeader_SIZEOF object -=
+
+	if (DEBUGCHECKS)
+		if (object@ ObiCommonHeader_PagedHeader + @ ObiPagedHeader_Flags + @ OBFLAGS_PERMANENT &)
+			"ObObjectFree: attempt to free PERMANENT object\n" KeCrash
+		end
+
+		if (object@ ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_HandleCount + @)
+			"ObObjectFree: attempt to free object with nonzero handle count\n" KeCrash
+		end
+
+		if (object@ ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_PointerCount + @)
+			"ObObjectFree: attempt to free object with nonzero pointer count\n" KeCrash
+		end
+	end
+
+	auto type
+	object@ ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_TypeObject + @ type!
+
+	ObiCommonHeader_SIZEOF object +=
+
+	if (type@)
+		auto deletefunc
+
+		type@ ObiType_DeleteFunction + @ deletefunc!
+
+		if (deletefunc@)
+			object@ deletefunc@ ObTypeDeleteFunction
+		end
+	end
+
+	object@ ObObjectDeallocate
+end
+
+fn ObObjectDeallocate { object -- }
+	fnsection "PAGE$text"
+
+	ObiCommonHeader_SIZEOF object -=
+
+	auto npheader
+	object@ ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	auto pheader
+	object@ ObiCommonHeader_PagedHeader + @ pheader!
+
+	auto type
+	object@ ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_TypeObject + @ type!
+
+	if (type@)
+		// remove from type list
+
+		type@ ObiTypeLock
+
+		auto n
+		pheader@ ObiPagedHeader_TypeListNext + @ n!
+
+		auto l
+		pheader@ ObiPagedHeader_TypeListPrev + @ l!
+
+		if (n@)
+			l@ n@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_TypeListPrev + !
+		end
+
+		if (l@)
+			n@ l@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_TypeListNext + !
+		end else
+			// no prev means we were the listhead
+
+			n@ type@ ObiType_ObjectListHead + !
+		end
+
+		type@ ObiTypeUnlock
+	end
+
+	auto quotablock
+	npheader@ ObiNonpagedHeader_QuotaBlock + @ quotablock!
+
+	auto pcharge
+	pheader@ ObiPagedHeader_PagedQuotaCharge + @ pcharge!
+
+	auto npcharge
+	pheader@ ObiPagedHeader_NonpagedQuotaCharge + @ npcharge!
+
+	pheader@ MmFree
+	npheader@ MmFree
+
+	if (quotablock@)
+		npcharge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUncharge
+
+		pcharge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargePaged
+
+		quotablock@ MmQuotaBlockDereference
+	end
+end
+
+fn ObTypeInitializerInitialize { initializer -- }
+	fnsection "INIT$text"
+
+	// initialize the initializer.
+	// yeah.
+
+	initializer@ // ptr
+	ObTypeInitializer_SIZEOF // size
+	0 // word
+	memset
+
+	-1 initializer@ ObTypeInitializer_WaitOffset + !
+end
+
+fn ObTypeCreate { initializer -- type ok }
+	fnsection "INIT$text"
+
+	auto typetype
+	ObTypeObjectType@ typetype!
+
+	initializer@ ObTypeInitializer_Name + @ // name
+	OBFLAGS_PERMANENT // flags
+	ACCESS_OWNER_ALL ACCESS_GROUP_ALL | // permissions
+	0 // npquotabias
+	0 // pquotabias
+	initializer@ ObTypeInitializer_BodySize + @ ObiType_SIZEOF + // bodysize
+	typetype@ // type
+	ObObjectCreate ok! type!
+
+	if (ok@)
+		return
+	end
+
+	initializer@ ObTypeInitializer_Tag + @ type@ ObiType_Tag + !
+	initializer@ ObTypeInitializer_TypeIdentifier + @ type@ ObiType_TypeIdentifier + !
+
+	// initialize function fields
+	initializer@ ObTypeInitializer_OpenFunction + @ type@ ObiType_OpenFunction + !
+	initializer@ ObTypeInitializer_CloseFunction + @ type@ ObiType_CloseFunction + !
+	initializer@ ObTypeInitializer_DeleteFunction + @ type@ ObiType_DeleteFunction + !
+	initializer@ ObTypeInitializer_ParseFunction + @ type@ ObiType_ParseFunction + !
+	initializer@ ObTypeInitializer_SetSecurityFunction + @ type@ ObiType_SetSecurityFunction + !
+
+	initializer@ ObTypeInitializer_Paged + @ type@ ObiType_Paged + !
+	initializer@ ObTypeInitializer_WaitOffset + @ type@ ObiType_WaitOffset + !
+
+	0 type@ ObiType_ObjectListHead + !
+
+	"ObTypeMutex" // name
+	KERNELMODE // mode
+	type@ ObiType_Mutex + // mutex
+	KeMutexInitialize
+
+	if (typetype@ ~~)
+		type@ ObTypeObjectType!
+		type@ type@ ObiType_ObjectListHead + !
+
+		type@ type@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_TypeObject + !
+	end elseif (ObObjectTypesDirectoryObject@)
+		type@ // object
+		ObObjectTypesDirectoryObject@ // directory
+		ObDirectoryInsertByPointers ok!
+
+		if (ok@)
+			ok@ type@ ObiCommonHeader_SIZEOF - ObiCommonHeader_Name + @ "ObTypeCreate: couldn't insert type '%s' into /ObjectTypes (%i)\n" KeCrash
+		end
+	end
+end
+
+fn ObiTypeLock { type -- }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	0 // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	type@ ObiType_Mutex + // object
+	KeThreadWaitForObject drop
+end
+
+fn ObiTypeUnlock { type -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	type@ ObiType_Mutex + // mutex
+	KeMutexRelease drop
+end

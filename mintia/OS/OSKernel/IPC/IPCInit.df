@@ -1,0 +1,107 @@
+//
+// Initialization of the MINTIA ipc subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+var IPCPortObjectType 0
+public IPCPortObjectType
+
+buffer IPCiGlobalLockEvent KeEvent_SIZEOF
+
+fn IPCiGlobalLock { alertable -- ipl ok }
+	fnsection "PAGE$text"
+
+	IPLAPC KeIPLRaise ipl!
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	IPCiGlobalLockEvent // object
+	KeThreadWaitForObject ok!
+
+	if (ok@)
+		ipl@ KeIPLLower
+
+		return
+	end
+end
+
+fn IPCiGlobalUnlock { ipl -- }
+	fnsection "PAGE$text"
+
+	0 // priboost
+	IPCiGlobalLockEvent // event
+	KeEventSignal
+
+	ipl@ KeIPLLower
+end
+
+rosection "INIT$text"
+
+fn IPCInitPhase1 { -- }
+	fnsection "INIT$text"
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	// create Port type
+
+	auto ok
+
+	auto type
+
+	"Port" typeinit@ ObTypeInitializer_Name + !
+	'Port' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_PORT typeinit@ ObTypeInitializer_TypeIdentifier + !
+	pointerof IPCiPortObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+	pointerof IPCiPortObjectOpen typeinit@ ObTypeInitializer_OpenFunction + !
+	1 typeinit@ ObTypeInitializer_Paged + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "IPCInitPhase1: couldn't create Port type (%i)\n" KeCrash
+	end
+
+	type@ IPCPortObjectType!
+
+rosection "text"
+
+	1 // signaled
+	OSEVENT_SYNCH // type
+	"IPCiGlobalLockEvent" // name
+	IPCiGlobalLockEvent // event
+	KeEventInitialize
+
+rosection "INIT$text"
+end

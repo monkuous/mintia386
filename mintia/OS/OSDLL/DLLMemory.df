@@ -1,0 +1,128 @@
+//
+// Implements memory query dumping.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSProcess.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSSignal.h"
+#include "<ll>/OSDLL/OSMemory.h"
+
+#include "OSDLL.h"
+
+fn private DLLMakeKbCount { pages buf -- }
+	pages@ OSPAGESHIFT << 1024 / // n
+	buf@ // str
+	itoa
+
+	buf@ buf@ strlen + // dest
+	"KB" // src
+	strcpy
+end
+
+fn OSMemoryInformationDump { query -- }
+	auto sprintfbuf
+	16 alloc sprintfbuf!
+
+	query@ OSMemoryInformation_FileCachePageCount + @ sprintfbuf@ DLLMakeKbCount
+
+	sprintfbuf@
+	"       File cache: %9s " Printf
+
+	auto evictables
+	query@ OSMemoryInformation_ModifiedPageCount + @
+	query@ OSMemoryInformation_ViewCachePageCount + @ +
+	evictables!
+
+	auto pagesused
+	query@ OSMemoryInformation_RealPageCount + @
+	query@ OSMemoryInformation_AvailablePageCount + @ - pagesused!
+
+	query@ OSMemoryInformation_RealPageCount + @ OSPAGESHIFT << 1024 /
+	pagesused@ evictables@ - OSPAGESHIFT << 1024 /
+	"    Memory usage: %dKB / %dKB\n" Printf
+
+	query@ OSMemoryInformation_AnonymousPageCount + @ sprintfbuf@ DLLMakeKbCount
+
+	sprintfbuf@
+	"       Anon bytes: %9s " Printf
+
+	query@ OSMemoryInformation_SwapPagePeakCount + @ OSPAGESHIFT << 1024 /
+	query@ OSMemoryInformation_SwapPageTotalCount + @ OSPAGESHIFT << 1024 /
+	query@ OSMemoryInformation_SwapPageUsedCount + @ OSPAGESHIFT << 1024 /
+	"  Pagefile usage: %dKB / %dKB (%dKB peak)\n" Printf
+
+	query@ OSMemoryInformation_ModifiedPageCount + @ sprintfbuf@ DLLMakeKbCount
+
+	sprintfbuf@
+	"      Dirty bytes: %9s " Printf
+
+	query@ OSMemoryInformation_WorkingSetPagePeakCount + @ OSPAGESHIFT << 1024 /
+	query@ OSMemoryInformation_WorkingSetPageTotalCount + @ OSPAGESHIFT << 1024 /
+	"Working set size: %dKB (%dKB peak)\n" Printf
+
+	query@ OSMemoryInformation_PageInCount + @
+	"         Page-ins: %9d " Printf
+
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedPeak + @ 1024 /
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedExternally + @ 1024 /
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedInternally + @ 1024 /
+	"   Nonpaged pool: %dKB/%dKB (%dKB peak)\n" Printf
+
+	query@ OSMemoryInformation_SwapPagesWritten + @
+	query@ OSMemoryInformation_SwapPagesRead + @ +
+	"          Swap IO: %9d " Printf
+
+	query@ OSMemoryInformation_PagedPoolBytesUsedPeak + @ 1024 /
+	query@ OSMemoryInformation_PagedPoolBytesUsedExternally + @ 1024 /
+	query@ OSMemoryInformation_PagedPoolBytesUsedInternally + @ 1024 /
+	"      Paged pool: %dKB/%dKB (%dKB peak)\n" Printf
+
+	if (0)
+		query@ OSMemoryInformation_CommitLimit + @
+		query@ OSMemoryInformation_CommitUsage + @
+		"  Commit usage:     %d / %d\n" Printf
+	end
+
+	if (0)
+		query@ OSMemoryInformation_EvictableSlowPageCount + @
+		query@ OSMemoryInformation_EvictableFastPageCount + @
+		"  Evictable pages:  %d fast, %d slow\n" Printf
+	end
+end
+
+fn OSPageFileInformationDump { -- }
+	auto query
+	OSPageFileInformation_SIZEOF alloc query!
+
+	auto id
+	0 id!
+
+	while (1)
+		auto ok
+		query@ // query
+		id@ // id
+		OSPageFileQuery ok!
+
+		if (ok@)
+			return
+		end
+
+		query@ OSPageFileInformation_CurrentSize + @ OSPAGESHIFT << 1024 /
+		query@ OSPageFileInformation_UsedCount + @ OSPAGESHIFT << 1024 /
+		query@ OSPageFileInformation_MaximumSize + @ OSPAGESHIFT << 1024 /
+		query@ OSPageFileInformation_MinimumSize + @ OSPAGESHIFT << 1024 /
+		query@ OSPageFileInformation_Priority + @
+		query@ OSPageFileInformation_Name +
+		"* %s: pri=%d, %dKB -> %dKB, %dKB / %dKB\n" Printf
+
+		1 id +=
+	end
+end

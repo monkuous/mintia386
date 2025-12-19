@@ -1,0 +1,375 @@
+//
+// Implements port connection.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+fn IPCPortConnectObject { mode rxmsg txmsg timeout portobject -- clientport ok }
+	fnsection "PAGE$text"
+
+	// Called with server port referenced. Always returns with server port
+	// dereferenced.
+
+	if (KeThreadCurrent@ PsThread_IPCBlock + @ ~~)
+		IPCiThreadBlockCreate ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto ipl
+	1 IPCiGlobalLock ok! ipl!
+
+	if (ok@)
+		return
+	end
+
+	0 // flags
+	0 // maxlen
+	portobject@ // serverport
+	KeProcessCurrent // owningprocess
+	ACCESS_OWNER_ALL // permissions
+	0 // name
+	IPCPortCreateObject ok! clientport!
+
+	if (ok@)
+		ipl@ IPCiGlobalUnlock
+
+		portobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto ktxmsg
+	0 // allowhandle
+	txmsg@ // umsg
+	mode@ // mode
+	OSPORT_CONID_CONNECTION // conid
+	clientport@ // portobject
+	IPCiMessageAllocate ok! ktxmsg! drop
+
+	if (ok@)
+		ipl@ IPCiGlobalUnlock
+
+		clientport@ ObObjectDereferenceByPointer drop
+		portobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	OSPORT_MESSAGE_CONNECTION ktxmsg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+
+	// send the connection message.
+
+	ktxmsg@ // msg
+	portobject@ // portobject
+	IPCiPortSendMessage ok!
+
+	// dereference the server port so it can be closed by host properly.
+
+	portobject@ ObObjectDereferenceByPointer drop
+
+	if (ok@)
+		ipl@ IPCiGlobalUnlock
+
+		clientport@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	ipl@ // ipl
+	rxmsg@ // umsg
+	mode@ // mode
+	0 // clientid
+	OSPORT_CONID_CONNECTION // conid
+	timeout@ // timeout
+	clientport@ // portobject
+	IPCiPortReceiveMessage ok!
+
+	if (ok@)
+		ipl@ IPCiGlobalUnlock
+
+		clientport@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	if (clientport@ IPCiPort_Flags + @ IPCPORTFLAG_UNFINISHED_CONNECTION &)
+		// failed to connect.
+
+		ipl@ IPCiGlobalUnlock
+
+		clientport@ ObObjectDereferenceByPointer drop
+
+		STATUS_CONNECTION_FAILED ok!
+
+		return
+	end
+
+	ipl@ IPCiGlobalUnlock
+end
+
+fn IPCPortConnect { mode rxmsg txmsg timeout initialobjecthandle path -- porthandle ok }
+	fnsection "PAGE$text"
+
+	auto initialobject
+
+	if (initialobjecthandle@ OSNONE ==)
+		0 initialobject!
+	end else
+		0 // type
+		initialobjecthandle@ // handle
+		ObObjectReferenceByHandle ok! initialobject! drop // just drop the access bits, ObObjectReferenceByPath will take care of that
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto serverport
+	0 // flags
+	path@ // path
+	initialobject@ // initialobject
+	KeProcessCurrent // process
+	ObObjectReferenceByPath ok! serverport!
+
+	if (initialobject@)
+		initialobject@ ObObjectDereferenceByPointer drop
+	end
+
+	if (ok@)
+		return
+	end
+
+	ACCESS_EXEC // access
+	serverport@ // object
+	KeProcessCurrent // process
+	SeCheckAccessObjectUserX ok!
+
+	if (ok@)
+		serverport@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	if (serverport@ ObObjectType IPCPortObjectType@ ~=)
+		serverport@ ObObjectDereferenceByPointer drop
+
+		STATUS_INVALID_OBJECT_TYPE ok!
+
+		return
+	end
+
+	if (serverport@ IPCiPort_Flags + @ IPCPORTFLAG_CLIENT &)
+		// this is a client port. these shouldn't be allowed in the object
+		// namespace at all but check and return failure anyway.
+
+		serverport@ ObObjectDereferenceByPointer drop
+
+		STATUS_INVALID_OBJECT_TYPE ok!
+
+		return
+	end
+
+	auto portobject
+	mode@ // mode
+	rxmsg@ // rxmsg
+	txmsg@ // txmsg
+	timeout@ // timeout
+	serverport@ // portobject
+	IPCPortConnectObject ok! portobject!
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL ACCESS_NOINHERIT | // access
+	portobject@ // object
+	KeProcessCurrent // process
+	ObObjectOpenProcess ok! porthandle!
+
+	if (ok@)
+		portobject@ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn IPCPortAcceptObject { mode context txmsg reject portobject -- ok }
+	fnsection "PAGE$text"
+
+	auto ipl
+	1 IPCiGlobalLock ok! ipl!
+
+	if (ok@)
+		return
+	end
+
+	auto clientid
+	auto ktxmsg
+	0 // allowhandle
+	txmsg@ // umsg
+	mode@ // mode
+	OSPORT_CONID_CONNECTION // conid
+	portobject@ // portobject
+	IPCiMessageAllocate ok! ktxmsg! clientid!
+
+	if (ok@)
+		ipl@ IPCiGlobalUnlock
+
+		return
+	end
+
+	OSPORT_MESSAGE_REPLY ktxmsg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+
+	auto clienttable
+	portobject@ IPCiPort_ClientTableHeader + @ clienttable!
+
+	1 // alertable
+	clienttable@ // handletable
+	ExHandleTableLockShared ok!
+
+	if (ok@)
+		ktxmsg@ IPCiMessageFree
+
+		ipl@ IPCiGlobalUnlock
+
+		return
+	end
+
+	auto clientport
+	clientid@ // handle
+	clienttable@ // handletable
+	1 // locked
+	ExHandleTableLookupAndReferenceObject ok! clientport!
+
+	if (ok@)
+		clienttable@ ExHandleTableUnlock
+
+		ktxmsg@ IPCiMessageFree
+
+		ipl@ IPCiGlobalUnlock
+
+		if (ok@ STATUS_INVALID_HANDLE ==)
+			STATUS_NO_SUCH_CLIENT ok!
+		end
+
+		return
+	end
+
+	if (clientport@ IPCiPort_Flags + @ IPCPORTFLAG_UNFINISHED_CONNECTION & ~~)
+		// connection already accepted?
+
+		clienttable@ ExHandleTableUnlock
+
+		ktxmsg@ IPCiMessageFree
+
+		ipl@ IPCiGlobalUnlock
+
+		clientport@ ObObjectDereferenceByPointer drop
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	ktxmsg@ // msg
+	clientport@ // portobject
+	IPCiPortSendMessage ok!
+
+	if (ok@)
+		1 reject!
+	end
+
+	if (reject@ ~~)
+		auto kdms
+		OSMessageHeader_SIZEOF alloc kdms!
+
+		0 kdms@ OSMessageHeader_LengthI + si
+		OSNONE kdms@ OSMessageHeader_Handle + !
+
+		0 // allowhandle
+		kdms@ // umsg
+		KERNELMODE // mode
+		OSPORT_CONID_DISCONNECT // conid
+		portobject@ // portobject
+		IPCiMessageAllocate ok! kdms! drop
+
+		if (ok@ ~~)
+			kdms@ clientport@ IPCiPort_DisconnectionMessage + !
+
+			IPCPORTFLAG_UNFINISHED_CONNECTION ~ clientport@ IPCiPort_Flags + &=
+
+			context@ clientport@ IPCiPort_ServerContextForClient + !
+		end
+	end
+
+	clienttable@ ExHandleTableUnlock
+
+	ipl@ IPCiGlobalUnlock
+
+	clientport@ ObObjectDereferenceByPointer drop
+end
+
+fn IPCPortAccept { mode context txmsg reject porthandle -- ok }
+	fnsection "PAGE$text"
+
+	auto portobject
+	IPCPortObjectType@ // type
+	porthandle@ // handle
+	ObObjectReferenceByHandle ok! portobject! drop
+
+	if (ok@)
+		return
+	end
+
+	if (portobject@ IPCiPort_OwningProcess + @ KeThreadCurrent@ KeThread_Process + @ ~=)
+		portobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	if (portobject@ IPCiPort_Flags + @ IPCPORTFLAG_CLIENT &)
+		portobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_INVALID_OBJECT_TYPE ok!
+
+		return
+	end
+
+	mode@ // mode
+	context@ // context
+	txmsg@ // txmsg
+	reject@ // reject
+	portobject@ // portobject
+	IPCPortAcceptObject ok!
+
+	portobject@ ObObjectDereferenceByPointer drop
+end

@@ -1,0 +1,102 @@
+//
+// Implements the system calls for the IPC subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+fn OSPortCreate { flags maxlen permissions name -- porthandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	OBNAMEMAX // max
+	name@ // string
+	ExCallGetString ok! kname!
+
+	if (ok@)
+		return
+	end
+
+	flags@ // flags
+	maxlen@ // maxlen
+	permissions@ // permissions
+	kname@ // name
+	IPCPortCreate ok! porthandle!
+
+	kname@ ExCallFreeString
+end
+
+fn OSPortConnectRelative { rxmsg txmsg timeout initialobjecthandle path -- porthandle ok }
+	fnsection "PAGE$text"
+
+	USERMODE // mode
+	rxmsg@ // rxmsg
+	txmsg@ // txmsg
+	timeout@ // timeout
+	initialobjecthandle@ // initialobjecthandle
+	path@ // path
+	IPCPortConnect ok! porthandle!
+end
+
+fn OSPortAccept { context txmsg reject porthandle -- ok }
+	fnsection "PAGE$text"
+
+	USERMODE // mode
+	context@ // context
+	txmsg@ // txmsg
+	reject@ // reject
+	porthandle@ // porthandle
+	IPCPortAccept ok!
+end
+
+fn OSPortSendAndWaitReceive { rxmsg txmsg timeout porthandle -- ok }
+	fnsection "PAGE$text"
+
+	USERMODE // mode
+	rxmsg@ // rxmsg
+	txmsg@ // txmsg
+	timeout@ // timeout
+	porthandle@ // porthandle
+	IPCPortSendAndWaitReceive ok!
+end
+
+fn OSPortSendAndWaitReply { rxmsg txmsg timeout porthandle -- ok }
+	fnsection "PAGE$text"
+
+	USERMODE // mode
+	rxmsg@ // rxmsg
+	txmsg@ // txmsg
+	timeout@ // timeout
+	porthandle@ // porthandle
+	IPCPortSendAndWaitReply ok!
+end
+
+fn OSPortOpenProcessByClientID { access clientid porthandle -- processhandle ok }
+	fnsection "PAGE$text"
+
+	access@ clientid@ porthandle@ IPCPortOpenProcessByClientID ok! processhandle!
+end

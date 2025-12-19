@@ -1,0 +1,168 @@
+//
+// Implements the executive mutex object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+var ExiMutexObjectType 0
+
+fn ExiMutexInit { -- }
+	fnsection "INIT$text"
+
+	auto type
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	"Mutex" typeinit@ ObTypeInitializer_Name + !
+	'ExMu' typeinit@ ObTypeInitializer_Tag + !
+	OSTYPE_MUTEX typeinit@ ObTypeInitializer_TypeIdentifier + !
+	0 typeinit@ ObTypeInitializer_WaitOffset + !
+	pointerof ExMutexDeleteObject typeinit@ ObTypeInitializer_DeleteFunction + !
+
+	auto ok
+	typeinit@ ObTypeCreate ok! type!
+
+rosection "INIT$text"
+
+	if (ok@)
+		ok@ "ExiMutexInit: couldn't create Mutex type (%i)\n" KeCrash
+	end
+
+rosection "text"
+
+	type@ ExiMutexObjectType!
+end
+
+fn (ObTypeDeleteFunction) ExMutexDeleteObject { object -- }
+	fnsection "PAGE$text"
+
+	1 // abandon
+	object@ // mutex
+	KeMutexRelease drop
+end
+
+fn ExMutexCreateObject { permissions name -- mutexobject ok }
+	fnsection "PAGE$text"
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	0 // pquotabias
+	KeMutex_SIZEOF // bodysize
+	ExiMutexObjectType@ // type
+	ObObjectCreate ok! mutexobject!
+
+	if (ok@)
+		return
+	end
+
+	"ExMutexObject" // name
+	USERMODE // mode
+	mutexobject@ // mutex
+	KeMutexInitialize
+end
+
+fn ExMutexCreate { permissions name -- mutexhandle ok }
+	fnsection "PAGE$text"
+
+	auto mutexobject
+
+	permissions@ // permissions
+	name@ // name
+	ExMutexCreateObject ok! mutexobject!
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	mutexobject@ // object
+	ObObjectOpen ok! mutexhandle!
+
+	if (ok@)
+		mutexobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+end
+
+fn ExMutexRelease { mutexhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExiMutexObjectType@ // type
+	mutexhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	0 // abandon
+	obj@ // mutex
+	KeMutexRelease ok!
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn ExMutexReadState { mutexhandle -- locked ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExiMutexObjectType@ // type
+	mutexhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ KeDispatchIsSignaled locked!
+
+	obj@ ObObjectDereferenceByPointer drop
+end

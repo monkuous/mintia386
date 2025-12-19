@@ -1,0 +1,124 @@
+//
+// Implements the XRstation RTC driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/rta3x/a3x.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALXRstationCitron.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSStatistics.h"
+#include "<ll>/OSDLL/OSContext.h"
+
+const RTC_INTERVAL 10
+
+const RTCPORTCMD   0x20
+const RTCPORTDATA  0x21
+const RTCINTERRUPT 2
+
+const RTCCMDINTERVAL 1
+const RTCCMDQUERYSEC 2
+const RTCCMDQUERYMS  3
+const RTCCMDSETSEC   4
+const RTCCMDSETMS    5
+
+buffer DriverRTCTimeCurrent KeTime_SIZEOF
+buffer DriverRTCUptime      KeTime_SIZEOF
+
+fn (FDriverInit) DriverInitRTC { stage -- ok }
+	if (stage@ STAGE_PRETASKING ==)
+		// start the clock interrupt
+
+		pointerof DriverRTCInterrupt // function
+		RTCINTERRUPT // interrupt number
+		IPLCLOCK // interrupt priority level
+		HALInterruptRegister
+
+		RTC_INTERVAL RTCPORTDATA HALXRstationCitronOutl
+		RTCCMDINTERVAL RTCPORTCMD HALXRstationCitronCommand
+
+		DriverRTCTimeCurrent DriverRTCQuerySlow
+
+		pointerof DriverRTCQuery HALRTCQueryFunction!
+		pointerof DriverRTCUptimeQuery HALUptimeQueryFunction!
+		pointerof DriverRTCSet HALRTCSetFunction!
+		RTC_INTERVAL HALRTCInterval!
+	end
+
+	0 ok!
+end
+
+fn (HALRTCQueryF) DriverRTCQuery { time -- }
+	auto ctime
+	DriverRTCTimeCurrent ctime!
+
+	ctime@ KeTime_SecPart + @ time@ KeTime_SecPart + !
+	ctime@ KeTime_MsPart + @ time@ KeTime_MsPart + !
+end
+
+fn (HALUptimeQueryF) DriverRTCUptimeQuery { time -- }
+	auto ctime
+	DriverRTCUptime ctime!
+
+	ctime@ KeTime_SecPart + @ time@ KeTime_SecPart + !
+	ctime@ KeTime_MsPart + @ time@ KeTime_MsPart + !
+end
+
+fn DriverRTCQuerySlow { time -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	RTCCMDQUERYSEC RTCPORTCMD HALXRstationCitronCommand
+	RTCPORTDATA HALXRstationCitronInl time@ KeTime_SecPart + !
+
+	RTCCMDQUERYMS RTCPORTCMD HALXRstationCitronCommand
+	RTCPORTDATA HALXRstationCitronInl time@ KeTime_MsPart + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn (HALRTCSetF) DriverRTCSet { time -- ok }
+	0 ok!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	time@ KeTime_SecPart + @ RTCPORTDATA HALXRstationCitronOutl
+	RTCCMDSETSEC RTCPORTCMD HALXRstationCitronCommand
+
+	time@ KeTime_MsPart + @ RTCPORTDATA HALXRstationCitronOutl
+	RTCCMDSETMS RTCPORTCMD HALXRstationCitronCommand
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn (HALInterruptHandler) DriverRTCInterrupt { trapframe int -- }
+	DriverRTCTimeCurrent DriverRTCQuerySlow
+
+	auto uptime
+	DriverRTCUptime uptime!
+
+	auto ms
+	uptime@ KeTime_MsPart + @ ms!
+
+	RTC_INTERVAL ms +=
+
+	if (ms@ 1000 >=)
+		1000 ms -=
+		1 uptime@ KeTime_SecPart + +=
+	end
+
+	ms@ uptime@ KeTime_MsPart + !
+
+	RTC_INTERVAL // interval
+	trapframe@ // trapframe
+	KeClockTick
+end

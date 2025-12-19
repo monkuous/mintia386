@@ -1,0 +1,31 @@
+//
+// Implements message logging for the HAL.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALRTC.h"
+
+var HALLogLastSource 0
+
+fn HALLogReset { -- }
+	0 HALLogLastSource!
+end
+
+fn HALLog { ... fmt src -- }
+	argv argc@ fmt@ src@ HALVLog
+end
+
+fn HALVLog { argvt argcn fmt src -- }
+	if (src@ HALLogLastSource@ ~=)
+		if (HALLogLastSource@)
+			"\n" Printf
+		end
+
+		src@ HALLogLastSource!
+	end
+
+	src@ "%s: " Printf
+
+	argvt@ argcn@ fmt@ VPrintf
+end

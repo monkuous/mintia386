@@ -1,0 +1,841 @@
+//
+// Implements creation of executive process and thread objects.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "PsInternal.h"
+
+fn PsProcessCreateObject { quotauid sectionobject creationflags parentprocess permissions name -- processobject ok }
+	fnsection "PAGE$text"
+
+	auto initial
+
+	if (parentprocess@)
+		0 initial!
+	end else
+		if (DEBUGCHECKS)
+			if (KeProcessCurrent KeIdleProcess ~=)
+				"PsProcessCreate: no parent process specified but not the idle process\n" KeCrash
+			end
+		end
+
+		KeIdleProcess parentprocess!
+
+		1 initial!
+	end
+
+	if (creationflags@ OSPROCESS_DETACHJOB &)
+		SYSTEMPERMISSION_DETACHJOB // permission
+		KeProcessCurrent // process
+		SeProcessCheckPermission ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (creationflags@ OSPROCESS_NEWSESSION &)
+		SYSTEMPERMISSION_NEWSESSION // permission
+		KeProcessCurrent // process
+		SeProcessCheckPermission ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto paged
+
+	if (initial@)
+		name@ // name
+		0 // flags
+		permissions@ // permissions
+		0 // npquotabias
+		0 // pquotabias
+		PsProcess_SIZEOF PsProcessPaged_SIZEOF + // bodysize
+		PsProcessObjectType@ // type
+		ObObjectCreate ok! processobject!
+
+		if (ok@)
+			return
+		end
+
+		// memset the system process because some stuff won't get initialized
+
+		processobject@ // ptr
+		PsProcess_SIZEOF PsProcessPaged_SIZEOF + // size
+		0 // word
+		memset
+
+		processobject@ PsProcess_SIZEOF + paged!
+	end else
+		name@ // name
+		0 // flags
+		permissions@ // permissions
+		0 // npquotabias
+		PsProcessPaged_SIZEOF MmChargeBytesGet // pquotabias
+		PsProcess_SIZEOF // bodysize
+		PsProcessObjectType@ // type
+		ObObjectCreate ok! processobject!
+
+		if (ok@)
+			return
+		end
+
+		PsProcessPaged_SIZEOF // bytes
+		'PrPg' // tag
+		PAGED // flags
+		MmAllocWithTag ok! paged!
+
+		if (ok@)
+			processobject@ ObObjectDeallocate
+
+			return
+		end
+	end
+
+	paged@ processobject@ PsProcess_PagedArea + !
+
+	parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_UID + @ paged@ PsProcessPaged_UID + !
+	parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_GID + @ paged@ PsProcessPaged_GID + !
+
+	0 paged@ PsProcessPaged_Job + !
+	0 paged@ PsProcessPaged_JobListNext + !
+	0 paged@ PsProcessPaged_JobListPrev + !
+
+	0 processobject@ PsProcess_ConsoleObject + !
+	0 processobject@ PsProcess_ConsoleListNext + !
+	0 processobject@ PsProcess_ConsoleListPrev + !
+
+	if (creationflags@ OSPROCESS_NEWSESSION & quotauid@ UID_SYSTEM ~= &&)
+		0 // inheritfrom
+		paged@ PsProcessPaged_Permissions + // permissions
+		SePermissionsInitialize
+	end else
+		parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_Permissions + // inheritfrom
+		paged@ PsProcessPaged_Permissions + // permissions
+		SePermissionsInitialize
+	end
+
+	auto quotablock
+	parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	if (creationflags@ OSPROCESS_NEWSESSION & quotauid@ -1 ~= &&)
+		quotauid@ // uid
+		quotablock@ // forkquotablock
+		MmQuotaBlockGetByUID ok! quotablock!
+
+		if (ok@)
+			paged@ MmFree
+		
+			processobject@ ObObjectDeallocate
+
+			return
+		end
+	end else
+		// inherit quotablock
+		quotablock@ MmQuotaBlockReference
+	end
+
+	quotablock@ paged@ PsProcessPaged_QuotaBlock + !
+
+	auto handletable
+
+	if (initial@ ~~)
+		quotablock@ // quotablock
+		processobject@ // process
+		ObObjectTableCreate ok! handletable!
+
+		if (ok@)
+			quotablock@ MmQuotaBlockDereference
+
+			paged@ MmFree
+
+			processobject@ ObObjectDeallocate
+
+			return
+		end
+	end else
+		// save some heap and reuse the idle process handle table
+		parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_HandleTable + @ handletable!
+	end
+
+	handletable@ paged@ PsProcessPaged_HandleTable + !
+
+	0 pid!
+
+	if (initial@ ~~)
+		// defer creating system process handle until later since the PID
+		// table is allocated in paged pool and we can't fault in the idle
+		// thread.
+
+		0 PsiIdTableLock drop
+
+		auto pid
+		processobject@ PsiIdCreate ok! pid!
+
+		if (ok@)
+			PsiIdTableUnlock
+
+			if (initial@ ~~)
+				0 handletable@ ExHandleTableDelete
+
+				paged@ MmFree
+			end
+
+			quotablock@ MmQuotaBlockDereference
+
+			processobject@ ObObjectDeallocate
+
+			return
+		end
+	end
+
+	parentprocess@ PsProcess_PagedArea + @ PsProcessPaged_PID + @ paged@ PsProcessPaged_ParentPID + !
+	pid@ paged@ PsProcessPaged_PID + !
+
+	0 paged@ PsProcessPaged_CleanedUp + !
+
+	"PsProcessCreateDeleteMutex" // name
+	KERNELMODE // mode
+	processobject@ PsProcess_ThreadCreateDeleteMutex + // mutex
+	KeMutexInitialize
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"PsProcessTerminationEvent" // name
+	processobject@ PsProcess_TerminationEvent +
+	KeEventInitialize
+
+	0 paged@ PsProcessPaged_ActivationBlock + !
+	0 paged@ PsProcessPaged_ActivationStatus + !
+
+	name@ // name
+	parentprocess@ // parentprocess
+	processobject@ // process
+	KeProcessInitialize
+
+	if (initial@ ~~
+		creationflags@ OSPROCESS_DETACHJOB & ~~ &&)
+
+		processobject@ // destprocessobject
+		parentprocess@ // srcprocessobject
+		PsiJobInherit ok!
+
+		if (ok@)
+			pid@ PsiIdDelete
+
+			PsiIdTableUnlock
+
+			0 handletable@ ExHandleTableDelete
+
+			quotablock@ MmQuotaBlockDereference
+
+			paged@ MmFree
+
+			processobject@ ObObjectDeallocate
+
+			return
+		end
+	end
+
+	sectionobject@ // sectionobject
+	processobject@ // process
+	MmProcessInitialize ok!
+
+	if (ok@)
+		if (initial@ ~~)
+			processobject@ PsiJobIndicateProcessExit
+
+			pid@ PsiIdDelete
+
+			PsiIdTableUnlock
+
+			0 handletable@ ExHandleTableDelete
+		end
+
+		quotablock@ MmQuotaBlockDereference
+
+		paged@ MmFree
+
+		processobject@ ObObjectDeallocate
+
+		return
+	end
+
+	// put it on the global process list
+
+	processobject@ PsProcessInsert
+
+	0 // locked
+	processobject@ // process
+	PsProcessInsertForTrim
+
+	if (initial@ ~~)
+		if (creationflags@ OSPROCESS_DETACHCONSOLE & ~~)
+			// inherit the console group.
+			// lock the parent's createdelete lock to synchronize against its
+			// console group changing.
+
+			0 // alertable
+			parentprocess@ // processobject
+			PsProcessCreateDeleteLock drop
+
+			if (parentprocess@ PsProcess_ConsoleObject + @)
+				processobject@ // process
+				parentprocess@ PsProcess_ConsoleObject + @ // console
+				CoConsoleInsertProcess drop
+			end
+
+			parentprocess@ PsProcessCreateDeleteUnlock
+		end
+
+		PsiIdTableUnlock
+	end
+end
+
+fn PsProcessCreate { quotauid sectionhandle creationflags permissions name -- processhandle ok }
+	fnsection "PAGE$text"
+
+	auto sectionobject
+	auto access
+
+	MmSectionObjectType@ // type
+	sectionhandle@ // handle
+	ObObjectReferenceByHandle ok! sectionobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ ACCESS_WRITE | SeCheckAccess ok!
+
+	if (ok@)
+		sectionobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto processobject
+
+	auto curproc
+	KeProcessCurrent curproc!
+
+	quotauid@ // quotauid
+	sectionobject@ // sectionobject
+	creationflags@ // creationflags
+	curproc@ // parentprocess
+	permissions@ // permissions
+	name@ // name
+	PsProcessCreateObject ok! processobject!
+
+	sectionobject@ ObObjectDereferenceByPointer drop
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	processobject@ // object
+	ObObjectOpen ok! processhandle!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+end
+
+fn PsThreadCreateObject { context1 context2 startfunc creationflags permissions name processobject -- threadobject ok }
+	fnsection "PAGE$text"
+
+	auto initial
+	0 initial!
+
+	if (processobject@ PsSystemProcess@ ==)
+		if (PsSystemProcess@ KeProcess_ThreadListHead + @ ~~)
+			1 initial!
+		end
+	end
+
+	auto quotablock
+	processobject@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	KETHREADSTACKSIZE PAGESHIFT >> // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargeWS ok!
+
+	if (ok@)
+		return
+	end
+
+	0 // needsthread
+	processobject@ // processobject
+	PsProcessCreateDeleteAcquireCheck ok!
+
+	if (ok@)
+		KETHREADSTACKSIZE PAGESHIFT >> // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeWS
+
+		return
+	end
+
+	if (processobject@ KeProcess_ThreadCountI + gi 0xFFFF ==)
+		processobject@ PsProcessCreateDeleteUnlock
+
+		KETHREADSTACKSIZE PAGESHIFT >> // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeWS
+
+		STATUS_OVERFLOW ok!
+
+		return
+	end
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	0 // pquotabias
+	PsThread_SIZEOF // bodysize
+	PsThreadObjectType@ // type
+	ObObjectCreate ok! threadobject!
+
+	if (ok@)
+		processobject@ PsProcessCreateDeleteUnlock
+
+		KETHREADSTACKSIZE PAGESHIFT >> // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeWS
+
+		return
+	end
+
+	0 PsiIdTableLock drop
+
+	auto tid
+	0 tid!
+
+	if (initial@ ~~)
+		threadobject@ PsiIdCreate ok! tid!
+
+		if (ok@)
+			PsiIdTableUnlock
+
+			processobject@ PsProcessCreateDeleteUnlock
+
+			threadobject@ ObObjectDeallocate
+
+			KETHREADSTACKSIZE PAGESHIFT >> // charge
+			quotablock@ // quotablock
+			MmQuotaBlockUnchargeWS
+
+			return
+		end
+	end
+
+	tid@ threadobject@ PsThread_TID + !
+
+	auto kstack
+	MmKernelStackAlloc ok! kstack!
+
+	if (ok@)
+		tid@ PsiIdDelete
+
+		PsiIdTableUnlock
+
+		processobject@ PsProcessCreateDeleteUnlock
+
+		threadobject@ ObObjectDeallocate
+
+		KETHREADSTACKSIZE PAGESHIFT >> // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeWS
+
+		return
+	end
+
+	// Attach to the process to guarantee that it is resident before we call
+	// into Ke to initialize the thread. If we don't do this then we would
+	// have to deal with a bunch of extra edge cases with the resident kernel
+	// stack count.
+
+	0 // try
+	processobject@ // process
+	KeProcessAttach drop drop
+
+	context1@ // context1
+	context2@ // context2
+	startfunc@ // startfunc
+	processobject@ // process
+	KETHREADSTACKSIZE // kstacksize
+	kstack@ // kstack
+	name@ // name
+	threadobject@ // thread
+	KeThreadInitialize
+
+	IPLLOW KeProcessDetach
+
+	if (startfunc@ pointerof PsThreadUserEntry ==)
+		threadobject@ MmThreadInitialize ok!
+
+		if (ok@)
+			kstack@ MmKernelStackFree
+
+			threadobject@ KeThreadUninitialize
+
+			tid@ PsiIdDelete
+
+			PsiIdTableUnlock
+
+			processobject@ PsProcessCreateDeleteUnlock
+
+			threadobject@ ObObjectDeallocate
+
+			KETHREADSTACKSIZE PAGESHIFT >> // charge
+			quotablock@ // quotablock
+			MmQuotaBlockUnchargeWS
+
+			return
+		end
+	end
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"PsThreadTerminationEvent" // name
+	threadobject@ PsThread_TerminationEvent +
+	KeEventInitialize
+
+	// bias reference count: this gets decremented when the thread is queued
+	// to the reaper thread.
+	// note that the associated process object is also left referenced.
+	// the process is dereferenced when the thread object is deleted.
+
+	processobject@ ObObjectReferenceByPointer drop
+	threadobject@ ObObjectReferenceByPointer drop
+
+	if (creationflags@ OSTHREAD_SUSPENDED &)
+		threadobject@ KeThreadSuspend
+	end
+
+	0 threadobject@ PsThread_FileCreationPermissions + !
+
+	PsiIdTableUnlock
+
+	KeThreadCurrent@ KeThread_SignalAcceptMask + @ threadobject@ KeThread_SignalAcceptMask + !
+
+	0 threadobject@ PsThread_IPCBlock + !
+
+	0 threadobject@ PsThread_MemoryPrivilegedCount + !
+
+	0 threadobject@ PsThread_IOListHead + !
+
+	0 threadobject@ PsThread_IOPDeferredListHead + !
+	0 threadobject@ PsThread_IOPDeferredListTail + !
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	threadobject@ KeThreadReady
+end
+
+fn PsThreadCreate { context1 context2 startfunc creationflags permissions name processhandle -- threadhandle ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto threadobject
+	context1@ // context1
+	context2@ // context2
+	startfunc@ // startfunc
+	creationflags@ // creationflags
+	permissions@ // permissions
+	name@ // name
+	processobject@ // processobject
+	PsThreadCreateObject ok! threadobject!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	threadobject@ // object
+	ObObjectOpen ok! threadhandle!
+
+	if (ok@)
+		-1 // status
+		threadobject@ // threadobject
+		PsThreadTerminateObject drop
+
+		threadobject@ ObObjectDereferenceByPointer drop
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessGetUID { process -- uid }
+	process@ PsProcess_PagedArea + @ PsProcessPaged_UID + @ uid!
+end
+
+fn PsProcessGetGID { process -- gid }
+	process@ PsProcess_PagedArea + @ PsProcessPaged_GID + @ gid!
+end
+
+fn PsProcessRemoveForTrim { locked process -- }
+	// This routine CANNOT be paged, because it holds a mutex that must be
+	// held by the working set trimmer.
+
+	if (locked@ ~~)
+		PsProcessListLockForTrim
+	end
+
+	auto ls
+	auto ns
+
+	process@ PsProcess_TrimListPrev + @ ls!
+	process@ PsProcess_TrimListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ PsProcess_TrimListNext + !
+	end else
+		ns@ PsProcessTrimListHead!
+	end
+
+	if (ns@)
+		ls@ ns@ PsProcess_TrimListPrev + !
+	end else
+		ls@ PsProcessTrimListTail!
+	end
+
+	if (locked@ ~~)
+		PsProcessListUnlockForTrim
+	end
+end
+
+fn PsProcessInsertForTrim { locked process -- }
+	// This routine CANNOT be paged, because it holds a mutex that must be
+	// held by the working set trimmer.
+
+	if (locked@ ~~)
+		PsProcessListLockForTrim
+	end
+
+	auto t
+	PsProcessTrimListTail@ t!
+
+	if (t@ ~~)
+		0 process@ PsProcess_TrimListNext + !
+		0 process@ PsProcess_TrimListPrev + !
+
+		process@ PsProcessTrimListHead!
+		process@ PsProcessTrimListTail!
+	end else
+		0 process@ PsProcess_TrimListNext + !
+
+		t@ process@ PsProcess_TrimListPrev + !
+		process@ t@ PsProcess_TrimListNext + !
+		process@ PsProcessTrimListTail!
+	end
+
+	if (locked@ ~~)
+		PsProcessListUnlockForTrim
+	end
+end
+
+fn PsProcessRemove { process -- }
+	fnsection "PAGE$text"
+
+	0 PsProcessListLock drop
+
+	1 PsActiveProcessCount -=
+
+	auto ls
+	auto ns
+
+	process@ PsProcess_GlobalListPrev + @ ls!
+	process@ PsProcess_GlobalListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ PsProcess_GlobalListNext + !
+	end else
+		ns@ PsProcessListHead!
+	end
+
+	if (ns@)
+		ls@ ns@ PsProcess_GlobalListPrev + !
+	end else
+		ls@ PsProcessListTail!
+	end
+
+	PsProcessListUnlock
+end
+
+fn PsProcessInsert { process -- }
+	fnsection "PAGE$text"
+
+	0 PsProcessListLock drop
+
+	1 PsActiveProcessCount +=
+
+	auto t
+	PsProcessListTail@ t!
+
+	if (t@ ~~)
+		0 process@ PsProcess_GlobalListNext + !
+		0 process@ PsProcess_GlobalListPrev + !
+
+		process@ PsProcessListHead!
+		process@ PsProcessListTail!
+	end else
+		0 process@ PsProcess_GlobalListNext + !
+
+		t@ process@ PsProcess_GlobalListPrev + !
+		process@ t@ PsProcess_GlobalListNext + !
+		process@ PsProcessListTail!
+	end
+
+	PsProcessListUnlock
+end
+
+fn PsFinishSystemProcess { -- ok }
+	fnsection "INIT$text"
+
+	// This routine completes the things that could not have been done in
+	// PsProcessCreateObject for the system process, because we were in the
+	// context of the idle thread which cannot fault on paged pool.
+
+	0 PsiIdTableLock drop
+
+	auto pid
+	PsSystemProcess@ PsiIdCreate ok! pid!
+
+	if (ok@)
+		PsiIdTableUnlock
+
+		return
+	end
+
+	pid@ PsSystemProcess@ PsProcess_PagedArea + @ PsProcessPaged_PID + !
+
+	auto tid
+	KeThreadCurrent@ PsiIdCreate ok! tid!
+
+	if (ok@)
+		tid@ PsiIdDelete
+
+		PsiIdTableUnlock
+
+		return
+	end
+
+	tid@ KeThreadCurrent@ PsThread_TID + !
+
+	PsiIdTableUnlock
+end
+
+fn PsiIdTableLock { alertable -- ok }
+	fnsection "PAGE$text"
+
+	alertable@ // alertable
+	PsProcessTable@ // handletable
+	ExHandleTableLock ok!
+end
+
+fn PsiIdTableUnlock { -- }
+	fnsection "PAGE$text"
+
+	PsProcessTable@ ExHandleTableUnlock
+end
+
+fn PsiIdCreate { object -- id ok }
+	fnsection "PAGE$text"
+
+	// ID table MUST be locked exclusive!
+
+	auto entryptr
+	object@ // entryvalue
+	PsProcessTable@ // handletable
+	1 // locked
+	ExHandleCreate ok! entryptr! id!
+
+	if (ok@)
+		return
+	end
+
+	// Bitwise OR the 8-bit sequence number into the ID.
+	//
+	// It is considered unlikely that the 24-bit index part will ever be
+	// exhausted and run into the sequence number part, because this would
+	// require 16 million processes and/or threads to be active simultaneously
+	// at some point or another in the system. This isn't even possible in a
+	// 32-bit system because both of those objects require at least one page
+	// of virtual memory, which would be 64GB of virtual memory on a system
+	// with 4KB pages. Therefore, we do not check for this condition.
+
+	id@ PSI_ID_INDEX_SHIFT <<
+	entryptr@ 4 + @ PSI_ID_SEQUENCE_MASK & | id!
+
+	// Increment the sequence number for the table entry.
+
+	entryptr@ 4 + @ 1 + entryptr@ 4 + !
+end
+
+fn PsiIdDelete { id -- }
+	fnsection "PAGE$text"
+
+	// ID table MUST be locked exclusive!
+	// This function does not check the sequence number, it trusts the ID.
+
+	id@ PSI_ID_INDEX_SHIFT >> // handle
+	PsProcessTable@ // handletable
+	1 // locked
+	ExHandleDelete drop drop drop
+end

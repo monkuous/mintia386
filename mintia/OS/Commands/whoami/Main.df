@@ -1,0 +1,37 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/AMS/Ams.h"
+
+buffer ProcessInformation OSProcessInformation_SIZEOF
+
+fn Main { ... -- ret }
+	AmsInit ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "whoami: couldn't connect to AMS: %s\n" Printf
+	end
+
+	OSCURRENTPROCESS // processhandle
+	ProcessInformation // query
+	OSProcessQuery ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "whoami: couldn't query self: %s\n" OSError
+	end
+
+	auto info
+	AmsUserInformation_SIZEOF alloc info!
+
+	info@ // info
+	ProcessInformation OSProcessInformation_OwningUID + @ // uid
+	AmsQueryByUID ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "whoami: couldn't query UID: %s\n" OSError
+	end
+
+	info@ AmsUserInformation_UserName + "%s\n" Printf
+
+	AmsFree
+end

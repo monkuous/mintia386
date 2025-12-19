@@ -1,0 +1,40 @@
+//
+// Message logging for the MINTIA executive.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCrash.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+fn FPuts { fd s -- }
+	while (s@ gb)
+		s@ gb Putc
+		1 s +=
+	end
+end
+
+fn FPutc { fd c -- }
+	c@ HALPutc
+end
+
+fn Putc { c -- }
+	0 c@ FPutc
+end

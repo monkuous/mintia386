@@ -1,0 +1,94 @@
+//
+// Implements userspace debug tracing for the i386 architecture.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSModule.h"
+#include "<ll>/OSDLL/OSAlloc.h"
+#include "<ll>/OSDLL/OSWait.h"
+#include "<ll>/OSDLL/OSContext.h"
+
+#include "../OSDLL.h"
+
+table DLLContextNames
+	"eax"    "edx"
+	"ecx"    "esi"
+	"edi"    "ebx"
+	"ebp"    "cr2"
+	"ds"     "es"
+	"fs"     "gs"
+	"eip"    "cs"
+	"eflags" "esp"
+	"ss"
+endtable
+
+fn DLLDebugGetSymbol { address -- dll symbase symname symbol ok }
+	ComDLLListHead@ dll!
+
+	STATUS_NO_SYMBOL ok!
+
+	while (dll@)
+		address@ // address
+		dll@ // dll
+		ComDLLGetSymbolByAddress ok! symbol! symname! symbase!
+
+		if (ok@ ~~)
+			return
+		end
+
+		dll@ ComDLL_Next + @ dll!
+	end
+end
+
+fn DLLPrintContext { context -- }
+	auto ctxrows
+	OSCONTEXTCOUNT 4 + 5 / ctxrows!
+
+	auto stderr
+	OSGetStdErr stderr!
+
+	auto ictx
+	0 ictx!
+
+	while (ctxrows@)
+		auto ctxcols
+		5 ctxcols!
+
+		while (ctxcols@)
+			if (ictx@ OSCONTEXTCOUNT <)
+				auto off
+				ictx@ 2 << off!
+
+				auto name
+				DLLContextNames off@ + @ name!
+
+				if (name@)
+					name@ "%-5s " stderr@ FPrintf
+					context@ off@ + @ "%08x " stderr@ FPrintf
+				end
+			end
+
+			1 ictx +=
+			1 ctxcols -=
+		end
+
+		"\n" stderr@ FPrintf
+
+		1 ctxrows -=
+	end
+end
+
+fn DLLDebugTrace { context -- }
+	auto stderr
+	OSGetStdErr stderr!
+
+	context@ DLLPrintContext
+end

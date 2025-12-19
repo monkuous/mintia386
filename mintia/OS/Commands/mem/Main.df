@@ -1,0 +1,119 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+buffer MemoryInformation OSMemoryInformation_SIZEOF
+
+fn Main { ... -- ret }
+	0 ret!
+
+	MemoryInformation OSMemoryQuery ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "mem: couldn't query system memory usage: %s\n" OSError
+	end
+
+	if (argc@ 2 >=)
+		if ([1]argv@ "-c" strcmp)
+			// Comprehensive output.
+
+			ComprehensiveDump
+
+			return
+		end elseif ([1]argv@ "-cl" strcmp)
+			// Loop.
+
+			ComprehensiveDumpLoop
+
+			return
+		end
+	end
+
+	// Print summary (OSDLL handles this).
+
+	MemoryInformation OSMemoryInformationDump
+end
+
+fn ComprehensiveDump { -- }
+	auto info
+	MemoryInformation info!
+
+	info@ OSMemoryInformation_FluidPageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_RealPageCount + @ OSPAGESHIFT << 1024 /
+	"Total memory:       %dKB (%dKB fluid)\n" Printf
+
+	info@ OSMemoryInformation_EvictablePageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_ZeroPageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_FreePageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_AvailablePageCount + @ OSPAGESHIFT << 1024 /
+	"Available memory:   %dKB (free=%dKB zero=%dKB evic=%dKB)\n" Printf
+
+	info@ OSMemoryInformation_FileCachePageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_AnonymousPageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_FileCachePageCount + @
+	info@ OSMemoryInformation_AnonymousPageCount + @ + OSPAGESHIFT << 1024 /
+	"Memory utilization: %dKB (anon=%dKB file=%dKB)\n" Printf
+
+	info@ OSMemoryInformation_SwapPagePeakCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_SwapPageTotalCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_SwapPageUsedCount + @ OSPAGESHIFT << 1024 /
+	"Pagefile usage:     %dKB/%dKB, %dKB peak\n" Printf
+
+	info@ OSMemoryInformation_SwapPagesWritten + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_SwapPagesRead + @ OSPAGESHIFT << 1024 /
+	"Pagefile IO:        %dKB read, %dKB written\n" Printf
+
+	info@ OSMemoryInformation_NonpagedPoolBytesUsedPeak + @ 1024 /
+	info@ OSMemoryInformation_NonpagedPoolBytesUsedExternally + @ 1024 /
+	info@ OSMemoryInformation_NonpagedPoolBytesUsedInternally + @ 1024 /
+	"Nonpaged Pool:      %dKB/%dKB, %dKB peak\n" Printf
+
+	info@ OSMemoryInformation_PagedPoolBytesUsedPeak + @ 1024 /
+	info@ OSMemoryInformation_PagedPoolBytesUsedExternally + @ 1024 /
+	info@ OSMemoryInformation_PagedPoolBytesUsedInternally + @ 1024 /
+	"Paged Pool:         %dKB/%dKB, %dKB peak\n" Printf
+
+	info@ OSMemoryInformation_ModifiedFilePageCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_ModifiedPageMaximum + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_ModifiedPageCount + @ OSPAGESHIFT << 1024 /
+	"Dirty memory:       %dKB/%dKB (file=%dKB)\n" Printf
+
+	info@ OSMemoryInformation_WorkingSetPagePeakCount + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_WorkingSetPageTotalCount + @ OSPAGESHIFT << 1024 /
+	"System working set: %dKB, %dKB peak\n" Printf
+
+	info@ OSMemoryInformation_TheoreticalCommitLimit + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_CommitLimit + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_CommitUsage + @ OSPAGESHIFT << 1024 /
+	"Commit:             %dKB/%dKB, %dKB max\n" Printf
+
+	info@ OSMemoryInformation_PhysicalCommitLimit + @ OSPAGESHIFT << 1024 /
+	info@ OSMemoryInformation_PhysicalCommitUsage + @ OSPAGESHIFT << 1024 /
+	"Physical commit:    %dKB/%dKB\n" Printf
+
+	info@ OSMemoryInformation_ViewCachePageCount + @ OSPAGESHIFT << 1024 /
+	"Resident viewcache: %dKB\n" Printf
+
+	info@ OSMemoryInformation_HardPageFaultCount + @
+	info@ OSMemoryInformation_SoftPageFaultCount + @
+	info@ OSMemoryInformation_PageFaultCount + @
+	"Page faults:        %d (soft=%d hard=%d)\n" Printf
+
+	info@ OSMemoryInformation_PageInCount + @
+	"Page-in count:      %d\n" Printf
+
+	info@ OSMemoryInformation_DirtyFileCount + @
+	"Dirty files:        %d\n" Printf
+end
+
+fn ComprehensiveDumpLoop { -- }
+	while (1)
+		"\[[0m\[[1;1H\[[2J" Printf
+		
+		ComprehensiveDump
+
+		1000 OSThreadSleep drop
+
+		MemoryInformation OSMemoryQuery drop
+	end
+end

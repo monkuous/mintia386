@@ -1,0 +1,743 @@
+//
+// Implements the evaluator for the MINTIA Command Language.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/MCL/Mcl.h"
+
+#include "Mcl.h"
+
+const STATUS_FUNCTION_RETURN -100000
+const STATUS_LOOP_CONTINUE   -100001
+const STATUS_LOOP_BREAK      -100002
+
+fnptr MclpEvaluateF { node machine -- value ok }
+
+datasection "data"
+
+table MclpEvaluateFunctions
+	0
+	pointerof MclpEvaluateBlock
+	pointerof MclpEvaluateLiteral
+	pointerof MclpEvaluatePipeline
+	pointerof MclpEvaluateBuiltinCmd
+	pointerof MclpEvaluateVarRef
+	pointerof MclpEvaluateFuncCall
+	pointerof MclpEvaluateIf
+	0
+	pointerof MclpEvaluateWhile
+	pointerof MclpEvaluateFuncDef
+	pointerof MclpEvaluateVarSet
+	0
+	0
+	0
+endtable
+
+datasection "data"
+
+fn MclInterrupt { machine -- }
+	1 machine@ MclpMachine_Interrupted + !
+end
+
+fn MclpRegisterBuiltin { func name machine -- ok }
+	func@ // value
+	SYMTYPE_BUILTIN // type
+	name@ // name
+	machine@ MclpMachine_RootSymbolTable + // symboltable
+	MclpSymbolSet ok! drop
+end
+
+fn MclpEvaluateNode { capture node machine -- value ok }
+	if (node@ ~~)
+		0 ok!
+		0 value!
+		return
+	end
+
+	if (machine@ MclpMachine_Interrupted + @)
+		0 machine@ MclpMachine_Interrupted + !
+
+		STATUS_SIGNALLED ok!
+
+		return
+	end
+
+	auto func
+	[node@ MclpParseNode_Type + @]MclpEvaluateFunctions@ func!
+
+	//node@ MclpParseNode_Type + @ "%d\n" Printf
+
+	if (capture@)
+		1 machine@ MclpMachine_CaptureDepth + +=
+	end
+
+	node@ // node
+	machine@ // machine
+	func@ MclpEvaluateF ok! value!
+
+	if (capture@)
+		1 machine@ MclpMachine_CaptureDepth + -=
+	end
+end
+
+fn MclpEvaluateBlock { node machine -- value ok }
+	0 value!
+	0 ok!
+
+	auto subnode
+	node@ MclpParseNodeBlock_NodeListHead + @ subnode!
+
+	auto query
+	OSHeapInformation_SIZEOF alloc query!
+
+	while (subnode@)
+		if (subnode@ MclpParseNode_Type + @ PARSENODE_BREAK ==)
+			STATUS_LOOP_BREAK ok!
+		end elseif (subnode@ MclpParseNode_Type + @ PARSENODE_CONTINUE ==)
+			if (value@)
+				value@ MclpFreeValue
+				0 value!
+			end
+
+			STATUS_LOOP_CONTINUE ok!
+		end elseif (subnode@ MclpParseNode_Type + @ PARSENODE_RETURN ==)
+			STATUS_FUNCTION_RETURN ok!
+		end
+
+		if (ok@)
+			if (node@ MclpParseNodeBlock_IsRootBlock + @)
+				0 ok!
+			end
+
+			break
+		end
+
+		if (value@)
+			value@ MclpFreeValue
+			0 value!
+		end
+
+//		query@ OSHeapQuery
+
+//		query@ OSHeapInformation_UsedExternally + @
+//		query@ OSHeapInformation_UsedInternally + @ "%d/%d\n" Printf
+
+		0 // capture
+		subnode@ // node
+		machine@ // machine
+		MclpEvaluateNode ok! value!
+
+		if (ok@)
+			if (node@ MclpParseNodeBlock_IsRootBlock + @)
+				if (ok@ STATUS_FUNCTION_RETURN ==)
+					0 ok!
+				end elseif (ok@ STATUS_LOOP_BREAK ==)
+					0 ok!
+				end elseif (ok@ STATUS_LOOP_CONTINUE ==)
+					0 ok!
+				end
+			end
+
+			return
+		end
+
+		subnode@ MclpParseNode_Next + @ subnode!
+	end
+end
+
+fn MclpEvaluateLiteral { node machine -- value ok }
+	node@ MclpParseNodeLiteral_Value + @ value!
+
+	while (1)
+		if (value@ MclpValue_TokFlags + @ LEXTOK_LITERAL & ~~)
+			// check if we should interpret the contents
+
+			auto contents
+			value@ MclpValue_Contents + @ contents!
+
+			if (contents@ gb '~' ==)
+				if (contents@ 1 + gb 0 ==
+					contents@ 1 + gb '/' == ||)
+
+					// yep, allocate a contents buffer and fill with the user's
+					// home directory.
+
+					LEXTOK_LITERAL // tokflag
+					OSFILEPATHMAX // len
+					0 // contents
+					VALTYPE_INLINE // type
+					MclpValueNew ok! value!
+
+					if (ok@)
+						break
+					end
+
+					auto newcontents
+					value@ MclpValue_Contents + @ newcontents!
+
+					auto home
+					"HOME" OSFindEnvironmentVariable ok! home! drop
+
+					if (ok@)
+						value@ MclpFreeValue
+						break
+					end
+
+					auto len
+					home@ strlen len!
+
+					newcontents@ // dest
+					home@ // src
+					len@ // sz
+					memcpy
+
+					newcontents@ len@ + // dest
+					contents@ 1 + // src
+					strcpy
+
+					return
+				end
+			end
+		end
+
+		break
+	end
+
+	node@ MclpParseNodeLiteral_Value + @ value!
+
+	value@ MclpRefValue
+
+	0 ok!
+end
+
+fn MclpEvaluateVarRef { node machine -- value ok }
+	1 // capture
+	node@ MclpParseNodeVarRef_Name + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+
+	if (ok@)
+		return
+	end
+
+	auto symbol
+	value@ MclpValueContents // name
+	machine@ MclpMachine_CurrentScope + @ // symboltable
+	MclpSymbolLookupFullScope ok! symbol!
+
+	value@ MclpFreeValue
+
+	if (ok@)
+		if (ok@ -1 ==)
+			LEXTOK_LITERAL // tokflag
+			0 // len
+			"" // contents
+			VALTYPE_INLINE // type
+			MclpValueNew ok! value!
+
+			if (ok@)
+				return
+			end
+		end
+
+		return
+	end
+
+	if (symbol@ MclpSymbol_Type + @ SYMTYPE_VALUE ~=)
+		"unexpected symbol type\n" // fmt
+		node@ // node
+		0 // ctx
+		MclpParseDiagnostic
+
+		STATUS_SYNTAX_ERROR ok!
+
+		return
+	end
+
+	symbol@ MclpSymbol_Value + @ value!
+	value@ MclpRefValue
+end
+
+fn MclpEvaluateFuncCall { node machine -- value ok }
+	0 value!
+
+	auto nameval
+	1 // capture
+	node@ MclpParseNodeFunctionCall_Name + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! nameval!
+
+	if (ok@)
+		return
+	end
+
+	auto symbol
+	nameval@ MclpValueContents // name
+	machine@ MclpMachine_CurrentScope + @ // symboltable
+	MclpSymbolLookupFullScope ok! symbol!
+
+	nameval@ MclpFreeValue
+
+	if (ok@)
+		if (ok@ -1 ==)
+			"undefined function\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+		end
+
+		return
+	end
+
+	if (symbol@ MclpSymbol_Type + @ SYMTYPE_FUNCTION ~=
+		symbol@ MclpSymbol_Type + @ SYMTYPE_BUILTIN ~= &&)
+		"unexpected symbol type\n" // fmt
+		node@ // node
+		0 // ctx
+		MclpParseDiagnostic
+
+		STATUS_SYNTAX_ERROR ok!
+
+		return
+	end
+
+	auto argval
+	auto argnode
+
+	auto func
+	symbol@ MclpSymbol_Value + @ func!
+
+	if (symbol@ MclpSymbol_Type + @ SYMTYPE_FUNCTION ==)
+		if (func@ MclpParseNodeFuncDef_ArgCount + @ node@ MclpParseNodeFunctionCall_ArgCount + @ ~=)
+			"argument count mismatch\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+
+			return
+		end
+
+		// user-defined. construct local scope for function.
+
+		auto oldscope
+		machine@ MclpMachine_CurrentScope + @ oldscope!
+
+		auto localscope
+		MclpSymbolTable_SIZEOF OSHeapAllocate ok! localscope!
+
+		if (ok@)
+			return
+		end
+
+		machine@ MclpMachine_RootSymbolTable + // upperscope
+		localscope@ // symboltable
+		MclpSymbolTableInitialize
+
+		localscope@ machine@ MclpMachine_CurrentScope + !
+
+		auto argnamenode
+
+		func@ MclpParseNodeFuncDef_ArgNameListHead + @ argnamenode!
+		node@ MclpParseNodeFunctionCall_ArgListHead + @ argnode!
+
+		while (argnode@)
+			// create argument variable
+
+			auto argnameval
+			1 // capture
+			argnamenode@ // node
+			machine@ // machine
+			MclpEvaluateNode ok! argnameval!
+
+			if (ok@)
+				break
+			end
+
+			if (argnameval@ ~~)
+				"expected argument name value\n" // fmt
+				node@ // node
+				0 // ctx
+				MclpParseDiagnostic
+
+				STATUS_SYNTAX_ERROR ok!
+				break
+			end
+
+			1 // capture
+			argnode@ // node
+			machine@ // machine
+			MclpEvaluateNode ok! argval!
+
+			if (ok@)
+				argnameval@ MclpFreeValue
+				break
+			end
+
+			if (argval@ ~~)
+				LEXTOK_LITERAL // tokflag
+				0 // len
+				"" // contents
+				VALTYPE_INLINE // type
+				MclpValueNew ok! argval!
+
+				if (ok@)
+					argnameval@ MclpFreeValue
+					break
+				end
+			end
+
+			argval@ // value
+			SYMTYPE_VALUE // type
+			argnameval@ MclpValueContents // name
+			localscope@ // symboltable
+			MclpSymbolCreate ok! drop
+
+			argnameval@ MclpFreeValue
+
+			if (ok@)
+				argval@ MclpFreeValue
+				break
+			end
+
+			argnamenode@ MclpParseNode_Next + @ argnamenode!
+			argnode@ MclpParseNode_Next + @ argnode!
+		end
+
+		if (ok@ ~~)
+			0 // capture
+			func@ MclpParseNodeFuncDef_Body + @ // node
+			machine@ // machine
+			MclpEvaluateNode ok! value!
+
+			if (ok@ STATUS_FUNCTION_RETURN ==)
+				0 ok!
+			end
+		end
+
+		localscope@ MclpSymbolTableUninitialize
+		localscope@ OSHeapFree
+
+		oldscope@ machine@ MclpMachine_CurrentScope + !
+	end else
+		// built-in. construct list of arguments and pass to built-in
+		// function.
+
+		auto arglist
+		auto argptr
+		auto cnt
+
+		if (node@ MclpParseNodeFunctionCall_ArgCount + @)
+			node@ MclpParseNodeFunctionCall_ArgCount + @ 3 << OSHeapAllocate ok! arglist!
+
+			if (ok@)
+				return
+			end
+
+			node@ MclpParseNodeFunctionCall_ArgListHead + @ argnode!
+
+			arglist@ argptr!
+
+			0 cnt!
+
+			while (argnode@)
+				1 // capture
+				argnode@ // node
+				machine@ // machine
+				MclpEvaluateNode ok! argval!
+
+				if (ok@)
+					break
+				end
+
+				if (argval@ ~~)
+					LEXTOK_LITERAL // tokflag
+					0 // len
+					"" // contents
+					VALTYPE_INLINE // type
+					MclpValueNew ok! argval!
+
+					if (ok@)
+						argnameval@ MclpFreeValue
+						break
+					end
+				end
+
+				argval@ MclpValueContents argptr@!
+				argval@ argptr@ node@ MclpParseNodeFunctionCall_ArgCount + @ 2 << + !
+
+				4 argptr +=
+				1 cnt +=
+				argnode@ MclpParseNode_Next + @ argnode!
+			end
+		end else
+			0 arglist!
+			0 ok!
+		end
+
+		if (ok@ ~~)
+			// call builtin
+
+			node@ machine@ MclpMachine_CurrentNode + !
+
+			arglist@ // argvt
+			node@ MclpParseNodeFunctionCall_ArgCount + @ // argcn
+			machine@ // machine
+			func@ MclBuiltinF ok! value!
+		end
+
+		if (arglist@)
+			arglist@ node@ MclpParseNodeFunctionCall_ArgCount + @ 2 << + argptr!
+
+			while (cnt@)
+				argptr@@ MclpFreeValue
+
+				4 argptr +=
+				1 cnt -=
+			end
+
+			arglist@ OSHeapFree
+		end
+	end
+end
+
+fn MclpEvaluateIf { node machine -- value ok }
+	0 value!
+	0 ok!
+
+	auto condblock
+	node@ MclpParseNodeIf_CondListHead + @ condblock!
+
+	while (condblock@)
+		if (value@)
+			value@ MclpFreeValue
+			0 value!
+		end
+
+		auto executed
+		condblock@ // node
+		machine@ // machine
+		MclpEvaluateConditionBlock ok! value! executed!
+
+		if (ok@)
+			return
+		end
+
+		if (executed@)
+			return
+		end
+
+		condblock@ MclpParseNode_Next + @ condblock!
+	end
+
+	if (value@)
+		value@ MclpFreeValue
+		0 value!
+	end
+
+	0 // capture
+	node@ MclpParseNodeIf_ElseBody + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+end
+
+fn MclpEvaluateConditionBlock { node machine -- executed value ok }
+	1 // capture
+	node@ MclpParseNodeConditionalBlock_Conditional + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+
+	if (ok@)
+		return
+	end
+
+	value@ MclpEvaluateValueTruthiness executed!
+
+	value@ MclpFreeValue
+	0 value!
+
+	if (executed@ ~~)
+		return
+	end
+
+	0 // capture
+	node@ MclpParseNodeConditionalBlock_Body + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+end
+
+fn MclpEvaluateValueTruthiness { value -- tru }
+	if (value@ ~~)
+		0 tru!
+		return
+	end
+
+	value@ MclpValueContents value!
+
+	if (value@ gb '0' >= value@ gb '9' <= &&)
+		if (value@ atoi)
+			1 tru!
+			return
+		end
+
+		0 tru!
+		return
+	end
+
+	if (value@ "false" strcmp)
+		0 tru!
+		return
+	end
+
+	if (value@ "FALSE" strcmp)
+		0 tru!
+		return
+	end
+
+	1 tru!
+end
+
+fn MclpEvaluateWhile { node machine -- value ok }
+	0 value!
+	0 ok!
+
+	auto executed
+	1 executed!
+
+	while (executed@)
+		if (value@)
+			value@ MclpFreeValue
+			0 value!
+		end
+
+		node@ // node
+		machine@ // machine
+		MclpEvaluateConditionBlock ok! value! executed!
+
+		if (ok@)
+			if (ok@ STATUS_LOOP_CONTINUE ==)
+				0 ok!
+				1 executed!
+				continue
+			end elseif (ok@ STATUS_LOOP_BREAK ==)
+				0 ok!
+			end
+
+			return
+		end
+	end
+end
+
+fn MclpEvaluateFuncDef { node machine -- value ok }
+	0 value!
+
+	auto nameval
+	1 // capture
+	node@ MclpParseNodeFuncDef_Name + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! nameval!
+
+	if (ok@)
+		return
+	end
+
+	node@ // value
+	SYMTYPE_FUNCTION // type
+	nameval@ MclpValueContents // name
+	machine@ MclpMachine_CurrentScope + @ // symboltable
+	MclpSymbolSet ok! drop
+
+	nameval@ MclpFreeValue
+
+	if (ok@)
+		if (ok@ -1 ==)
+			"symbol has incorrect type\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+		end
+
+		return
+	end
+end
+
+fn MclpEvaluateVarSet { node machine -- value ok }
+	auto nameval
+	1 // capture
+	node@ MclpParseNodeVarSet_Name + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! nameval!
+
+	if (ok@)
+		return
+	end
+
+	1 // capture
+	node@ MclpParseNodeVarSet_NewValue + @ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+
+	if (ok@)
+		nameval@ MclpFreeValue
+
+		return
+	end
+
+	if (value@ ~~)
+		LEXTOK_LITERAL // tokflag
+		0 // len
+		"" // contents
+		VALTYPE_INLINE // type
+		MclpValueNew ok! value!
+
+		if (ok@)
+			nameval@ MclpFreeValue
+
+			return
+		end
+	end
+
+	value@ // value
+	SYMTYPE_VALUE // type
+	nameval@ MclpValueContents // name
+	machine@ MclpMachine_CurrentScope + @ // symboltable
+	MclpSymbolSet ok! drop
+
+	nameval@ MclpFreeValue
+
+	if (ok@)
+		value@ MclpFreeValue
+
+		if (ok@ -1 ==)
+			"symbol has incorrect type\n" // fmt
+			node@ // node
+			0 // ctx
+			MclpParseDiagnostic
+
+			STATUS_SYNTAX_ERROR ok!
+		end
+
+		return
+	end
+
+	0 value!
+end
+
+fn MclpEvaluateBuiltinCmd { node machine -- value ok }
+	0 value!
+
+	OSNONE // stdin
+	OSNONE // stdout
+	OSNONE // stderr
+	1 // builtin
+	node@ // node
+	machine@ // machine
+	MclpSpawnCommand ok! drop
+end

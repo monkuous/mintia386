@@ -1,0 +1,393 @@
+//
+// Implements the kernel APC object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "KeInternal.h"
+
+fn KeAPCInitialize { thread specialfunc normalfunc apc -- }
+	thread@ apc@ KeAPC_Thread + !
+
+	specialfunc@ apc@ KeAPC_FunctionSpecial + !
+	normalfunc@ apc@ KeAPC_FunctionNormal + !
+
+	0 apc@ KeAPC_Context1 + !
+	0 apc@ KeAPC_Context2 + !
+
+	0 apc@ KeAPC_Prev + !
+	0 apc@ KeAPC_Next + !
+
+	0 apc@ KeAPC_EnqueuedB + sb
+	KERNELMODE apc@ KeAPC_ModeB + sb
+end
+
+fn KeUserAPCInitialize { thread kernelfunc userfunc special apc -- }
+	thread@ // thread
+	kernelfunc@ // specialfunc
+	userfunc@ // normalfunc
+	apc@ // apc
+	KeAPCInitialize
+
+	USERMODE apc@ KeAPC_ModeB + sb
+end
+
+fn KeAPCDequeue { apc -- ok }
+	0 ok!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (apc@ KeAPC_EnqueuedB + gb ~~)
+		rs@ HALCPUInterruptRestore
+
+		STATUS_NOT_ENQUEUED ok!
+
+		return
+	end
+
+	auto thread
+	apc@ KeAPC_Thread + @ thread!
+
+	auto n
+	apc@ KeAPC_Next + @ n!
+
+	auto p
+	apc@ KeAPC_Prev + @ p!
+
+	if (n@)
+		p@ n@ KeAPC_Prev + !
+	end else // no next means we were the tail
+		if (apc@ KeAPC_ModeB + gb KERNELMODE ==)
+			p@ thread@ KeThread_APCListTail + !
+		end else
+			p@ thread@ KeThread_UserAPCListTail + !
+		end
+	end
+
+	if (p@)
+		n@ p@ KeAPC_Next + !
+	end else // no prev means we were the head
+		if (apc@ KeAPC_ModeB + gb KERNELMODE ==)
+			n@ thread@ KeThread_APCListHead + !
+		end else
+			n@ thread@ KeThread_UserAPCListHead + !
+		end
+	end
+
+	0 apc@ KeAPC_Next + !
+	0 apc@ KeAPC_Prev + !
+
+	0 apc@ KeAPC_EnqueuedB + sb
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeAPCEnqueue { context1 context2 priboost apc -- ok }
+	0 ok!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (apc@ KeAPC_EnqueuedB + gb)
+		ipl@ KeIPLLower
+
+		STATUS_ALREADY_ENQUEUED ok!
+
+		return
+	end
+
+	auto thread
+	apc@ KeAPC_Thread + @ thread!
+
+	auto threadstatus
+	thread@ KeThread_StatusB + gb threadstatus!
+
+	if (thread@ KeThread_KernelStackCanBeSwappedB + gb ~~)
+		if (DEBUGCHECKS)
+			if (apc@ KeAPC_ModeB + gb KERNELMODE ==)
+				"KeAPCEnqueue: kernel APC enqueued after all I/O ran down\n" KeCrash
+			end
+		end
+
+		ipl@ KeIPLLower
+
+		// thread is exiting.
+
+		STATUS_NOT_ENQUEUED ok!
+
+		return
+	end
+
+	0 apc@ KeAPC_Next + !
+	0 apc@ KeAPC_Prev + !
+
+	context1@ apc@ KeAPC_Context1 + !
+	context2@ apc@ KeAPC_Context2 + !
+
+	1 apc@ KeAPC_EnqueuedB + sb
+
+	auto t
+
+	if (apc@ KeAPC_ModeB + gb USERMODE ==)
+		thread@ KeThread_UserAPCListHead + @ t!
+
+		if (t@ ~~)
+			apc@ thread@ KeThread_UserAPCListTail + !
+		end else
+			apc@ t@ KeAPC_Prev + !
+			t@ apc@ KeAPC_Next + !
+		end
+
+		apc@ thread@ KeThread_UserAPCListHead + !
+
+		if (threadstatus@ THREADSTATUS_WAITINGALERTABLE ==)
+			if (thread@ KeThread_WaitModeB + gb USERMODE ==)
+				if (thread@ KeThread_WaitIPLB + gb IPLLOW ==)
+					// target thread is waiting on behalf of usermode, alertably,
+					// at IPLLOW. cause a wakeup.
+
+					1 thread@ KeThread_UserAPCTriggeredB + sb
+					1 thread@ KeThread_UserInterruptB + sb
+
+					STATUS_USER_APC // waitstatus
+					priboost@ // priboost
+					thread@ // thread
+					KiThreadWakeup
+				end
+			end
+		end
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	// place APC on target thread's kernel mode APC queue
+
+	if (apc@ KeAPC_FunctionNormal + @ ~~)
+		// special, place at head
+
+		thread@ KeThread_APCListHead + @ t!
+
+		if (t@ ~~)
+			apc@ thread@ KeThread_APCListTail + !
+		end else
+			apc@ t@ KeAPC_Prev + !
+			t@ apc@ KeAPC_Next + !
+		end
+
+		apc@ thread@ KeThread_APCListHead + !
+	end else
+		// normal, place at tail
+
+		thread@ KeThread_APCListTail + @ t!
+
+		if (t@ ~~)
+			apc@ thread@ KeThread_APCListHead + !
+		end else
+			apc@ t@ KeAPC_Next + !
+			t@ apc@ KeAPC_Prev + !
+		end
+
+		apc@ thread@ KeThread_APCListTail + !
+	end
+
+	if (thread@ KeThreadCurrent@ ==)
+		IPLAPC KiSoftwareInterruptRequest
+	end
+
+	if (threadstatus@ THREADSTATUS_WAITINGALERTABLE ==
+		threadstatus@ THREADSTATUS_WAITINGUNALERTABLE == ||)
+
+		if (thread@ KeThread_WaitIPLB + gb IPLLOW ==)
+			// target thread is waiting, and is at IPLLOW
+
+			auto wake
+			0 wake!
+
+			if (apc@ KeAPC_FunctionNormal + @ ~~)
+				// no normal function means that it's a special APC, cause
+				// a wakeup
+
+				1 wake!
+			end elseif (thread@ KeThread_APCDisableCount + @ 0 ==
+				thread@ KeThread_APCInProgressB + gb ~~ &&)
+				// it's a normal APC. the kernel APC disable count is 0,
+				// and the target thread isn't in an APC already, so cause
+				// a wakeup
+
+				1 wake!
+			end
+
+			if (wake@)
+				STATUS_KERNEL_APC // waitstatus
+				priboost@ // priboost
+				thread@ // thread
+				KiThreadWakeup
+			end
+		end
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn KiAPCDispatchQueue { -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLAPC ~=)
+			"KiAPCDispatchQueue: ipl != IPLAPC\n" KeCrash
+		end
+	end
+
+	auto thread
+	KeThreadCurrent@ thread!
+
+	auto context1
+	4 alloc context1!
+
+	auto context2
+	4 alloc context2!
+
+	auto normalfunc
+	4 alloc normalfunc!
+
+	thread@ KeThreadIgnoreKill drop
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	while (1)
+		auto apc
+		thread@ KeThread_APCListHead + @ apc!
+
+		if (apc@ ~~)
+			break
+		end
+
+		thread@ KeThread_APCInProgressB + gb 1 +
+		thread@ KeThread_APCInProgressB + sb
+
+		apc@ KeAPC_Context1 + @ context1@!
+		apc@ KeAPC_Context2 + @ context2@!
+
+		apc@ KeAPC_FunctionNormal + @ normalfunc@!
+
+		// make sure NEVER TO TOUCH THE APC after the special function has
+		// been called, as the APC may have been reused for another purpose.
+
+		if (apc@ KeAPC_FunctionNormal + @ ~~)
+			// this is a special kernel APC, it should always be dispatched if
+			// IPL < IPLAPC.
+
+			apc@ KeAPCDequeue drop
+
+			ipl@ KeIPLLower
+
+			normalfunc@ // normalfunc
+			context1@ // context1
+			context2@ // context2
+			apc@ // apc
+			apc@ KeAPC_FunctionSpecial + @ KeAPCFunctionSpecial
+
+			IPLDPC KeIPLRaise ipl!
+		end else
+			// this is a normal kernel APC. they are only dispatched if we
+			// aren't already processing an APC, and if APCs aren't disabled.
+
+			if (thread@ KeThread_APCInProgressB + gb ~~
+				thread@ KeThread_APCDisableCount + @ ~~ &&)
+
+				apc@ KeAPCDequeue drop
+
+				ipl@ KeIPLLower
+
+				normalfunc@ context1@ context2@ apc@
+				apc@ KeAPC_FunctionSpecial + @ KeAPCFunctionSpecial
+
+				if (normalfunc@@)
+					// there's still a normal function
+
+					IPLLOW KeIPLLower
+
+					context1@@ // context1
+					context2@@ // context2
+					normalfunc@@ KeAPCFunctionNormal
+
+					IPLAPC KeIPLRaise ipl!
+				end
+
+				IPLDPC KeIPLRaise ipl!
+			end
+		end
+
+		thread@ KeThread_APCInProgressB + gb 1 -
+		thread@ KeThread_APCInProgressB + sb
+	end
+
+	ipl@ KeIPLLower
+
+	thread@ KeThreadAcceptKill drop
+end
+
+fn KeAPCDispatchQueueUser { dispatchfunc trapframe -- }
+	auto thread
+	KeThreadCurrent@ thread!
+
+	auto context1
+	4 alloc context1!
+
+	auto context2
+	4 alloc context2!
+
+	auto normalfunc
+	4 alloc normalfunc!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto apc
+	thread@ KeThread_UserAPCListHead + @ apc!
+
+	if (apc@ ~~)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	apc@ KeAPCDequeue drop
+
+	// We have to save the context and stuff now because the APC might get
+	// re-enqueued with different ones after we lower IPL.
+
+	apc@ KeAPC_Context1 + @ context1@!
+	apc@ KeAPC_Context2 + @ context2@!
+
+	apc@ KeAPC_FunctionNormal + @ normalfunc@!
+
+	ipl@ KeIPLLower
+
+	normalfunc@ // normalfunc
+	context1@ // context1
+	context2@ // context2
+	apc@ // apc
+	apc@ KeAPC_FunctionSpecial + @ KeAPCFunctionSpecial
+
+	if (normalfunc@@)
+		// Cause a usermode interrupt to dispatch this APC, and any other
+		// pending APCs.
+
+		context1@@ // context
+		normalfunc@@ // userfunc
+		dispatchfunc@ // dispatchfunc
+		trapframe@ // trapframe
+		KiInterruptUsermode
+	end
+end

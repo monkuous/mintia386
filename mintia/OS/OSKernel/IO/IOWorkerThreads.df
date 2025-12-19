@@ -1,0 +1,244 @@
+//
+// Implements the IO worker threads.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+buffer IOiFilesystemSyncTimer KeTimer_SIZEOF
+
+const IOWRITEBEHINDINTERVAL 5000
+
+const IOFSSYNCINTERVAL 15000
+
+const IOPAGEFILECONTRACTINTERVAL 30000
+
+const IOPAGEFILECONTRACTTICKS (IOPAGEFILECONTRACTINTERVAL IOFSSYNCINTERVAL /)
+
+fn IOiFilesystemSyncWorker { context1 context2 -- }
+	fnsection "PAGE$text"
+
+	PRIORITY_LOWREALTIME // priority
+	KeThreadCurrent@ // thread
+	KeThreadPrioritySet
+
+	auto waitblocktable
+	KeDispatchWaitBlock_SIZEOF 3 * alloc waitblocktable!
+
+	KeThreadCurrent@ // thread
+	3 // count
+	waitblocktable@ // waitblocktable
+	KeDispatchWaitBlockTableInitialize
+
+	"IOiFilesystemSyncTimer" // name
+	0 // dpc
+	IOiFilesystemSyncTimer // timer
+	KeTimerInitialize
+
+	auto objecttable
+	12 alloc objecttable!
+
+	IOPageFileExtendEvent objecttable@!
+	IOiFilesystemSyncTimer objecttable@ 4 + !
+	IOiFileControlBlockCacheTrimEvent objecttable@ 8 + !
+
+	0 // context1
+	0 // context2
+	IOFSSYNCINTERVAL // interval
+	IOiFilesystemSyncTimer // timer
+	KeTimerEnqueue drop
+
+	auto ticks
+	0 ticks!
+
+	auto ok
+
+	while (1)
+		// iterate all mounted filesystems every 5 seconds and ask them
+		// to flush any internal state. this kernel thread is also responsible
+		// for expanding and contracting the pagefiles, and trimming the FCB
+		// cache.
+
+		auto reason
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAITANY // waittype
+		OSWAIT_TIMEOUTINFINITE // timeout
+		3 // objectcount
+		objecttable@ // objecttable
+		waitblocktable@ // waitblocktable
+		KeThreadWaitForMultipleObjects reason!
+
+		if (DEBUGCHECKS)
+			if (reason@ z<)
+				if (reason@ STATUS_WAIT_TIMEOUT ~=)
+					reason@ "IOiFilesystemSyncWorker: failed to wait on event (%i)\n" KeCrash
+				end
+			end
+		end
+
+		if (ExShuttingDown@)
+			1 IOiFilesystemSyncAll drop
+
+			// let the shutdown thread know we did our bit
+			2 ExShuttingDown!
+
+			while (1)
+				10000 // interval
+				KERNELMODE // waitmode
+				0 // alertable
+				KeThreadSleep drop
+			end
+		end
+
+		if (reason@ 2 ==)
+			IOiFilesystemReclaimFCB
+		end elseif (reason@ 1 ==)
+			0 IOiFilesystemSyncAll drop
+
+			1 ticks +=
+
+			if (ticks@ IOPAGEFILECONTRACTTICKS ==)
+				IOiPageFileContract
+
+				0 ticks!
+			end
+
+			IOiFilesystemSyncTimer KeTimerReset drop
+
+			0 // context1
+			0 // context2
+			IOFSSYNCINTERVAL // interval
+			IOiFilesystemSyncTimer // timer
+			KeTimerEnqueue drop
+		end elseif (reason@ 0 ==)
+			IOiPageFileExtend
+		end
+	end
+end
+
+fn (KeDPCFunction) IOiWritebehindTimerDPCFunction { context1 context2 dpc -- }
+	// Broken on SMP but that's okay because current plans see this disappearing
+	// completely.
+
+	IOiWritebehindTimer KeTimerReset drop
+end
+
+fn IOiWritebehindWorker { context1 context2 -- }
+	PRIORITY_LOWREALTIME // priority
+	KeThreadCurrent@ // thread
+	KeThreadPrioritySet
+
+	auto objecttable
+	8 alloc objecttable!
+
+	IOiWritebehindTimer objecttable@!
+	IOiWritebehindEvent objecttable@ 4 + !
+
+	1 KeThreadCurrent@ PsThread_MemoryPrivilegedCount + +=
+
+	while (1)
+		auto reason
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAITANY // waittype
+		OSWAIT_TIMEOUTINFINITE // timeout
+		2 // objectcount
+		objecttable@ // objecttable
+		0 // waitblocktable
+		KeThreadWaitForMultipleObjects reason!
+
+		if (DEBUGCHECKS)
+			if (reason@ z<)
+				if (reason@ STATUS_WAIT_TIMEOUT ~=)
+					reason@ "IOiWritebehindWorker: failed to wait on event (%i)\n" KeCrash
+				end
+			end
+		end
+
+		auto cacheblock
+		auto ncacheblock
+
+		// capture the entire current dirty cacheblock list.
+		// this ensures that we do a finite amount of work each time this
+		// thread wakes up, which keeps the timer useful.
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		IOiCacheInfoBlockDirtyListHead@ cacheblock!
+		0 IOiCacheInfoBlockDirtyListHead!
+		0 IOiCacheInfoBlockDirtyListTail!
+
+		rs@ HALCPUInterruptRestore
+
+		while (cacheblock@)
+			// capture the next link since the cacheblock may stop existing
+			// soon.
+
+			cacheblock@ IOiCacheInfoBlock_Next + @ ncacheblock!
+
+			// flush the cacheblock.
+
+			cacheblock@ IOCacheInfoBlockFlush drop
+
+			// dereference the cacheblock since we don't need it anymore.
+
+			cacheblock@ IOiCacheInfoBlockDereference drop
+
+			// move on to the next cacheblock.
+
+			ncacheblock@ cacheblock!
+		end
+	end
+end
+
+fn IOiScheduleWritebehind { -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOiScheduleWritebehind: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	0 // context1
+	0 // context2
+	IOWRITEBEHINDINTERVAL // interval
+	IOiWritebehindTimer
+	KeTimerEnqueue drop
+end
+
+fn IOTriggerWritebehind { -- }
+	fnsection "PAGE$text"
+
+	// artifically signal the dirty page event to sweep all the dirty
+	// pages to disk. returns asynchronously, up to the caller to query the
+	// dirty page count and figure out when they've all been written.
+
+	0 // priboost
+	IOiWritebehindEvent // event
+	KeEventSignal
+end

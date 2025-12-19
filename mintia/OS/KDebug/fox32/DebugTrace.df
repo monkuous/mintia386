@@ -1,0 +1,147 @@
+//
+// Implements KDebug stack tracing.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/DebugTrace.h"
+#include "<inc>/DebugSymbols.h"
+
+#include "<inc>/Kernel.h"
+#include "<inc>/Memory.h"
+
+#include "<ll>/OSDLL/OSContext.h"
+
+externptr HALLoaderInfo
+
+var DebugLink 0
+
+asm "
+
+GetLink:
+	mov  [DebugLink], fp
+	ret
+
+"
+
+extern GetLink { -- }
+
+fn DebugDump { rows cols -- }
+	GetLink
+
+	auto link
+	DebugLink@ link!
+
+	pointerof DebugDump link@ rows@ cols@ DebugTrace
+end
+
+buffer TraceNameBuffer 128
+
+fn DebugTrace { pc link rows cols -- }
+	"\n" Printf
+
+	1 rows -=
+
+	auto infostr
+	"InstrPtr Name                                     " infostr!
+
+	auto infocols
+	cols@ infostr@ strlen / infocols!
+
+	1 infocols!
+
+	auto i
+	infocols@ i!
+
+	while (i@)
+		infostr@ Printf
+		1 i -=
+	end
+
+	"\n" Printf
+
+	1 rows -=
+
+	auto links
+	0 links!
+
+	if (link@ 0 ==)
+		"zero link!\n" Printf
+		return
+	end
+
+	while (rows@)
+		infocols@ i!
+
+		while (i@)
+			if (links@ 128 >=)
+				" maxtrace!\n" Printf
+				return
+			end
+
+			auto symname
+			auto symbase
+			auto dll
+
+			auto ok
+			pc@ DebugGetSymDLL ok! drop symname! symbase! dll!
+
+			if (ok@)
+				TraceNameBuffer "UNKNOWN" strcpy
+			end else
+				if (symname@ ~~)
+					"NAMELESS" symname!
+				end
+
+				TraceNameBuffer	dll@ ComDLL_Name + @ strcpy
+				TraceNameBuffer TraceNameBuffer strlen + "!" strcpy
+				TraceNameBuffer TraceNameBuffer strlen + symname@ strcpy
+			end
+
+			TraceNameBuffer
+			pc@
+			"%08x %41s" Printf
+
+			if (link@ ~~)
+				break
+			end
+
+			if (link@ MmVirtualAddressIsValid ~~)
+				" #\n" Printf
+				return
+			end
+
+			if (link@ 4 + MmVirtualAddressIsValid ~~)
+				" #\n" Printf
+				return
+			end
+
+			if (symname@ "VFox32" 6 strncmp)
+				if (link@ OSContext_eflagsB + gb FOX32_RS_USER &)
+					return
+				end
+
+				link@ OSContext_epc + @ pc!
+				link@ OSContext_fp + @ link!
+			end else
+				link@ 4 + @ pc!
+				link@@ link!
+			end
+
+			1 i -=
+			1 links +=
+		end
+
+		"\n" Printf
+
+		if (link@ ~~)
+			break
+		end
+
+		1 rows -=
+	end
+end

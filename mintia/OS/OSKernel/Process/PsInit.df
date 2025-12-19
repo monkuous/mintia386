@@ -1,0 +1,570 @@
+//
+// Initialization of the MINTIA process subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../../Common/Module.h"
+
+#include "PsInternal.h"
+
+var PsProcessObjectType 0
+public PsProcessObjectType
+
+var PsThreadObjectType 0
+public PsThreadObjectType
+
+var PsProcessTable 0
+public PsProcessTable
+
+var PsProcessListHead 0
+public PsProcessListHead
+
+var PsProcessListTail 0
+public PsProcessListTail
+
+var PsProcessTrimListHead 0
+public PsProcessTrimListHead
+
+var PsProcessTrimListTail 0
+public PsProcessTrimListTail
+
+var PsSystemProcess 0
+public PsSystemProcess
+
+var PsSystemInitProcess 0
+public PsSystemInitProcess
+
+var PsActiveProcessCount 0
+public PsActiveProcessCount
+
+buffer PsReaperEvent KeEvent_SIZEOF
+public PsReaperEvent
+
+buffer PsProcessListMutex KeMutex_SIZEOF
+buffer PsProcessTrimListMutex KeMutex_SIZEOF
+
+fn PsProcessListLock { alertable -- ok }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	PsProcessListMutex // object
+	KeThreadWaitForObject ok!
+end
+
+fn PsProcessListUnlock { -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	PsProcessListMutex // mutex
+	KeMutexRelease drop
+end
+
+fn PsProcessListLockForTrim { -- }
+	KERNELMODE // waitmode
+	0 // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	PsProcessTrimListMutex // object
+	KeThreadWaitForObject drop
+end
+
+fn PsProcessListUnlockForTrim { -- }
+	0 // abandon
+	PsProcessTrimListMutex // mutex
+	KeMutexRelease drop
+end
+
+rosection "INIT$text"
+
+fn PsInitPhase0 { -- }
+	fnsection "INIT$text"
+
+	auto ok
+	0 // context
+	0 // quotablock
+	1 // entrysizelog
+	ExHandleTableCreate ok! PsProcessTable!
+
+	if (ok@)
+		ok@ "PsInitPhase0: couldn't create Process table (%i)\n" KeCrash
+	end
+
+rosection "text"
+
+	"PsProcessListMutex" // name
+	KERNELMODE // mode
+	PsProcessListMutex // mutex
+	KeMutexInitialize
+
+	"PsProcessTrimListMutex" // name
+	KERNELMODE // mode
+	PsProcessTrimListMutex
+	KeMutexInitialize
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"PsReaperEvent" // event
+	PsReaperEvent // event
+	KeEventInitialize
+
+rosection "INIT$text"
+
+	PsiJobInit
+
+	auto idleproc
+	KeProcessCurrent idleproc!
+
+	auto type
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	// create Thread type
+
+	"Thread" typeinit@ ObTypeInitializer_Name + !
+	'Thrd' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_THREAD typeinit@ ObTypeInitializer_TypeIdentifier + !
+	pointerof PsiThreadObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+	PsThread_TerminationEvent typeinit@ ObTypeInitializer_WaitOffset + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "PsInitPhase0: couldn't create Thread type (%i)\n" KeCrash
+	end
+
+	type@ PsThreadObjectType!
+
+	// create Process type
+
+	"Process" typeinit@ ObTypeInitializer_Name + !
+	'Proc' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_PROCESS typeinit@ ObTypeInitializer_TypeIdentifier + !
+	pointerof PsiProcessObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+	pointerof PsProcessSetSecurity typeinit@ ObTypeInitializer_SetSecurityFunction + !
+	PsProcess_TerminationEvent typeinit@ ObTypeInitializer_WaitOffset + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "PsInitPhase0: couldn't create Process type (%i)\n" KeCrash
+	end
+
+	type@ PsProcessObjectType!
+
+	auto handle
+
+	-1 // quotauid
+	0 // sectionobject
+	0 // creationflags
+	0 // parentprocess
+	ACCESS_OWNER_ALL // permissions
+	"OSKernel.exe" // name
+	PsProcessCreateObject ok! PsSystemProcess!
+
+	if (ok@)
+		ok@ "PsInitPhase0: couldn't create 'OSKernel.exe' process (%i)\n" KeCrash
+	end
+
+	0 // context1
+	0 // context2
+	pointerof ExInitPhase1 // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"BalanceManager" // name
+	PsSystemProcess@ // processobject
+	PsThreadCreateObject ok! drop
+
+	if (ok@)
+		ok@ "PsInitPhase0: couldn't create 'BalanceManager' thread (%i)\n" KeCrash
+	end
+
+	// this thread will drop back out into ExInit.df, and then become the zero
+	// page worker thread in MmWorkerThreads.df.
+end
+
+fn PsInitPhase1 { -- }
+	fnsection "INIT$text"
+
+	auto obj
+	0 // context1
+	0 // context2
+	pointerof PsiReaperWorker // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"Reaper" // name
+	PsSystemProcess@ // processobject
+	PsThreadCreateObject ok! obj!
+
+	if (ok@)
+		ok@ "PsInitPhase1: failed to create reaper thread (%i)\n" KeCrash
+	end
+
+	PRIORITY_HIGHREALTIME // priority
+	obj@ // thread
+	KeThreadPrioritySet
+
+	"initializing OSDLL.dll\n" "PsInitPhase1" HALLog
+
+	PsOSDLLInit
+
+	"creating SystemInit.exe process\n" "PsInitPhase1" HALLog
+
+	auto initpeb
+	OSPEBSIZE // anonsize
+	ACCESS_OWNER_ALL // permissions
+	0 // name
+	MmSectionCreateObject ok! initpeb!
+
+	if (ok@)
+		ok@ "PsInitPhase1: couldn't create PEB for 'SystemInit.exe' process (%i)\n" KeCrash
+	end
+
+	auto ok
+
+	-1 // quotauid
+	initpeb@ // sectionobject
+	0 // creationflags
+	KeProcessCurrent // parentprocess
+	ACCESS_OWNER_ALL // permissions
+	"SystemInit.exe" // name
+	PsProcessCreateObject ok! obj!
+
+	if (ok@)
+		ok@ "PsInitPhase1: couldn't create 'SystemInit.exe' process (%i)\n" KeCrash
+	end
+
+	obj@ PsSystemInitProcess!
+
+	PRIORITY_HIGHUSER obj@ KeProcess_BasePriorityB + sb
+
+	PsOSDLLInformation PsOSDLLInfo_StartFunction + @ // context1
+	0 // context2
+	pointerof PsThreadUserEntry // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"Main" // name
+	obj@ // processobject
+	PsThreadCreateObject ok! obj!
+
+	if (ok@)
+		ok@ "PsInitPhase1: couldn't create 'Main' thread for 'SystemInit.exe' process (%i)\n" KeCrash
+	end
+
+	// dereference SystemInit's main thread
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn (ObTypeSetSecurityFunction) PsProcessSetSecurity { uid gid permissions object -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (uid@ -1 ~=)
+		uid@ object@ PsProcess_PagedArea + @ PsProcessPaged_UID + !
+	end
+
+	if (gid@ -1 ~=)
+		gid@ object@ PsProcess_PagedArea + @ PsProcessPaged_GID + !
+	end
+end
+
+buffer PsOSDLLInformation PsOSDLLInfo_SIZEOF
+public PsOSDLLInformation
+
+var PsOSDLLFileObject 0
+public PsOSDLLFileObject
+
+fn PsOSDLLInit { -- }
+	fnsection "INIT$text"
+
+	auto info
+	PsOSDLLInformation info!
+
+	auto filehandle
+	auto ok
+
+	OSFILETYPE_FILE // filetype
+	OSTYPE_FILE // objecttype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	0 // initialobject
+	"/mintia/OSDLL.dll" // path
+	KeProcessCurrent // process
+	ObObjectOpenByPathProcess ok! filehandle!
+
+	if (ok@)
+		ok@ "PsOSDLLInit: couldn't open required system component /mintia/OSDLL.dll (%i)\n" KeCrash
+	end
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! PsOSDLLFileObject! drop
+
+	if (ok@)
+		ok@ "PsOSDLLInit: couldn't ref PsOSDLLFileObject (%i)\n" KeCrash
+	end
+
+	auto head
+	filehandle@ PsOSDLLLoadHead ok! head!
+
+	if (ok@)
+		ok@ "PsOSDLLInit: failed to load head (%i)\n" KeCrash
+	end
+
+	auto sectionheader
+	head@ XLOFFHeader_SectionTableOffset + @ head@ + sectionheader!
+
+	auto count
+	head@ XLOFFHeader_SectionCount + @ count!
+
+	while (count@)
+		auto sectionflags
+		sectionheader@ XLOFFSectionHeader_Flags + @ sectionflags!
+
+		if (sectionflags@ XLOFF_SECTIONFLAG_MAP &)
+			if (sectionflags@ XLOFF_SECTIONFLAG_TEXT &)
+				sectionheader@ XLOFFSectionHeader_DataOffset + @ info@ PsOSDLLInfo_TextOffset + !
+				sectionheader@ XLOFFSectionHeader_DataSize + @ info@ PsOSDLLInfo_TextSize + !
+				sectionheader@ XLOFFSectionHeader_VirtualAddress + @ info@ PsOSDLLInfo_TextVAddr + !
+			end elseif (sectionflags@ XLOFF_SECTIONFLAG_BSS &)
+				sectionheader@ XLOFFSectionHeader_DataSize + @ info@ PsOSDLLInfo_BSSSize + !
+				sectionheader@ XLOFFSectionHeader_VirtualAddress + @ info@ PsOSDLLInfo_BSSVAddr + !
+			end else
+				sectionheader@ XLOFFSectionHeader_DataOffset + @ info@ PsOSDLLInfo_DataOffset + !
+				sectionheader@ XLOFFSectionHeader_DataSize + @ info@ PsOSDLLInfo_DataSize + !
+				sectionheader@ XLOFFSectionHeader_VirtualAddress + @ info@ PsOSDLLInfo_DataVAddr + !
+			end
+		end
+
+		1 count -=
+		XLOFFSectionHeader_SIZEOF sectionheader +=
+	end
+
+	auto addr
+
+	"DLLMain" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLMain'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_StartFunction + !
+
+	"DLLThreadExit" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLThreadExit'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_ExitFunction + !
+
+	"DLLSignalDispatch" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLSignalDispatch'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_SignalDispatchFunction + !
+
+	"DLLAPCDispatch" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLAPCDispatch'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_APCDispatchFunction + !
+
+#ifdef FOX32
+	"OSInterlockedIncrement" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'OSInterlockedIncrement'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_InterlockedIncStart + !
+
+	"DLLInterlockedIncrementEnd" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLInterlockedIncrementEnd'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_InterlockedIncEnd + !
+
+	"DLLTryAcquireHelp" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLTryAcquireHelp'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_TryAcquireStart + !
+
+	"DLLTryAcquireHelpEnd" // name
+	info@ PsOSDLLInfo_TextVAddr + @ // textbase
+	head@ // head
+	PsOSDLLFindFunction ok! addr!
+
+	if (ok@)
+		"PsOSDLLInit: couldn't find symbol 'DLLTryAcquireHelpEnd'\n" KeCrash
+	end
+
+	addr@ info@ PsOSDLLInfo_TryAcquireEnd + !
+#endif
+
+	head@ MmFree
+end
+
+fn PsOSDLLLoadHead { filehandle -- head ok }
+	fnsection "INIT$text"
+
+	auto loffheader
+	XLOFFHeader_SIZEOF alloc loffheader!
+
+	auto bytesread
+
+	OSWAIT_TIMEOUTINFINITE // timeout
+	0 // flags
+	XLOFFHeader_SIZEOF // length
+	loffheader@ // buffer
+	filehandle@ // filehandle
+	IOFileRead ok! bytesread!
+
+	if (ok@)
+		ok@ "PsOSDLLLoadHead: couldn't read /mintia/OSDLL.dll header (%i)\n" KeCrash
+	end
+
+	if (bytesread@ XLOFFHeader_SIZEOF <)
+		ok@ "PsOSDLLLoadHead: /mintia/OSDLL.dll short (%i)\n" KeCrash
+	end
+
+	if (loffheader@ XLOFFHeader_Magic + @ XLOFF_MAGIC ~=)
+		loffheader@ XLOFFHeader_Magic + @ "PsOSDLLLoadHead: /mintia/OSDLL.dll corrupted (0x%08x)\n" KeCrash
+	end
+
+	if (loffheader@ XLOFFHeader_TargetArchitecture + @ XLOFF_ARCHITECTURE ~=)
+		"PsOSDLLLoadHead: /mintia/OSDLL.dll is not for this architecture\n" KeCrash
+	end
+
+	auto headsz
+	loffheader@ XLOFFHeader_HeadLength + @ headsz!
+
+	headsz@ PsOSDLLInformation PsOSDLLInfo_HeadSize + !
+
+	headsz@ // bytes
+	'HEAD' // tag
+	PAGED // flags
+	MmAllocWithTag ok! head!
+	
+	if (ok@)
+		headsz@ "PsOSDLLLoadHead: failed to allocate %d bytes for head\n" KeCrash
+	end
+
+	0 // offset
+	filehandle@ // filehandle
+	OSSEEK_SET // mode
+	IOFileSeek ok! drop
+
+	if (ok@)
+		ok@ "PsOSDLLLoadHead: couldn't seek (%i)\n" KeCrash
+	end
+
+	OSWAIT_TIMEOUTINFINITE // timeout
+	0 // flags
+	headsz@ // length
+	head@ // buffer
+	filehandle@ // filehandle
+	IOFileRead ok! bytesread!
+
+	if (ok@)
+		ok@ "PsOSDLLLoadHead: couldn't read /mintia/OSDLL.dll head (%i)\n" KeCrash
+	end	
+
+	if (bytesread@ headsz@ ~=)
+		"PsOSDLLLoadHead: /mintia/OSDLL.dll short\n" KeCrash
+	end
+end
+
+fn PsOSDLLFindFunction { name textbase head -- addr ok }
+	fnsection "INIT$text"
+
+	auto ptr
+	head@ XLOFFHeader_SymbolTableOffset + @ head@ + ptr!
+
+	auto stringtable
+	head@ XLOFFHeader_StringTableOffset + @ head@ + stringtable!
+
+	auto i
+	0 i!
+
+	auto count
+	head@ XLOFFHeader_SymbolCount + @ count!
+
+	0 ok!
+
+	while (i@ count@ <)
+		if (ptr@ XLOFFSymbol_TypeB + gb XLOFF_SYMTYPE_GLOBAL ==)
+			auto sname
+			ptr@ XLOFFSymbol_NameOffset + @ stringtable@ + sname!
+
+			if (sname@ name@ strcmp)
+				ptr@ XLOFFSymbol_Value + @ textbase@ + addr!
+
+				return
+			end
+		end
+
+		XLOFFSymbol_SIZEOF ptr +=
+		1 i +=
+	end
+
+	-1 ok!
+end

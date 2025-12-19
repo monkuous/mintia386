@@ -1,0 +1,119 @@
+//
+// Implements a fast allocator for fixed size memory blocks.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+struct MiZoneFreeBlock
+	4 NextFree
+endstruct
+
+fn MmZoneInitialize { bytes chunk blocksize zoneheader -- }
+	if (DEBUGCHECKS)
+		if (blocksize@ 3 &)
+			blocksize@ "MmZoneInitialize: unaligned block size (%d bytes)\n" KeCrash
+		end
+
+		if (blocksize@ MiZoneFreeBlock_SIZEOF <)
+			blocksize@ "MmZoneInitialize: zone blocks too small (%d bytes)\n" KeCrash
+		end
+	end
+
+	blocksize@ zoneheader@ MmZoneHeader_BlockSize + !
+	0 zoneheader@ MmZoneHeader_ChunkListHead + !
+	0 zoneheader@ MmZoneHeader_FreeListHead + !
+
+	bytes@ // bytes
+	chunk@ // chunk
+	zoneheader@ // zoneheader
+	MmZoneExtend
+end
+
+fn MmZoneExtend { bytes chunk zoneheader -- }
+	if (DEBUGCHECKS)
+		if (bytes@ 3 &)
+			bytes@ "MmZoneExtend: chunk unaligned size (%d bytes)\n" KeCrash
+		end
+
+		if (bytes@ MMZONEOVERHEAD MiZoneFreeBlock_SIZEOF + <)
+			bytes@ "MmZoneExtend: chunk too small (%d bytes)\n" KeCrash
+		end
+	end
+
+	auto blocksize
+	zoneheader@ MmZoneHeader_BlockSize + @ blocksize!
+
+	// add the chunk to the chunk list
+
+	zoneheader@ MmZoneHeader_ChunkListHead + @ chunk@ MmZoneChunkHeader_Next + !
+	chunk@ zoneheader@ MmZoneHeader_ChunkListHead + !
+
+	auto chunkend
+	chunk@ bytes@ + chunkend!
+
+	MmZoneChunkHeader_SIZEOF chunk +=
+
+	// initialize the chunk blocks
+
+	while (chunk@ chunkend@ <)
+		zoneheader@ MmZoneHeader_FreeListHead + @ chunk@ MiZoneFreeBlock_NextFree + !
+		chunk@ zoneheader@ MmZoneHeader_FreeListHead + !
+
+		blocksize@ chunk +=
+	end
+end
+
+fn MmZoneEmpty { zoneheader -- }
+	auto chunk
+	zoneheader@ MmZoneHeader_ChunkListHead + @ chunk!
+
+	while (chunk@)
+		auto nchunk
+		chunk@ MmZoneChunkHeader_Next + @ nchunk!
+
+		chunk@ MmFree
+
+		nchunk@ chunk!
+	end
+
+	0 zoneheader@ MmZoneHeader_ChunkListHead + !
+	0 zoneheader@ MmZoneHeader_FreeListHead + !
+end
+
+fn MmZoneAllocate { zoneheader -- ptr ok }
+	// assumes caller took care of any necessary synchronization.
+
+	zoneheader@ MmZoneHeader_FreeListHead + @ ptr!
+
+	if (ptr@ ~~)
+		STATUS_NO_MEMORY ok!
+
+		return
+	end
+
+	ptr@ MiZoneFreeBlock_NextFree + @ zoneheader@ MmZoneHeader_FreeListHead + !
+
+	0 ok!
+end
+
+fn MmZoneFree { ptr zoneheader -- }
+	// assumes caller took care of any necessary synchronization.
+
+	zoneheader@ MmZoneHeader_FreeListHead + @ ptr@ MiZoneFreeBlock_NextFree + !
+	ptr@ zoneheader@ MmZoneHeader_FreeListHead + !
+end

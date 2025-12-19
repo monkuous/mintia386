@@ -1,0 +1,187 @@
+#include "<inc>/const.h"
+#include "<inc>/rt.h"
+
+asm "
+
+;a0 - word
+;a1 - size
+;a2 - ptr
+memset:
+.global memset
+	push fp
+	mov  fp, sp
+
+	mov  r31, a1
+	srl  r31, 2
+	ifz  rjmp .skip
+
+.wordloop:
+	mov  [a2], a0
+	add  a2, 4
+	rloop .wordloop
+
+.skip:
+	mov  r31, a1
+	and  r31, 3
+	ifz  rjmp .skipbyte
+
+.byteloop:
+	mov.8 [a2], a0
+	srl  a0, 8
+	add  a2, 1
+	rloop .byteloop
+
+.skipbyte:
+	pop  fp
+	ret
+
+;a0 - size
+;a1 - src
+;a2 - dest
+memcpy:
+.global memcpy
+	push fp
+	mov  fp, sp
+
+	mov  r31, a0
+	srl  r31, 2
+	ifz  rjmp .skip
+
+.wordloop:
+	mov  [a2], [a1]
+	add  a2, 4
+	add  a1, 4
+	rloop .wordloop
+
+.skip:
+	mov  r31, a0
+	and  r31, 3
+	ifz  rjmp .skipbyte
+
+.byteloop:
+	mov.8 [a2], [a1]
+	add  a2, 1
+	add  a1, 1
+	rloop .byteloop
+
+.skipbyte:
+	pop  fp
+	ret
+
+;a0 - size
+;a1 - src
+;a2 - dest
+memmove_bck:
+.global memmove_bck
+	push fp
+	mov  fp, sp
+
+	mov  r31, a0
+
+	add  a1, a0
+	add  a2, a0
+
+; if dest - src > 3, we can do our tricks.
+; otherwise, this will cause horrible things to happen.
+
+	mov  t0, a2
+	sub  t0, a1
+	cmp  t0, 3
+	iflteq rjmp .byteloop
+
+	srl  r31, 2
+	ifz  rjmp .skip
+
+.wordloop:
+	sub  a2, 4
+	sub  a1, 4
+	mov  [a2], [a1]
+	rloop .wordloop
+
+.skip:
+	mov  r31, a0
+	and  r31, 3
+	ifz  rjmp .skipbyte
+
+.byteloop:
+	sub  a2, 1
+	sub  a1, 1
+	mov.8 [a2], [a1]
+	rloop .byteloop
+
+.skipbyte:
+	pop  fp
+	ret
+
+;a0 - size
+;a1 - src
+;a2 - dest
+memmove:
+.global memmove
+	cmp  a0, 0
+	ifz  rjmp .out
+
+	cmp  a1, a2
+	iflt rjmp .backwards
+	jmp  memcpy
+
+.backwards:
+	jmp  memmove_bck
+
+.out:
+	ret
+
+;a0 - max
+;a1 - src
+;a2 - dest
+strncpy:
+.global strncpy
+	push fp
+	mov  fp, sp
+
+.loop:
+	cmp  a0, 0
+	ifz  rjmp .done
+	movz.8 t3, [a1]
+	mov.8 [a2], t3
+	add  a1, 1
+	add  a2, 1
+	sub  a0, 1
+	cmp  t3, 0
+	ifnz rjmp .loop
+
+	pop  fp
+	ret
+
+.done:
+	mov.8 [a2], 0
+
+	pop  fp
+	ret
+
+"
+
+fn strcmp { str1 str2 -- eq }
+	while (str1@ gb str2@ gb ==)
+		if (str1@ gb ~~)
+			1 eq!
+			return
+		end
+
+		1 str1 +=
+		1 str2 +=
+	end
+
+	0 eq!
+end
+
+fn strcpy { dest src -- }
+	while (src@ gb 0 ~=)
+		src@ gb dest@ sb
+
+		1 dest +=
+		1 src +=
+	end
+
+	0 dest@ sb
+end

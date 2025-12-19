@@ -1,0 +1,717 @@
+//
+// API wrappers for the AMS client DLL.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/AmsAPI.h"
+
+#include "AmsClient.h"
+
+var AmsUserCacheListHead 0
+var AmsGroupCacheListHead 0
+
+struct AmsCachedUserInfo
+	4 Next
+	4 UID
+	AmsUserInformation_SIZEOF Info
+endstruct
+
+struct AmsCachedGroupInfo
+	4 Next
+	4 GID
+	AmsGroupInformation_SIZEOF Info
+endstruct
+
+fn AmsUserInfoInitialize { info -- }
+	// initialize a user info struct to have no effect when using it to edit a
+	// user.
+
+	info@ // ptr
+	AmsUserInformation_SIZEOF // sz
+	0 // word
+	memset
+
+	-1 info@ AmsUserInformation_GID + !
+	-1 info@ AmsUserInformation_RestrictionLevel + !
+end
+
+fn AmsGroupInfoInitialize { info -- }
+	// initialize a group info struct to have no effect when using it to edit
+	// a group.
+
+	info@ // ptr
+	AmsGroupInformation_SIZEOF // sz
+	0 // word
+	memset
+end
+
+fn AmsClearCache { -- }
+	AmsLock
+
+	auto info
+	auto ninfo
+
+	AmsUserCacheListHead@ info!
+
+	while (info@)
+		info@ AmsCachedUserInfo_Next + @ ninfo!
+
+		info@ OSHeapFree
+
+		ninfo@ info!
+	end
+
+	AmsGroupCacheListHead@ info!
+
+	while (info@)
+		info@ AmsCachedGroupInfo_Next + @ ninfo!
+
+		info@ OSHeapFree
+
+		ninfo@ info!
+	end
+
+	0 AmsUserCacheListHead!
+	0 AmsGroupCacheListHead!
+
+	AmsUnlock
+end
+
+fn AmsEndUserSessions { uid -- ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_END_USER_SESSIONS txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	uid@ AmsSectionBase@!
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end
+
+fn AmsQueryUIDByName { name -- uid ok }
+	if (name@ strlen AMSNAMEMAX >=)
+		STATUS_NAME_TOO_LONG ok!
+		return
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_QUERY_UID_BY_NAME txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	AmsSectionBase@ AmsMessageQueryUIDByName_UserName + // dest
+	name@ // src
+	strcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsSectionBase@ AmsMessageQueryUIDByName_UserName + @ uid!
+
+	AmsUnlock
+end
+
+fn AmsQueryGIDByName { name -- gid ok }
+	if (name@ strlen AMSNAMEMAX >=)
+		STATUS_NAME_TOO_LONG ok!
+		return
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_QUERY_GID_BY_NAME txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	AmsSectionBase@ AmsMessageQueryGIDByName_GroupName + // dest
+	name@ // src
+	strcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsSectionBase@ AmsMessageQueryGIDByName_GroupName + @ gid!
+
+	AmsUnlock
+end
+
+fn AmsQueryByUID { info uid -- ok }
+	AmsLock
+
+	auto cached
+	AmsUserCacheListHead@ cached!
+
+	while (cached@)
+		if (cached@ AmsCachedUserInfo_UID + @ uid@ ==)
+			info@ // dest
+			cached@ AmsCachedUserInfo_Info + // src
+			AmsUserInformation_SIZEOF // sz
+			memcpy
+
+			AmsUnlock
+
+			0 ok!
+
+			return
+		end
+
+		cached@ AmsCachedUserInfo_Next + @ cached!
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_QUERY_BY_UID txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	uid@ AmsSectionBase@!
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	info@ // dest
+	AmsSectionBase@ // src
+	AmsUserInformation_SIZEOF // sz
+	memcpy
+
+	AmsCachedUserInfo_SIZEOF OSHeapAllocate ok! cached!
+
+	if (ok@ ~~)
+		uid@ cached@ AmsCachedUserInfo_UID + !
+
+		cached@ AmsCachedUserInfo_Info + // dest
+		AmsSectionBase@ // src
+		AmsUserInformation_SIZEOF // sz
+		memcpy
+
+		AmsUserCacheListHead@ cached@ AmsCachedUserInfo_Next + !
+		cached@ AmsUserCacheListHead!
+	end
+
+	0 ok!
+
+	AmsUnlock
+end
+
+fn AmsQueryByGID { info gid -- ok }
+	AmsLock
+
+	auto cached
+	AmsGroupCacheListHead@ cached!
+
+	while (cached@)
+		if (cached@ AmsCachedGroupInfo_GID + @ gid@ ==)
+			info@ // dest
+			cached@ AmsCachedGroupInfo_Info + // src
+			AmsGroupInformation_SIZEOF // sz
+			memcpy
+
+			AmsUnlock
+
+			0 ok!
+
+			return
+		end
+
+		cached@ AmsCachedGroupInfo_Next + @ cached!
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_QUERY_BY_GID txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	gid@ AmsSectionBase@!
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	info@ // dest
+	AmsSectionBase@ // src
+	AmsGroupInformation_SIZEOF // sz
+	memcpy
+
+	AmsCachedGroupInfo_SIZEOF OSHeapAllocate ok! cached!
+
+	if (ok@ ~~)
+		gid@ cached@ AmsCachedGroupInfo_GID + !
+
+		cached@ AmsCachedGroupInfo_Info + // dest
+		AmsSectionBase@ // src
+		AmsGroupInformation_SIZEOF // sz
+		memcpy
+
+		AmsGroupCacheListHead@ cached@ AmsCachedGroupInfo_Next + !
+		cached@ AmsGroupCacheListHead!
+	end
+
+	0 ok!
+
+	AmsUnlock
+end
+
+fn AmsLogon { flags password uid -- obdirhandle ok }
+	if (password@ strlen AMSPASSWORDMAX >=)
+		STATUS_PASSWORD_TOO_LONG ok!
+		return
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_LOGON txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	uid@ AmsSectionBase@ AmsMessageLogon_UID + !
+	flags@ AmsSectionBase@ AmsMessageLogon_Flags + !
+
+	AmsSectionBase@ AmsMessageLogon_Password + // dest
+	password@ // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsSectionBase@ AmsMessageLogon_UserObDirHandle + @ obdirhandle!
+
+	AmsUnlock
+end
+
+fn AmsChangePassword { flags oldpassword newpassword uid -- ok }
+	if (oldpassword@ strlen AMSPASSWORDMAX >=)
+		STATUS_PASSWORD_TOO_LONG ok!
+		return
+	end
+
+	if (newpassword@ strlen AMSPASSWORDMAX >=)
+		STATUS_PASSWORD_TOO_LONG ok!
+		return
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_CHANGE_PASSWORD txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	uid@ AmsSectionBase@ AmsMessageChangePassword_UID + !
+	flags@ AmsSectionBase@ AmsMessageChangePassword_Flags + !
+
+	AmsSectionBase@ AmsMessageChangePassword_OldPassword + // dest
+	oldpassword@ // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	AmsSectionBase@ AmsMessageChangePassword_NewPassword + // dest
+	newpassword@ // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end
+
+fn AmsCreateUser { password info -- uid ok }
+	if (password@ strlen AMSPASSWORDMAX >=)
+		STATUS_PASSWORD_TOO_LONG ok!
+		return
+	end
+
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_CREATE_USER txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	AmsSectionBase@ AmsMessageCreateUser_Password + // dest
+	password@ // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	AmsSectionBase@ AmsMessageCreateUser_Info + // dest
+	info@ // src
+	AmsUserInformation_SIZEOF // sz
+	memcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsSectionBase@ AmsMessageCreateUser_UID + @ uid!
+
+	AmsUnlock
+end
+
+fn AmsCreateGroup { info -- gid ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_CREATE_GROUP txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	AmsSectionBase@ AmsMessageCreateGroup_Info + // dest
+	info@ // src
+	AmsGroupInformation_SIZEOF // sz
+	memcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsSectionBase@ AmsMessageCreateGroup_GID + @ gid!
+
+	AmsUnlock
+end
+
+fn AmsDeleteUser { uid -- ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_EDIT_USER txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	uid@ AmsSectionBase@ AmsMessageEditUser_UID + !
+	1 AmsSectionBase@ AmsMessageEditUser_Delete + !
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end
+
+fn AmsDeleteGroup { gid -- ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_EDIT_GROUP txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	gid@ AmsSectionBase@ AmsMessageEditGroup_GID + !
+	1 AmsSectionBase@ AmsMessageEditGroup_Delete + !
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end
+
+fn AmsEditUser { info uid -- ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_EDIT_USER txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	uid@ AmsSectionBase@ AmsMessageEditUser_UID + !
+	0 AmsSectionBase@ AmsMessageEditUser_Delete + !
+
+	AmsSectionBase@ AmsMessageEditUser_Info + // dest
+	info@ // src
+	AmsUserInformation_SIZEOF // sz
+	memcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end
+
+fn AmsEditGroup { info gid -- ok }
+	auto txmsg
+	AmsMessage_SIZEOF alloc txmsg!
+
+	OSPORT_MESSAGE_REQUEST txmsg@ OSMessageHeader_TypeB + sb
+	AMSAPI_EDIT_GROUP txmsg@ OSMessageHeader_SubtypeB + sb
+	OSNONE txmsg@ OSMessageHeader_Handle + !
+	AMSBODYLENGTH txmsg@ OSMessageHeader_LengthI + si
+
+	AmsLock
+
+	gid@ AmsSectionBase@ AmsMessageEditGroup_GID + !
+	0 AmsSectionBase@ AmsMessageEditGroup_Delete + !
+
+	AmsSectionBase@ AmsMessageEditGroup_Info + // dest
+	info@ // src
+	AmsGroupInformation_SIZEOF // sz
+	memcpy
+
+	txmsg@ // rxmsg
+	txmsg@ // txmsg
+	OSWAIT_TIMEOUTINFINITE // timeout
+	AmsApiPort@ // porthandle
+	OSPortSendAndWaitReply ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	txmsg@ AmsMessage_Status + @ ok!
+
+	if (ok@)
+		AmsUnlock
+
+		return
+	end
+
+	AmsUnlock
+end

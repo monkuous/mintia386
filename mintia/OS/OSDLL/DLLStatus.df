@@ -1,0 +1,131 @@
+//
+// Implements translation of error codes to status message strings.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSStatus.h"
+
+table OSStatusNames
+	"Operation succeeded"                      // STATUS_SUCCESS
+	"Unknown (-1)"                             // -1
+	"Insufficient memory"                      // STATUS_NO_MEMORY
+	"Nonpaged pool quota exceeded"             // STATUS_QUOTA_EXCEEDED
+	"Interrupted by kernel APC"                // STATUS_KERNEL_APC
+	"Interrupted by user APC"                  // STATUS_USER_APC
+	"Wait timed out"                           // STATUS_WAIT_TIMEOUT
+	"Invalid handle"                           // STATUS_INVALID_HANDLE
+	"Deadlock possible"                        // STATUS_DEADLOCK_POSSIBLE
+	"Invalid argument"                         // STATUS_INVALID_ARGUMENT
+	"Invalid object type"                      // STATUS_INVALID_OBJECT_TYPE
+	"No such user"                             // STATUS_NO_SUCH_USER
+	"Permission denied"                        // STATUS_PERMISSION_DENIED
+	"Interrupted by signal"                    // STATUS_SIGNALLED
+	"Thread killed"                            // STATUS_KILLED
+	"Operation is forbidden"                   // STATUS_FORBIDDEN_OPERATION
+	"Name too long"                            // STATUS_NAME_TOO_LONG
+	"Not a directory"                          // STATUS_NOT_A_DIRECTORY
+	"No such file or directory"                // STATUS_NOT_FOUND
+	"Operation not supported by device"        // STATUS_IO_NOT_SUPPORTED
+	"Buffer maximum size reached"              // STATUS_BUFFER_MAXIMUM
+	"Requested I/O not available"              // STATUS_IO_NOT_AVAILABLE
+	"Is a directory"                           // STATUS_IS_A_DIRECTORY
+	"No space left on device"                  // STATUS_IO_END_OF_DISK
+	"End of file reached"                      // STATUS_IO_END_OF_FILE
+	"Try again later"                          // STATUS_IO_TRY_AGAIN_LATER
+	"Device is busy"                           // STATUS_IO_DEVICE_BUSY
+	"No valid filesystem recognized"           // STATUS_IO_BAD_FILESYSTEM
+	"No such filesystem type"                  // STATUS_IO_NO_SUCH_FILESYSTEM
+	"Read-only filesystem"                     // STATUS_READONLY_FILESYSTEM
+	"Requested virtual address unavailable"    // STATUS_UNAVAILABLE_ADDRESS
+	"Arithmetic overflow"                      // STATUS_OVERFLOW
+	"Bad virtual address"                      // STATUS_BAD_ADDRESS
+	"Read operation resulted in fault"         // STATUS_FAULT
+	"Feature not implemented"                  // STATUS_NOT_IMPLEMENTED
+	"Invalid filetype"                         // STATUS_NOT_CORRECT_FILETYPE
+	"Requested I/O is unaligned"               // STATUS_IO_UNALIGNED
+	"Virtual memory quota exceeded"            // STATUS_VM_QUOTA_EXCEEDED
+	"Image corrupted or invalid"               // STATUS_BAD_EXECUTABLE
+	"Executable not for this architecture"     // STATUS_EXEC_NOT_FOR_ARCH
+	"Symbol not found"                         // STATUS_NO_SYMBOL
+	"Pagefile too small"                       // STATUS_SWAP_TOO_SMALL
+	"Pagefile has been exhausted"              // STATUS_NO_SWAP
+	"Ring buffer is full"                      // STATUS_RING_FULL
+	"Ring buffer is empty"                     // STATUS_RING_EMPTY
+	"Paged pool quota exceeded"                // STATUS_PAGED_QUOTA_EXCEEDED
+	"Mutex not owned by thread"                // STATUS_MUTEX_NOT_OWNED
+	"Console host hung up"                     // STATUS_CONSOLE_HUNG_UP
+	"Process is already terminated"            // STATUS_PROCESS_IS_TERMINATED
+	"Process or thread is still alive"         // STATUS_ALIVE
+	"Total length of arguments too great"      // STATUS_ARGUMENTS_TOO_LONG
+	"Process has no thread yet"                // STATUS_PROCESS_NO_THREAD
+	"Environment variable not found"           // STATUS_ENVIRON_NOT_FOUND
+	"Environment variable contents too large"  // STATUS_ENVIRON_TOO_LARGE
+	"Not a file"                               // STATUS_NOT_A_FILE
+	"Memory commitment limit exceeded"         // STATUS_COMMIT_EXCEEDED
+	"Process has no console"                   // STATUS_NO_CONSOLE
+	"Process has a console"                    // STATUS_HAS_CONSOLE
+	"Illegal characters in filename"           // STATUS_ILLEGAL_NAME
+	"Object already exists"                    // STATUS_ALREADY_EXISTS
+	"Process encountered an exception"         // STATUS_FAULT_WHILE_STARTING
+	"Operation would have crossed volumes"     // STATUS_CROSS_VOLUME
+	"No such signal exists"                    // STATUS_NOT_A_SIGNAL
+	"Configuration file is invalid"            // STATUS_INVALID_CONFIG_FILE
+	"No such group"                            // STATUS_NO_SUCH_USER
+	"Not a typewriter"                         // STATUS_NOT_A_CONSOLE
+	"Buffer overlaps memory-mapped device"     // STATUS_OVERLAPS_MMIO
+	"Physical commitment limit exceeded"       // STATUS_PHYSICAL_COMMIT_EXCEEDED
+	"Maximum number of pagefiles reached"      // STATUS_TOO_MANY_PAGEFILES
+	"Timer already enqueued"                   // STATUS_ALREADY_ENQUEUED
+	"Timer not enqueued"                       // STATUS_NOT_ENQUEUED
+	"Executable is stripped"                   // STATUS_STRIPPED_EXECUTABLE
+	0                                          // STATUS_OTHER_CONDITION
+	"I/O operation cancelled"                  // STATUS_IO_CANCELLED
+	"IPC message too long for port"            // STATUS_MESSAGE_TOO_LONG
+	"Working set quota exceeded"               // STATUS_WS_QUOTA_EXCEEDED
+	"No pending message"                       // STATUS_NO_MESSAGE
+	"Port is disconnected"                     // STATUS_PORT_DISCONNECTED
+	"Failed to connect to port"                // STATUS_CONNECTION_FAILED
+	"No such client"                           // STATUS_NO_SUCH_CLIENT
+	"Incorrect password"                       // STATUS_INCORRECT_PASSWORD
+	0                                          // STATUS_REFAULT
+	0                                          // STATUS_FAULT_ERROR
+	"Password too long"                        // STATUS_PASSWORD_TOO_LONG
+	"Port queue is full"                       // STATUS_PORT_QUEUE_FULL
+	"I/O cancellation was incomplete"          // STATUS_IO_CANCEL_INCOMPLETE
+	"No living device line managers"           // STATUS_DEAD_SYSTEM
+	"No volume mounted on device"              // STATUS_NOT_MOUNTED
+	"Illegal characters in username"           // STATUS_INVALID_USERNAME
+	"Illegal characters in group name"         // STATUS_INVALID_GROUPNAME
+	"User already exists"                      // STATUS_USER_EXISTS
+	"Group already exists"                     // STATUS_GROUP_EXISTS
+	"Symlink depth count exceeded"             // STATUS_REPARSE_MAXIMUM
+	"Syntax error"                             // STATUS_SYNTAX_ERROR
+	"I/O error"                                // STATUS_IO_ERROR
+	"Job is terminated"                        // STATUS_JOB_IS_TERMINATED
+	"Process already has job"                  // STATUS_PROCESS_HAS_JOB
+	"Process has no job"                       // STATUS_PROCESS_NO_JOB
+	"Maximum job tree depth exceeded"          // STATUS_JOB_DEPTH
+	"File or directory is corrupted"           // STATUS_FILE_CORRUPT
+	"Write operation resulted in fault"        // STATUS_FAULT_WRITE
+	"File is being used by another process"    // STATUS_FILE_BUSY
+	"Variable not found"                       // STATUS_NO_VARIABLE
+	"Storage media removed from device"        // STATUS_MEDIA_REMOVED
+endtable
+
+const STATUS_BIGGEST_ABS 103
+
+fn OSStatusGetName { status -- name }
+	status@ abs status!
+
+	if (status@ STATUS_BIGGEST_ABS <=)
+		[status@]OSStatusNames@ name!
+
+		if (name@ ~~)
+			"Unknown" name!
+		end
+	end else
+		"Unknown" name!
+	end
+end

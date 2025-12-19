@@ -1,0 +1,315 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<ll>/OSDLL/OSMouseControl.h"
+#include "<ll>/OSDLL/OSVideoControl.h"
+
+// originally ported from AISIX
+
+var XRes 0
+var YRes 0
+
+var FBAddress 0
+
+var BytesPerRow 0
+
+var MouseHandle 0
+
+var MouseX 0
+var MouseY 0
+
+var MouseRCur 0
+
+buffer MousePacket OSMousePacket_SIZEOF
+buffer MouseStatusBlock OSStatusBlock_SIZEOF
+
+const BOXROWS 8
+const BOXCOLS 8
+
+fn InvertBox32 { x y -- }
+	auto base
+	y@ XRes@ * x@ + 4 * FBAddress@ + base!
+
+	auto mod
+	XRes@ BOXCOLS - 4 * mod!
+
+	auto count
+	BOXROWS count!
+
+	while (count@)
+		auto xcount
+		BOXCOLS xcount!
+
+		while (xcount@)
+			base@@ ~ base@!
+
+			4 base +=
+			1 xcount -=
+		end
+
+		mod@ base +=
+		1 count -=
+	end
+end
+
+fn InvertBox { x y -- }
+	if (BytesPerRow@ 4 ==)
+		x@ y@ InvertBox32
+		return
+	end
+
+	auto i
+	0 i!
+
+	auto base
+	y@ XRes@ * x@ + FBAddress@ + base!
+
+	auto mod
+	XRes@ BOXCOLS - mod!
+
+	auto alignpix
+	0 alignpix!
+
+	if (base@ 3 &)
+		4 base@ 3 & - alignpix!
+	end
+
+	auto count
+	BOXCOLS alignpix@ - 4 >> count!
+
+	auto extrapix
+	BOXCOLS count@ 4 << - alignpix@ - extrapix!
+
+	while (i@ BOXROWS <)
+		auto j
+		alignpix@ j!
+
+		while (j@)
+			base@ gb ~ base@ sb
+
+			1 base +=
+			1 j -=
+		end
+
+		count@ j!
+
+		while (j@)
+			base@@ ~ base@!
+			base@ 4 + @ ~ base@ 4 + !
+			base@ 8 + @ ~ base@ 8 + !
+			base@ 12 + @ ~ base@ 12 + !
+
+			16 base +=
+			1 j -=
+		end
+
+		extrapix@ j!
+
+		while (j@)
+			base@ gb ~ base@ sb
+
+			1 base +=
+			1 j -=
+		end
+
+		mod@ base +=
+		1 i +=
+	end
+end
+
+fn Main { ... -- ret }
+	0 ret!
+
+	OSFILETYPE_CHARDEVICE // filetype
+	OSFILEFLAG_NOCACHE // flags
+	ACCESS_READ // access
+	":mouse2" // path
+	OSFileOpen ret! MouseHandle!
+
+	if (ret@)
+		OSFILETYPE_CHARDEVICE // filetype
+		OSFILEFLAG_NOCACHE // flags
+		ACCESS_READ // access
+		":foxmouse0" // path
+		OSFileOpen ret! MouseHandle!
+
+		if (ret@)
+			ret@ OSStatusGetName "mousedemo: couldn't open mouse device: %s\n" OSError
+		end
+	end
+
+	auto fbhandle
+	OSFILETYPE_CHARDEVICE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_WRITE | // access
+	":kinnowfb0" // path
+	OSFileOpen ret! fbhandle!
+
+	if (ret@)
+		OSFILETYPE_CHARDEVICE // filetype
+		0 // flags
+		ACCESS_READ ACCESS_WRITE | // access
+		":foxfb0" // path
+		OSFileOpen ret! fbhandle!
+
+		if (ret@)
+			ret@ OSStatusGetName "mousedemo: couldn't open framebuffer device: %s\n" OSError
+		end
+	end
+
+	auto videoquery
+	OSVideoQuery_SIZEOF alloc videoquery!
+
+	videoquery@ // arg2
+	OSVIDEOIOCONTROL_QUERY // arg1
+	fbhandle@ // filehandle
+	OSIOControl ret! drop
+
+	if (ret@)
+		ret@ OSStatusGetName "mousedemo: failed to get video parameters: %s\n" OSError
+	end
+
+	videoquery@ OSVideoQuery_Height + @ YRes!
+	videoquery@ OSVideoQuery_Width + @ XRes!
+
+	if (videoquery@ OSVideoQuery_Format + @ OSFBFORMAT_I8 ==)
+		1 BytesPerRow!
+	end elseif (videoquery@ OSVideoQuery_Format + @ OSFBFORMAT_RGBA32 ==)
+		4 BytesPerRow!
+	end else
+		1 BytesPerRow!
+	end
+
+	videoquery@ OSVideoQuery_VRAMSize + @ // length
+	USERMAP // startva
+	0 // sectionoffset
+	fbhandle@ // sectionhandle
+	OSCURRENTPROCESS // processhandle
+	PAGEACCESS_READ PAGEACCESS_WRITE | PAGEACCESS_WRITECOMBINE | // pageprotection
+	0 // flags
+	OSMapView ret! FBAddress!
+
+	if (ret@)
+		ret@ OSStatusGetName "mousedemo: failed to map framebuffer: %s\n" OSAbort
+	end
+
+	fbhandle@ OSClose drop
+
+	FBAddress@ YRes@ XRes@ "framebuffer %dx%d mapped at 0x%08x\n" Printf
+
+	20 MouseX!
+	20 MouseY!
+
+	MouseX@ MouseY@ InvertBox
+
+	1 MouseRCur!
+
+	// this does not have to be asynchronous I/O with a user APC for
+	// completion, but it is cooler to do it like that.
+
+	auto requestblock
+	OSRequest_SIZEOF alloc requestblock!
+
+	requestblock@ OSRequestInitialize
+
+	MouseStatusBlock requestblock@ OSRequest_StatusBlock + !
+	pointerof MouseCompletionRoutine requestblock@ OSRequest_CompletionRoutine + !
+
+	requestblock@ // requestblock
+	0 // flags
+	0 // offset
+	OSMousePacket_SIZEOF // length
+	MousePacket // buffer
+	MouseHandle@ // filehandle
+	OSFileReadAsync ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "mousedemo: couldn't read mouse packet: %s\n" OSError
+	end
+
+	while (1)
+		OSWAIT_TIMEOUTINFINITE OSThreadSleep ret!
+	end
+end
+
+fn (OSUserAPCRoutine) MouseCompletionRoutine { context apccontext -- }
+	auto status
+	MouseStatusBlock OSStatusBlock_Status + @ status!
+
+	if (status@)
+		status@ OSStatusGetName "mousedemo: failed to read mouse: %s\n" OSError
+	end
+
+	auto ret
+
+	auto eventtype
+	MousePacket OSMousePacket_EventType + @ eventtype!
+
+	if (eventtype@ OSMOUSEEVENT_MOVED ==
+		eventtype@ OSMOUSEEVENT_MOVEDABS == ||)
+		if (MouseRCur@)
+			MouseX@ MouseY@ InvertBox
+		end
+
+		auto dx
+		MousePacket OSMousePacket_Info + @ 16 >> dx!
+
+		auto dy
+		MousePacket OSMousePacket_Info + @ 0xFFFF & dy!
+
+		if (eventtype@ OSMOUSEEVENT_MOVED ==)
+			if (dx@ 0x8000 &)
+				0xFFFF0000 dx |=
+			end
+
+			if (dy@ 0x8000 &)
+				0xFFFF0000 dy |=
+			end
+
+			dy@ MouseY +=
+			dx@ MouseX +=
+		end elseif (eventtype@ OSMOUSEEVENT_MOVEDABS ==)
+			dx@ MouseX!
+			dy@ MouseY!
+		end
+
+		if (MouseX@ z<)
+			0 MouseX!
+		end elseif (MouseX@ BOXCOLS + XRes@ >=)
+			XRes@ BOXCOLS - MouseX!
+		end
+
+		if (MouseY@ z<)
+			0 MouseY!
+		end elseif (MouseY@ BOXROWS + YRes@ >=)
+			YRes@ BOXROWS - MouseY!
+		end
+
+		MouseX@ MouseY@ InvertBox
+	end elseif (eventtype@ OSMOUSEEVENT_PRESSED ==)
+		0 MouseRCur!
+	end elseif (eventtype@ OSMOUSEEVENT_RELEASED ==)
+		1 MouseRCur!
+	end
+
+	auto requestblock
+	OSRequest_SIZEOF alloc requestblock!
+
+	requestblock@ OSRequestInitialize
+
+	MouseStatusBlock requestblock@ OSRequest_StatusBlock + !
+	pointerof MouseCompletionRoutine requestblock@ OSRequest_CompletionRoutine + !
+
+	requestblock@ // requestblock
+	0 // flags
+	0 // offset
+	OSMousePacket_SIZEOF // length
+	MousePacket // buffer
+	MouseHandle@ // filehandle
+	OSFileReadAsync ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "mousedemo: couldn't read mouse packet: %s\n" OSError
+	end
+end

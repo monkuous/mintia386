@@ -1,0 +1,113 @@
+//
+// Implements the kernel event object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "KeInternal.h"
+
+fn KeEventInitialize { signaled type name event -- }
+	if (type@ OSEVENT_SYNCH ==)
+		DISPATCHOBJECT_EVENTSYNCH type!		
+	end elseif (type@ OSEVENT_NOTIF ==)
+		DISPATCHOBJECT_EVENTNOTIF type!
+	end elseif (DEBUGCHECKS)
+		type@ "KeEventInitialize: invalid type %d\n" KeCrash
+	end
+
+	name@ type@ event@ KiDispatchInitialize
+
+	signaled@ event@ KeDispatchHeader_Signaled + !
+end
+
+fn KeEventReset { event -- signaled }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	event@ KeDispatchHeader_Signaled + @ signaled!
+	0 event@ KeDispatchHeader_Signaled + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeEventSignal { priboost event -- }
+	// quick check for if the event is already signaled.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (event@ KeDispatchHeader_Signaled + @)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	if (event@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTNOTIF ==)
+		0 // waitstatus
+		priboost@ // priboost
+		event@ // object
+		KiDispatchSatisfyAll
+	end elseif (event@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ==)
+		0 // waitstatus
+		priboost@ // priboost
+		event@ // object
+		1 // signal
+		KiDispatchSatisfyFirst drop
+	end elseif (DEBUGCHECKS)
+		event@ KeDispatchHeader_Type + @ "KeEventSignal: invalid dispatch type %d\n" KeCrash
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn KeEventPulse { priboost event -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (event@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTNOTIF ==)
+		0 // waitstatus
+		priboost@ // priboost
+		event@ // object
+		KiDispatchSatisfyAll
+
+		0 event@ KeDispatchHeader_Signaled + !
+	end elseif (event@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ==)
+		0 // waitstatus
+		priboost@ // priboost
+		event@ // object
+		0 // signal
+		KiDispatchSatisfyFirst drop
+	end elseif (DEBUGCHECKS)
+		event@ KeDispatchHeader_Type + @ "KeEventPulse: invalid dispatch type %d\n" KeCrash
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn KeEventSignalGetWaiter { priboost event -- waiter }
+	if (DEBUGCHECKS)
+		if (event@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ~=)
+			"KeEventSignalGetWaiter: event wasn't a synch event\n" KeCrash
+		end
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	0 // waitstatus
+	priboost@ // priboost
+	event@ // object
+	1 // signal
+	KiDispatchSatisfyFirst waiter!
+
+	ipl@ KeIPLLower
+end

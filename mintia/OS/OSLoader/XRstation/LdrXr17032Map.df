@@ -1,0 +1,283 @@
+//
+// Implements virtual address space management for xr17032.
+//
+
+#include "<df>/dragonfruit.h"
+#include "<ll>/rta3x/a3x.h"
+
+#include "../OSLoader.h"
+
+var LdrPlatformKernelPageDirectory 0
+public LdrPlatformKernelPageDirectory
+
+extern LdrXr17032MapEnablePaging { ebvirt -- }
+
+var FirmwareEb 0
+public FirmwareEb
+
+const PGDBITS (PTE_V PTE_W | PTE_G | PTE_K |)
+
+fn LdrXr17032MapInit { -- }
+	// create page directory
+
+	auto ok
+	auto desc
+
+	1 // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrXr17032MapInit: failed to allocate page directory (%i)\n" LdrCrash
+	end
+
+	auto addr
+	desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << addr!
+
+	addr@ // ptr
+	2048 // size
+	0 // word
+	memset
+
+	addr@ 2048 + // ptr
+	2048 // size
+	PTE_INVALID_KPAGE // word
+	memset
+
+	addr@ LdrPlatformKernelPageDirectory!
+
+	// identity map each memory descriptor at 0 and at IDENTITYSPACE
+
+	LdrMemoryDescriptorListHead@ desc!
+
+	while (desc@)
+		if (desc@ LdrMemoryDescriptor_OriginalDescriptor + @)
+			desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // vaddr
+			desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // phyaddr
+			desc@ LdrMemoryDescriptor_OriginalExtent + @ // pages
+			0 // noncached
+			1 // reclaimablept
+			LdrPlatformMapRange
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+
+	auto pdi
+	auto i
+	auto pfn
+
+	POOLSPACE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	POOLSIZE 22 >> // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrXr17032MapInit: failed to allocate POOLSPACE page tables (%i)\n" LdrCrash
+	end
+
+	0 i!
+
+	desc@ LdrMemoryDescriptor_StartPFN + @ pfn!
+
+	while (i@ POOLSIZE 22 >> <)
+		pfn@ 5 << PTE_V | PTE_W | PTE_G | PTE_K | pdi@!
+
+		pfn@ PAGESHIFT << // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		1 pfn +=
+		4 pdi +=
+		1 i +=
+	end
+
+	VIEWSPACE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	VIEWSIZE 22 >> // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrXr17032MapInit: failed to allocate VIEWSPACE page tables (%i)\n" LdrCrash
+	end
+
+	0 i!
+
+	desc@ LdrMemoryDescriptor_StartPFN + @ pfn!
+
+	while (i@ VIEWSIZE 22 >> <)
+		pfn@ 5 << PTE_V | PTE_W | PTE_G | PTE_K | pdi@!
+
+		pfn@ PAGESHIFT << // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		1 pfn +=
+		4 pdi +=
+		1 i +=
+	end
+
+	// recursively map the page table by inserting the page directory into one
+	// of its own PDEs.
+
+	PAGETABLE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	LdrPlatformKernelPageDirectory@ PAGESHIFT >> 5 << PTE_V | PTE_W | PTE_K | pdi@!
+
+	// allocate a page of kernel space to map the exception block
+
+	1 // pages
+	KERNELSTRUCTURES // prefva
+	0 // fixed
+	LdrKernelSpaceAllocate ok! addr!
+
+	if (ok@)
+		ok@ "LdrXr17032MapInit: failed to map exception block (%i)\n" LdrCrash
+	end
+
+	// map exception block
+
+	addr@ // vaddr
+	0x00001000 // phyaddr
+	0 // noncached
+	0 // reclaimablept
+	LdrPlatformMapPage
+
+	addr@ LdrInfoBlock LdrInfo_ExceptionBlockBase + !
+
+	// copy TLB miss routine to the exception block
+
+	auto missroutine
+	pointerof LdrXr17032MapITLBMissRoutine missroutine!
+
+	0x00001E00 // dest
+	missroutine@ // src
+	pointerof LdrXr17032MapITLBMissRoutineEnd missroutine@ - // sz
+	memcpy
+
+	pointerof LdrXr17032MapDTLBMissRoutine missroutine!
+
+	0x00001F00 // dest
+	missroutine@ // src
+	pointerof LdrXr17032MapDTLBMissRoutineEnd missroutine@ - // sz
+	memcpy
+
+	// enable paging
+
+	addr@ LdrXr17032MapEnablePaging
+end
+
+
+
+const RS_MMU 4
+
+fn LdrPlatformMapRange { vaddr phyaddr pages noncached reclaimablept -- }
+	while (pages@)
+		vaddr@ // vaddr
+		phyaddr@ // phyaddr
+		noncached@ // noncached
+		reclaimablept@ // reclaimablept
+		LdrPlatformMapPage
+
+		PAGESIZE vaddr +=
+		PAGESIZE phyaddr +=
+		1 pages -=
+	end
+end
+
+const PTE_V  1
+const PTE_W  2
+const PTE_K  4
+const PTE_NC 8
+const PTE_G  16
+
+const PTE_KPAGE (PTE_V PTE_W | PTE_K |)
+const PTE_INVALID_KPAGE PTE_G
+
+fn LdrPlatformMapPage { vaddr phyaddr noncached reclaimablept -- }
+	auto pdi
+	vaddr@ 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	auto pt
+	pdi@@ 5 >> PAGESHIFT << pt!
+
+	if (pt@ 0 ==)
+		// allocate a page table
+
+		auto desc
+		auto ok
+
+		if (reclaimablept@)
+			1 // pages
+			OSLOADERMEM_RECLAIMABLE // type
+			LdrMemoryAllocatePhysicalRange ok! desc!
+		end else
+			1 // pages
+			OSLOADERMEM_USED // type
+			LdrMemoryAllocatePhysicalRange ok! desc!
+		end
+
+		if (ok@)
+			ok@ "LdrPlatformMapPage: failed to allocate page table (%i)\n" LdrCrash
+		end
+
+		desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << pt!
+
+		pt@ // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		pt@ PAGESHIFT >> 5 << PTE_V | PTE_W | PTE_G | PTE_K | pdi@!
+	end
+
+	vaddr@ PAGESHIFT >> 1023 & 2 << pt@ + pdi!
+
+	if (pdi@@ PTE_V &)
+		vaddr@ PAGESHIFT >> "LdrPlatformMapPage: vpn %x is already mapped!\n" LdrCrash
+	end
+
+	auto flags
+	PTE_KPAGE flags!
+
+	if (vaddr@ KERNELSPACE &)
+		PTE_G flags |=
+	end
+
+	if (noncached@ LDRMEM_NONCACHED ==)
+		PTE_NC flags |=
+	end
+
+	phyaddr@ PAGESHIFT >> 5 << flags@ | pdi@!
+end
+
+fn LdrPlatformVirtualToPhysical { vaddr -- phyaddr ok }
+	0 ok!
+
+	auto ent
+	vaddr@ 22 >> 2 << LdrPlatformKernelPageDirectory@ + ent!
+
+	auto pt
+	ent@@ 5 >> PAGESHIFT << pt!
+
+	auto pfdbe
+
+	if (pt@ 0 ==)
+		// no such PTE.
+		-1 ok!
+		return
+	end
+
+	auto pte
+	vaddr@ PAGESHIFT >> 1023 & 2 << pt@ + @ pte!
+
+	if (pte@ 1 & ~~)
+		-1 ok!
+	end
+
+	pte@ 5 >> PAGESHIFT << phyaddr!
+end

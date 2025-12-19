@@ -1,0 +1,144 @@
+//
+// Implements the Truncate dispatch routine for the FAT driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "Fat.h"
+
+fn (IODispatchTruncateFunction) FatTruncate { newsize zero flags fcb -- ok }
+	fnsection "PAGE$text"
+
+	// add or remove clusters from file specified by FCB according to newsize.
+
+	auto oldsize
+	fcb@ IOFileControlBlock_SizeInBytes + @ oldsize!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto fatdata
+	fcb@ FSFileControlBlockGetMount IOMount_Extension + @ fatdata!
+
+	auto oldclusters
+	oldsize@ fatdata@ FatData_ClusterSizeBytes + @ 1 - +
+	fatdata@ FatData_ClusterSizeShift + @ >> oldclusters!
+
+	auto newclusters
+	newsize@ fatdata@ FatData_ClusterSizeBytes + @ 1 - +
+	fatdata@ FatData_ClusterSizeShift + @ >> newclusters!
+
+	auto oldsectors
+	oldsize@ fatdata@ FatData_SectorSizeBytes + @ 1 - +
+	fatdata@ FatData_SectorSizeShift + @ >> oldsectors!
+
+	auto newsectors
+	newsize@ fatdata@ FatData_SectorSizeBytes + @ 1 - +
+	fatdata@ FatData_SectorSizeShift + @ >> newsectors!
+
+	0 ok!
+
+	if (newsectors@ oldsectors@ ==)
+		// no blocks to allocate or release, just set size and return
+
+		if (newsize@ oldsize@ ~=)
+			newsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+			fcb@ FatUpdateDirent
+		end
+
+		return
+	end
+
+	if (zero@ ~~)
+		if (newsize@ oldsize@ >)
+			if (newsize@ fatdata@ FatData_SectorSizeBytes + @ 1 - &)
+				2 zero!
+			end
+		end
+	end
+
+	0 fcb@ IOFileControlBlockLockForPaging
+
+	newsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+	newsectors@ // newsectors
+	oldsectors@ // oldsectors
+	newclusters@ // newclusters
+	oldclusters@ // oldclusters
+	zero@ // zero
+	flags@ // flags
+	fcb@ // fcb
+	FatClusterTruncate ok!
+
+	if (ok@)
+		// failed to truncate blocks, reset size
+
+		oldsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+		0 fcb@ IOFileControlBlockUnlockForPaging
+	end else
+		0 fcb@ IOFileControlBlockUnlockForPaging
+
+		fcb@ FatUpdateDirent
+	end
+end
+
+fn FatTruncateToZero { fcb -- ok }
+	fnsection "PAGE$text"
+
+	auto oldsize
+	fcb@ IOFileControlBlock_SizeInBytes + @ oldsize!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto fatdata
+	fcb@ FSFileControlBlockGetMount IOMount_Extension + @ fatdata!
+
+	auto oldclusters
+	oldsize@ fatdata@ FatData_ClusterSizeBytes + @ 1 - +
+	fatdata@ FatData_ClusterSizeShift + @ >> oldclusters!
+
+	auto oldsectors
+	oldsize@ fatdata@ FatData_SectorSizeBytes + @ 1 - +
+	fatdata@ FatData_SectorSizeShift + @ >> oldsectors!
+
+	0 fcb@ IOFileControlBlockLockForPaging
+
+	0 // newsectors
+	oldsectors@ // oldsectors
+	0 // newclusters
+	oldclusters@ // oldclusters
+	0 // zero
+	0 // flags
+	fcb@ // fcb
+	FatClusterTruncate ok!
+
+	0 fcb@ IOFileControlBlockUnlockForPaging
+end

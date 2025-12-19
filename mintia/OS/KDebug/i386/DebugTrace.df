@@ -1,0 +1,26 @@
+//
+// Implements KDebug stack tracing.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/DebugTrace.h"
+#include "<inc>/DebugSymbols.h"
+
+#include "<inc>/Kernel.h"
+#include "<inc>/Memory.h"
+
+externptr HALLoaderInfo
+
+fn DebugDump { rows cols -- }
+	pointerof DebugDump 0 rows@ cols@ DebugTrace
+end
+
+buffer TraceNameBuffer 128
+
+fn DebugTrace { pc link rows cols -- }
+end

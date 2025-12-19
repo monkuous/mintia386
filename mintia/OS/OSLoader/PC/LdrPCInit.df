@@ -1,0 +1,96 @@
+//
+// Implements the PC-specific part of bootloader initialization.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "../OSLoader.h"
+
+buffer LdrArgsBuffer 256
+public LdrArgsBuffer
+
+var LdrPlatformHALName 0
+public LdrPlatformHALName
+
+extern LdrPCHalt { -- }
+
+extern LdrPCCallInterrupt { vec regs -- }
+
+struct LdrPCRegs
+    4 edi
+    4 esi
+    4 ebp
+    4 padding
+    4 ebx
+    4 edx
+    4 ecx
+    4 eax
+    2 dsI
+    2 esI
+    2 fsI
+    2 gsI
+    4 eflags
+endstruct
+
+fn LdrPCMain { sector drive -- }
+	// clear BSS section
+
+	pointerof _bss
+	pointerof _bss_end pointerof _bss -
+	0 memset
+
+    // get HAL name
+
+    "HALPC.dll" LdrPlatformHALName!
+
+    // call generic bootloader entrypoint
+
+    LdrMain LdrExit
+end
+
+fn LdrPlatformExit { ret -- }
+    ret@ "bootloader exited with code %i" Printf
+    LdrPCHalt
+end
+
+fn private LdrPCWriteChar { c -- }
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0xe00 c@ | regs@ LdrPCRegs_eax + !
+    0x7 regs@ LdrPCRegs_ebx + !
+    0x10 regs@ LdrPCCallInterrupt
+end
+
+fn FPutc { fd c -- }
+    if (c@ '\n' ==)
+        '\r' LdrPCWriteChar
+    end
+    c@ 0xff & LdrPCWriteChar
+end
+
+fn FPuts { fd s -- }
+    while (1)
+        auto c
+        s@ gb c!
+
+        if (c@ ~~)
+            break
+        end
+
+        fd@ c@ FPutc
+        1 s +=
+    end
+end
+
+fn Putc { c -- }
+    1 c@ FPutc
+end
+
+fn Puts { s -- }
+    1 s@ FPuts
+end
+
+fn VPrintf { argvt argcn fmt -- }
+	argvt@ argcn@ fmt@ 1 VFPrintf
+end

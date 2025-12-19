@@ -1,0 +1,80 @@
+//
+// Implements generic partition table support.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+const IOPARTITIONFORMATCOUNT 2
+
+externptr IOPartitionAPT
+externptr IOPartitionMBR
+
+table IOPartitionFormats
+	// APT must appear before MBR in this table because an APT VDB may contain
+	// an MBR signature if it is bootable on x86, and will be erroneously
+	// detected as an MBR boot block.
+
+	pointerof IOPartitionAPT
+	pointerof IOPartitionMBR
+endtable
+
+fn IOPartitionTableRead { devobject -- partitiontable ok }
+	fnsection "PAGE$text"
+
+	// loop through all supported partition table formats and attempt to
+	// identify one
+
+	STATUS_NOT_AVAILABLE ok!
+
+	auto i
+	0 i!
+
+	while (i@ IOPARTITIONFORMATCOUNT <)
+		auto format
+		[i@]IOPartitionFormats@ format!
+
+		auto detectfunc
+		format@ IOPartitionSupportTable_Detect + @ detectfunc!
+
+		if (detectfunc@ ~~)
+			1 i +=
+
+			continue
+		end
+
+		devobject@ // devobject
+		detectfunc@ IOPartitionDetectFunction ok! partitiontable!
+
+		if (ok@ ~~)
+			// success!
+
+			return
+		end
+
+		1 i +=
+	end
+end

@@ -1,0 +1,879 @@
+//
+// Implements object dispatch.
+// Supports waiting for multiple objects at a time, and for any (OSWAITANY)
+// or all (OSWAITALL) to become signalled.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "KeInternal.h"
+
+var KeThreadWaitListHead 0
+public KeThreadWaitListHead
+
+fn KeDispatchIsSignaled { dobject -- signaled }
+	dobject@ KeDispatchHeader_Signaled + @ z> signaled!
+end
+
+// initializes a WaitBlock
+
+fn KeDispatchWaitBlockTableInitialize { thread count waitblocktable -- }
+	while (count@)
+		0 waitblocktable@ KeDispatchWaitBlock_Prev + !
+		0 waitblocktable@ KeDispatchWaitBlock_Next + !
+
+		0 waitblocktable@ KeDispatchWaitBlock_WaitType + !
+
+		thread@ waitblocktable@ KeDispatchWaitBlock_Thread + !
+
+		0 waitblocktable@ KeDispatchWaitBlock_Object + !
+
+		0 waitblocktable@ KeDispatchWaitBlock_WaitIndex + !
+
+		KeDispatchWaitBlock_SIZEOF waitblocktable +=
+		1 count -=
+	end
+end
+
+fn KiCheckWaitInterruptingEvents { current -- ok }
+	// Check for any events that would interrupt the wait.
+	// Usermode alertable waits accept all events.
+
+	0 ok!
+
+	if (current@ KeThread_UserAPCListHead + @)
+		// There are pending user APCs.
+
+		1 current@ KeThread_UserAPCTriggeredB + sb
+		1 current@ KeThread_UserInterruptB + sb
+
+		STATUS_USER_APC ok!
+	end elseif (current@ KeThread_Signals + @
+				current@ KeThread_SignalAcceptMask + @ &
+				current@ KeThread_SignalDeliverOnWaitMask + @ &)
+
+		// There are pending signals.
+
+		current@ KeThread_Signals + @ ~
+		current@ KeThread_SignalDeliverOnWaitMask + @ &=
+
+		1 current@ KeThread_UserInterruptB + sb
+
+		STATUS_SIGNALLED ok!
+	end
+end
+
+fn KeThreadWaitForMultipleObjects { waitmode alertable waittype timeout objectcount objecttable waitblocktable -- ok }
+	0 ok!
+
+	if (DEBUGCHECKS)
+		if (waittype@ OSWAITALL <)
+			waittype@ "KeThreadWaitForMultipleObjects: waittype=%d\n" KeCrash
+		end
+
+		if (waittype@ OSWAITANY >)
+			waittype@ "KeThreadWaitForMultipleObjects: waittype=%d\n" KeCrash
+		end
+	end
+
+	if (objectcount@ 0 ==)
+		return
+	end
+
+	auto current
+	KeThreadCurrent@ current!
+
+	if (waitblocktable@ ~~)
+		if (objectcount@ THREADWAITBLOCKS >)
+			"KeThreadWaitForMultipleObjects: objectcount>THREADWAITBLOCKS\n" KeCrash
+		end
+
+		current@ KeThread_WaitBlocks + waitblocktable!
+	end
+
+	while (1)
+		0 ok!
+
+		auto i
+		0 i!
+
+		auto waitblock
+		waitblocktable@ waitblock! // now points to current thread's first waitblock
+
+		auto satisfied
+		waittype@ OSWAITALL == satisfied!
+
+		auto waitipl
+		IPLDPC KeIPLRaise waitipl!
+
+		// Check for any events that would interrupt the wait.
+		// This code is mostly duplicated so that we only go to the trouble of
+		// calling a function in the alertable usermode case, which is
+		// the least common case, and the most complex to handle.
+
+		if (waitipl@ IPLLOW ==)
+			// >=IPLAPC masks out all events.
+
+			if (alertable@ ~~)
+				if (waitmode@ USERMODE ==)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Unalertable usermode waits are only interrupted by
+						// termination.
+
+						waitipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end elseif (waitmode@ KERNELMODE ==)
+				if (current@ KeThread_IgnoreKill + @ ~~)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Alertable kernel mode waits are only interrupted by
+						// termination.
+
+						waitipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end else
+				current@ KiCheckWaitInterruptingEvents ok!
+
+				if (ok@)
+					waitipl@ KeIPLLower
+
+					return
+				end
+			end
+		end
+
+		waitblocktable@ current@ KeThread_WaitBlockTable + !
+		objectcount@ current@ KeThread_WaitBlockCountB + sb
+
+		while (i@ objectcount@ <)
+			auto object
+			objecttable@ i@ 2 << + @ object!
+
+			if (waittype@ OSWAITANY ==)
+				if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_MUTEX ==)
+					if (object@ KeDispatchHeader_Signaled + @ z>)
+						// yoink!
+
+						current@ // thread
+						object@ // mutex
+						KiMutexOwnerSet
+
+						i@ ok!
+
+						1 satisfied!
+
+						break
+					end elseif (object@ KeMutex_OwningThread + @ current@ ==)
+						if (object@ KeDispatchHeader_Signaled + @ 0x80000000 ==)
+							// recursively acquiring this mutex again would
+							// cause an underflow.
+
+							0 // satisfy
+							current@ // thread
+							KiThreadWaitBlocksDequeue
+
+							waitipl@ KeIPLLower
+
+							STATUS_OVERFLOW ok!
+
+							return
+						end
+
+						i@ ok!
+
+						1 object@ KeDispatchHeader_Signaled + -=
+
+						1 satisfied!
+
+						break
+					end
+				end else
+					if (object@ KeDispatchHeader_Signaled + @ z>)
+						if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ==)
+							0 object@ KeDispatchHeader_Signaled + !
+						end elseif (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_SEMAPHORE ==)
+							1 object@ KeDispatchHeader_Signaled + -=
+						end
+
+						i@ ok!
+
+						1 satisfied!
+
+						break
+					end
+				end
+			end else
+				if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_MUTEX ==)
+					if (object@ KeDispatchHeader_Signaled + @ z> ~~)
+						if (object@ KeMutex_OwningThread + @ current@ ==)
+							if (object@ KeDispatchHeader_Signaled + @ 0x80000000 ==)
+								// recursively acquiring this mutex again
+								// would cause an underflow.
+
+								0 // satisfy
+								current@ // thread
+								KiThreadWaitBlocksDequeue
+
+								waitipl@ KeIPLLower
+
+								STATUS_OVERFLOW ok!
+
+								return
+							end
+						end else
+							0 satisfied!
+						end
+					end
+				end elseif (object@ KeDispatchHeader_Signaled + @ z> ~~)
+					0 satisfied!
+				end
+			end
+
+			if (timeout@)
+				i@ // waitindex
+				waittype@ // waittype
+				waitblock@ // waitblock
+				object@ // object
+				KiDispatchWaitBlockEnqueue
+			end
+
+			KeDispatchWaitBlock_SIZEOF waitblock +=
+			1 i +=
+		end
+
+		if (timeout@ ~~)
+			// no timeout. just return even if the wait wasn't satisfied
+
+			waitipl@ KeIPLLower
+
+			satisfied@ ok!
+
+			return
+		end elseif (satisfied@)
+			// the wait is already satisfied. dequeue any wait blocks we just
+			// enqueued and then return.
+
+			waittype@ OSWAITALL == // satisfy
+			current@ // thread
+			KiThreadWaitBlocksDequeue
+
+			waitipl@ KeIPLLower
+
+			return
+		end
+
+		if (timeout@ OSWAIT_TIMEOUTINFINITE ~=)
+			// there's a timeout and its not infinite, set up a timer waitblock
+
+			"WaitTimeout" // name
+			0 // dpc
+			current@ KeThread_Timer + // timer
+			KeTimerInitialize
+
+			current@ KeThread_TimeoutWaitBlock + waitblock!
+
+			STATUS_WAIT_TIMEOUT // waitindex
+			OSWAITANY // waittype
+			waitblock@ // waitblock
+			current@ KeThread_Timer + // object
+			KiDispatchWaitBlockEnqueue
+
+			0 // context1
+			0 // context2
+			timeout@ // interval
+			current@ KeThread_Timer + // timer
+			KeTimerEnqueue drop
+		end
+
+		waitipl@ // waitipl
+		waitmode@ // waitmode
+		alertable@ // alertable
+		0 // explicitstatus
+		KiThreadWait ok!
+
+		waitipl@ KeIPLLower
+
+		if (ok@ STATUS_KERNEL_APC ~=)
+			return
+		end
+	end
+end
+
+fn KeThreadWaitForObject { waitmode alertable timeout object -- ok }
+	// implemented redundantly with KeThreadWaitForMultipleObjects because
+	// this is the most common case and is therefore speed-critical.
+
+	auto current
+	KeThreadCurrent@ current!
+
+	while (1)
+		0 ok!
+
+		auto waitipl
+		IPLDPC KeIPLRaise waitipl!
+
+		// Check for any events that would interrupt the wait.
+		// This code is mostly duplicated so that we only go to the trouble of
+		// calling a function in the alertable usermode case, which is
+		// the least common case, and the most complex to handle.
+
+		if (waitipl@ IPLLOW ==)
+			// >=IPLAPC masks out all events.
+
+			if (alertable@ ~~)
+				if (waitmode@ USERMODE ==)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Unalertable usermode waits are only interrupted by
+						// termination.
+
+						waitipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end elseif (waitmode@ KERNELMODE ==)
+				if (current@ KeThread_IgnoreKill + @ ~~)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Alertable kernel mode waits are only interrupted by
+						// termination.
+
+						waitipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end else
+				current@ KiCheckWaitInterruptingEvents ok!
+
+				if (ok@)
+					waitipl@ KeIPLLower
+
+					return
+				end
+			end
+		end
+
+		current@ KeThread_WaitBlocks + current@ KeThread_WaitBlockTable + !
+		1 current@ KeThread_WaitBlockCountB + sb
+
+		if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_MUTEX ==)
+			if (object@ KeDispatchHeader_Signaled + @ z>)
+				// yoink!
+
+				current@ // thread
+				object@ // mutex
+				KiMutexOwnerSet
+
+				waitipl@ KeIPLLower
+
+				if (timeout@ ~~)
+					1 ok!
+				end
+
+				return
+			end elseif (object@ KeMutex_OwningThread + @ current@ ==)
+				if (object@ KeDispatchHeader_Signaled + @ 0x80000000 ==)
+					// recursively acquiring this mutex again would cause
+					// an underflow.
+
+					waitipl@ KeIPLLower
+
+					STATUS_OVERFLOW ok!
+
+					return
+				end
+
+				1 object@ KeDispatchHeader_Signaled + -=
+
+				waitipl@ KeIPLLower
+
+				if (timeout@ ~~)
+					1 ok!
+				end
+
+				return
+			end
+		end else
+			if (object@ KeDispatchHeader_Signaled + @ z>)
+				if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ==)
+					0 object@ KeDispatchHeader_Signaled + !
+				end elseif (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_SEMAPHORE ==)
+					1 object@ KeDispatchHeader_Signaled + -=
+				end
+
+				waitipl@ KeIPLLower
+
+				if (timeout@ ~~)
+					1 ok!
+				end
+
+				return
+			end
+		end
+
+		if (timeout@ ~~)
+			// no timeout. just return that the wait wasn't satisfied
+
+			waitipl@ KeIPLLower
+
+			0 ok!
+
+			return
+		end
+
+		0 // waitindex
+		OSWAITANY // waittype
+		current@ KeThread_WaitBlocks + // waitblock
+		object@ // object
+		KiDispatchWaitBlockEnqueue
+
+		if (timeout@ OSWAIT_TIMEOUTINFINITE ~=)
+			// there's a timeout and its not infinite, set up a timer waitblock
+
+			"WaitTimeout" // name
+			0 // dpc
+			current@ KeThread_Timer + // timer
+			KeTimerInitialize
+
+			STATUS_WAIT_TIMEOUT // waitindex
+			OSWAITANY // waittype
+			current@ KeThread_TimeoutWaitBlock + // waitblock
+			current@ KeThread_Timer + // object
+			KiDispatchWaitBlockEnqueue
+
+			0 // context1
+			0 // context2
+			timeout@ // interval
+			current@ KeThread_Timer + // timer
+			KeTimerEnqueue drop
+		end
+
+		waitipl@ // waitipl
+		waitmode@ // waitmode
+		alertable@ // alertable
+		0 // explicitstatus
+		KiThreadWait ok!
+
+		waitipl@ KeIPLLower
+
+		if (ok@ STATUS_KERNEL_APC ~=)
+			return
+		end
+	end
+end
+
+fn KeThreadSleep { ms waitmode alertable -- ok }
+	0 ok!
+
+	auto current
+	KeThreadCurrent@ current!
+
+	while (1)
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		// Check for any events that would interrupt the wait.
+		// This code is mostly duplicated so that we only go to the trouble of
+		// calling a function in the alertable usermode case, which is
+		// the least common case, and the most complex to handle.
+
+		if (ipl@ IPLLOW ==)
+			// >=IPLAPC masks out all events.
+
+			if (alertable@ ~~)
+				if (waitmode@ USERMODE ==)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Unalertable usermode waits are only interrupted by
+						// termination.
+
+						ipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end elseif (waitmode@ KERNELMODE ==)
+				if (current@ KeThread_IgnoreKill + @ ~~)
+					if (current@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+						// Alertable kernel mode waits are only interrupted by
+						// termination.
+
+						ipl@ KeIPLLower
+
+						STATUS_KILLED ok!
+
+						return
+					end
+				end
+			end else
+				current@ KiCheckWaitInterruptingEvents ok!
+
+				if (ok@)
+					ipl@ KeIPLLower
+
+					return
+				end
+			end
+		end
+
+		if (ms@ ~~)
+			if (alertable@ ~~)
+				KiThreadYieldQuantum
+			end
+
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		0 current@ KeThread_WaitBlockCountB + sb
+		0 current@ KeThread_WaitBlockTable + !
+
+		"KeThreadSleep" // name
+		0 // dpc
+		current@ KeThread_Timer + // timer
+		KeTimerInitialize
+
+		STATUS_WAIT_TIMEOUT // waitindex
+		OSWAITANY // waittype
+		current@ KeThread_TimeoutWaitBlock + // waitblock
+		current@ KeThread_Timer + // object
+		KiDispatchWaitBlockEnqueue
+
+		if (ms@ OSWAIT_TIMEOUTINFINITE ~=)
+			// don't enqueue the timer if the wait is supposed to be infinite
+			// anyway. this way we will wait forever (or, until the thread is
+			// terminated).
+
+			0 // context1
+			0 // context2
+			ms@ // interval
+			current@ KeThread_Timer + // timer
+			KeTimerEnqueue drop
+		end
+
+		ipl@ // waitipl
+		waitmode@ // waitmode
+		alertable@ // alertable
+		0 // explicitstatus
+		KiThreadWait ok!
+
+		ipl@ KeIPLLower
+
+		if (ok@ STATUS_KERNEL_APC ~=)
+			return
+		end
+	end
+end
+
+fn KeThreadWaitSuspended { -- }
+	IPLDPC KeIPLRaise drop
+
+	if (KeThreadCurrent@ KeThread_SuspendedB + gb ~~)
+		// Got unsuspended during that brief time window of low IPL.
+
+		IPLLOW KeIPLLower
+
+		return
+	end
+
+	auto ok
+	KeThreadCurrent@ KiCheckWaitInterruptingEvents ok!
+
+	if (ok@)
+		0 KeThreadCurrent@ KeThread_SuspendedB + sb
+
+		IPLLOW KeIPLLower
+
+		return
+	end
+
+	IPLLOW // waitipl
+	USERMODE // waitmode
+	1 // alertable
+	THREADSTATUS_SUSPENDED // explicitstatus
+	KiThreadWait drop
+
+	IPLLOW KeIPLLower
+end
+
+// initializes a dispatch object's header
+
+fn KiDispatchInitialize { name type dobject -- }
+	0 dobject@ KeDispatchHeader_Signaled + !
+
+	type@ dobject@ KeDispatchHeader_Type + !
+
+	if (name@ ~~)
+		"NONE" dobject@ KeDispatchHeader_Name + !
+	end else
+		name@ dobject@ KeDispatchHeader_Name + !
+	end
+
+	0 dobject@ KeDispatchHeader_WaitBlockListHead + !
+	0 dobject@ KeDispatchHeader_WaitBlockListTail + !
+end
+
+fn KiDispatchWaitBlockDequeue { waitblock -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KiDispatchWaitBlockDequeue: ipl != IPLDPC\n" KeCrash
+		end
+
+		if (waitblock@ KeDispatchWaitBlock_Object + @ ~~)
+			"KiDispatchWaitBlockDequeue: attempt to dequeue a non-enqueued WaitBlock\n" KeCrash
+		end
+	end
+
+	auto object
+	waitblock@ KeDispatchWaitBlock_Object + @ object!
+
+	auto n
+	waitblock@ KeDispatchWaitBlock_Next + @ n!
+
+	if (n@)
+		waitblock@ KeDispatchWaitBlock_Prev + @ n@ KeDispatchWaitBlock_Prev + !
+	end else // no next means we were the tail
+		waitblock@ KeDispatchWaitBlock_Prev + @ object@ KeDispatchHeader_WaitBlockListTail + !
+	end
+
+	auto p
+	waitblock@ KeDispatchWaitBlock_Prev + @ p!
+
+	if (p@)
+		waitblock@ KeDispatchWaitBlock_Next + @ p@ KeDispatchWaitBlock_Next + !
+	end else // no prev means we were the head
+		waitblock@ KeDispatchWaitBlock_Next + @ object@ KeDispatchHeader_WaitBlockListHead + !
+	end
+
+	0 waitblock@ KeDispatchWaitBlock_Next + !
+	0 waitblock@ KeDispatchWaitBlock_Prev + !
+
+	0 waitblock@ KeDispatchWaitBlock_Object + !
+end
+
+// adds a WaitBlock to the tail of a dispatch object's WaitBlockList
+
+fn KiDispatchWaitBlockEnqueue { waitindex waittype waitblock object -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KeDispatchWaitBlockInsert: ipl != IPLDPC\n" KeCrash
+		end
+
+		if (waitblock@ KeDispatchWaitBlock_Object + @)
+			"KiDispatchWaitBlockEnqueue: attempt to queue an enqueued WaitBlock\n" KeCrash
+		end
+	end
+
+	object@ waitblock@ KeDispatchWaitBlock_Object + !
+	waittype@ waitblock@ KeDispatchWaitBlock_WaitType + !
+	waitindex@ waitblock@ KeDispatchWaitBlock_WaitIndex + !
+
+	auto t
+	object@ KeDispatchHeader_WaitBlockListTail + @ t!
+
+	if (t@ ~~)
+		waitblock@ object@ KeDispatchHeader_WaitBlockListHead + !
+		waitblock@ object@ KeDispatchHeader_WaitBlockListTail + !
+		return
+	end
+
+	// seek to the appropriate place to put this waitblock based on priority.
+
+	auto pri
+	waitblock@ KeDispatchWaitBlock_Thread + @ KeThread_PriorityB + gb pri!
+
+	while (t@)
+		if (t@ KeDispatchWaitBlock_Thread + @ KeThread_PriorityB + gb pri@ >=)
+			break
+		end
+
+		t@ KeDispatchWaitBlock_Prev + @ t!
+	end
+
+	// insert after t.
+
+	if (t@ ~~)
+		// nobody was higher priority, place at head
+
+		object@ KeDispatchHeader_WaitBlockListHead + @ t!
+
+		waitblock@ t@ KeDispatchWaitBlock_Prev + !
+		t@ waitblock@ KeDispatchWaitBlock_Next + !
+
+		waitblock@ object@ KeDispatchHeader_WaitBlockListHead + !
+
+		return
+	end
+
+	auto n
+	t@ KeDispatchWaitBlock_Next + @ n!
+
+	if (n@)
+		waitblock@ n@ KeDispatchWaitBlock_Prev + !
+		n@ waitblock@ KeDispatchWaitBlock_Next + !
+	end else
+		waitblock@ object@ KeDispatchHeader_WaitBlockListTail + !
+	end
+
+	waitblock@ t@ KeDispatchWaitBlock_Next + !
+	t@ waitblock@ KeDispatchWaitBlock_Prev + !
+end
+
+// satisfies a WaitBlock
+
+fn KiDispatchWaitBlockSatisfy { waitstatus priboost waitblock -- wokenthread }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KiDispatchWaitBlockSatisfy: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	waitblock@ KiDispatchWaitBlockDequeue
+
+	waitblock@ KeDispatchWaitBlock_Thread + @ wokenthread!
+
+	if (waitblock@ KeDispatchWaitBlock_WaitType + @ OSWAITANY ==)
+		waitblock@ KeDispatchWaitBlock_WaitIndex + @ // waitstatus
+		priboost@ // priboost
+		wokenthread@ // thread
+		KiThreadWakeup
+	end else
+		// this is an OSWAITALL. wake the thread with the status of a kernel
+		// APC so that it repeats the loop.
+
+		STATUS_KERNEL_APC // waitstatus
+		priboost@ // priboost
+		wokenthread@ // thread
+		KiThreadWakeup
+
+		0 wokenthread!
+	end
+end
+
+// satisfies all waiters on a dispatch object
+// this SIGNALS the object
+
+fn KiDispatchSatisfyAll { waitstatus priboost object -- }
+	1 object@ KeDispatchHeader_Signaled + !
+
+	while (1)
+		auto wb
+		object@ KeDispatchHeader_WaitBlockListHead + @ wb!
+
+		if (wb@ ~~)
+			return
+		end
+
+		waitstatus@ // waitstatus
+		priboost@ // priboost
+		wb@ // waitblock
+		KiDispatchWaitBlockSatisfy drop
+	end
+end
+
+// satisfies the highest priority, earliest wait on a dispatch object.
+// this signals the object if no thread was awoken and signal is non-zero.
+
+fn KiDispatchSatisfyFirst { waitstatus priboost object signal -- wokenthread }
+	0 wokenthread!
+
+	auto h
+
+	while (1)
+		object@ KeDispatchHeader_WaitBlockListHead + @ h!
+
+		if (h@ ~~)
+			if (signal@)
+				1 object@ KeDispatchHeader_Signaled + !
+			end
+
+			return
+		end
+
+		waitstatus@ // waitstatus
+		priboost@ // priboost
+		h@ // waitblock
+		KiDispatchWaitBlockSatisfy wokenthread!
+
+		if (wokenthread@)
+			return
+		end
+	end
+end
+
+fn KiThreadWaitBlocksDequeue { satisfy thread -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KiThreadWaitBlocksDequeue: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	auto wb
+	thread@ KeThread_WaitBlockTable + @ wb!
+
+	auto count
+	thread@ KeThread_WaitBlockCountB + gb count!
+
+	while (count@)
+		auto object
+		wb@ KeDispatchWaitBlock_Object + @ object!
+
+		if (object@)
+			if (satisfy@)
+				// we've determined that all of the objects specified in the
+				// OSWAITALL have been signalled, so now we do the related
+				// processing.
+
+				if (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_MUTEX ==)
+					if (object@ KeDispatchHeader_Signaled + @ z>)
+						// yoink!
+
+						thread@ // thread
+						object@ // mutex
+						KiMutexOwnerSet
+					end elseif (object@ KeMutex_OwningThread + @ thread@ ==)
+						1 object@ KeDispatchHeader_Signaled + -=
+					end
+				end elseif (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_EVENTSYNCH ==)
+					0 object@ KeDispatchHeader_Signaled + !
+				end elseif (object@ KeDispatchHeader_Type + @ DISPATCHOBJECT_SEMAPHORE ==)
+					1 object@ KeDispatchHeader_Signaled + -=
+				end
+			end
+
+			wb@ KiDispatchWaitBlockDequeue
+		end
+
+		1 count -=
+		KeDispatchWaitBlock_SIZEOF wb +=
+	end
+
+	thread@ KeThread_TimeoutWaitBlock + wb!
+
+	if (wb@ KeDispatchWaitBlock_Object + @)
+		wb@ KiDispatchWaitBlockDequeue
+	end
+end

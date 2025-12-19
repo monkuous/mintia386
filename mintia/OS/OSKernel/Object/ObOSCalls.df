@@ -1,0 +1,234 @@
+//
+// Implements the system calls for the object manager subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ObInternal.h"
+
+fn OSOpenRelative { filetype objecttype flags access initialobjecthandle path -- handle ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSFILEFLAG_KERNELSET &)
+		// reserved flags were specified
+
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto kpath
+	OSFILEPATHMAX // max
+	path@ // string
+	ExCallGetString ok! kpath!
+
+	if (ok@)
+		return
+	end
+
+	filetype@ // filetype
+	objecttype@ // objecttype
+	flags@ // flags
+	access@ // access
+	initialobjecthandle@ // initialobjecthandle
+	kpath@ // path
+	ObObjectOpenByPath ok! handle!
+
+	kpath@ ExCallFreeString
+end
+
+fn SysCreateRelative { filetype permissions flags access initialobjecthandle path -- handle ok }
+	fnsection "PAGE$text"
+
+	permissions@ KeThreadCurrent@ PsThread_FileCreationPermissions + !
+
+	filetype@ // filetype
+	OSTYPE_FILE // objecttype
+	flags@ OSFILEFLAG_CREATE | // flags
+	access@ // access
+	initialobjecthandle@ // initialobjecthandle
+	path@ // path
+	OSOpenRelative ok! handle!
+end
+
+fn OSQuery { handle query -- ok }
+	fnsection "PAGE$text"
+
+	auto kquery
+	OSObjectQuery_SIZEOF alloc kquery!
+
+	kquery@ // ptr
+	OSObjectQuery_SIZEOF // size
+	0 // word
+	memset
+
+	handle@ // objecthandle
+	kquery@ // query
+	ObObjectQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSObjectQuery_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSClose { handle -- ok }
+	fnsection "PAGE$text"
+
+	handle@ ObObjectClose ok!
+end
+
+fn OSWaitForMultipleObjects { alertable waittype timeout objectcount objecthandletable -- ok }
+	fnsection "PAGE$text"
+
+	auto ktable
+
+	objectcount@ 4 * MmQuotaChargeBuffer ok!
+
+	if (ok@)
+		return
+	end
+
+	objectcount@ 4 * // bytes
+	'ObWK' // tag
+	0 // flags
+	MmAllocWithTag ok! ktable!
+
+	if (ok@)
+		objectcount@ 4 * MmQuotaUnchargeBuffer
+		return
+	end
+
+	ktable@ // dest
+	objecthandletable@ // src
+	objectcount@ 4 * // size
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		ktable@ MmFree
+		objectcount@ 4 * MmQuotaUnchargeBuffer
+		return
+	end
+
+	alertable@ // alertable
+	waittype@ // waittype
+	timeout@ // timeout
+	objectcount@ // objectcount
+	ktable@ // objecthandletable
+	ObWaitForMultipleObjects ok!
+
+	ktable@ MmFree
+	objectcount@ 4 * MmQuotaUnchargeBuffer
+end
+
+fn OSWaitForObject { alertable timeout objecthandle -- ok }
+	fnsection "PAGE$text"
+
+	alertable@ timeout@ objecthandle@ ObWaitForObject ok!
+end
+
+fn OSHandleDuplicate { handle access srcprocesshandle destprocesshandle -- newhandle ok }
+	fnsection "PAGE$text"
+
+	handle@ access@ srcprocesshandle@ destprocesshandle@ ObHandleDuplicate ok! newhandle!
+end
+
+fn OSObjectDirectoryCountQuery { directoryhandle -- count ok }
+	fnsection "PAGE$text"
+
+	directoryhandle@ ObDirectoryCountQuery ok! count!
+end
+
+fn OSObjectDirectoryQueryAll { buffer maxquery directoryhandle -- count ok }
+	fnsection "PAGE$text"
+
+	// this is dumb because we're using the handle twice instead of just once
+	// which is slower, but we must tolerate it because the alternative is
+	// uglier and more effort and this won't get called with extreme frequency
+	// since it is slow by nature anyway.
+
+	auto maxcount
+	directoryhandle@ ObDirectoryCountQuery ok! maxcount!
+
+	if (ok@)
+		return
+	end
+
+	maxcount@ maxquery@ min maxquery!
+
+	auto mdl
+	auto kbuffer
+
+	1 // lockforwrite
+	maxquery@ OSObjectQuery_SIZEOF * // length
+	buffer@ // buffer
+	ExCallGetUserBuffer ok! mdl! kbuffer!
+
+	if (ok@)
+		return
+	end
+
+	kbuffer@ // buffer
+	maxquery@ // maxquery
+	directoryhandle@ // directoryhandle
+	ObDirectoryQueryAll ok! count!
+
+	mdl@ ExCallFreeUserBuffer
+end
+
+fn OSObjectDirectoryCreate { permissions name -- dirhandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	OBNAMEMAX // max
+	name@ // string
+	ExCallGetString ok! kname!
+
+	if (ok@)
+		return
+	end
+
+	permissions@ kname@ ObDirectoryCreate ok! dirhandle!
+
+	kname@ ExCallFreeString
+end
+
+fn OSObjectDirectoryInsert { objecthandle directoryhandle -- ok }
+	fnsection "PAGE$text"
+
+	objecthandle@ directoryhandle@ ObDirectoryInsert ok!
+end
+
+fn OSObjectDirectoryRemove { objecthandle -- ok }
+	fnsection "PAGE$text"
+
+	objecthandle@ ObDirectoryRemove ok!
+end
+
+fn OSSetSecurity { uid gid permissions handle -- ok }
+	fnsection "PAGE$text"
+
+	uid@ gid@ permissions@ handle@ ObSetSecurity ok!
+end

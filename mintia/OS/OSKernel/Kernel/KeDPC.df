@@ -1,0 +1,128 @@
+//
+// Implements the kernel DPC object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "KeInternal.h"
+
+var KiDPCListHead 0
+public KiDPCListHead
+
+var KiDPCListTail 0
+public KiDPCListTail
+
+fn KeDPCInitialize { function dpc -- }
+	function@ dpc@ KeDPC_Function + !
+	0 dpc@ KeDPC_Next + !
+	0 dpc@ KeDPC_Context1 + !
+	0 dpc@ KeDPC_Context2 + !
+	0 dpc@ KeDPC_Enqueued + !
+end
+
+fn KeDPCEnqueue { context1 context2 importance dpc -- ok }
+	context1@ dpc@ KeDPC_Context1 + !
+	context2@ dpc@ KeDPC_Context2 + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (dpc@ KeDPC_Enqueued + @)
+		rs@ HALCPUInterruptRestore
+
+		STATUS_ALREADY_ENQUEUED ok!
+
+		return
+	end
+
+	0 ok!
+
+	if (DEBUGCHECKS)
+		if (dpc@ KeDPC_Function + @ ~~)
+			"KeDPCEnqueue: attempt to queue a functionless DPC\n" KeCrash
+		end
+
+		if (KeIPLCurrentGet IPLDPC <)
+			"KeDPCEnqueue: ipl < IPLDPC\n" KeCrash
+		end
+	end
+
+	auto dpch
+	KiDPCListHead@ dpch!
+
+	if (dpch@)
+		if (importance@ DPCHIGHIMPORTANCE ==) // put it in front
+			dpc@ KiDPCListHead!
+			dpch@ dpc@ KeDPC_Next + !
+		end else // put it in the back
+			KiDPCListTail@ dpch!
+
+			0 dpc@ KeDPC_Next + !
+			dpc@ dpch@ KeDPC_Next + !
+			dpc@ KiDPCListTail!
+		end
+	end else
+		0 dpc@ KeDPC_Next + !
+		dpc@ KiDPCListHead!
+		dpc@ KiDPCListTail!
+	end
+
+	1 dpc@ KeDPC_Enqueued + !
+
+	KIDISPATCHIRQ_DPC KiDispatchEvents |=
+	IPLDPC KiSoftwareInterruptRequest
+
+	rs@ HALCPUInterruptRestore
+end
+
+var KeDPCActive 0
+public KeDPCActive
+
+fn KiDPCDispatchQueue { -- }
+	HALCPUInterruptDisable drop
+
+	1 KeDPCActive!
+
+	auto dpc
+	KiDPCListHead@ dpc!
+
+	0 KiDPCListHead!
+	0 KiDPCListTail!
+
+	while (dpc@)
+		0 dpc@ KeDPC_Enqueued + !
+
+		auto ndpc
+		dpc@ KeDPC_Next + @ ndpc!
+		0 dpc@ KeDPC_Next + !
+
+		auto ctx1
+		dpc@ KeDPC_Context1 + @ ctx1!
+
+		auto ctx2
+		dpc@ KeDPC_Context2 + @ ctx2!
+
+		HALCPUInterruptEnable
+
+		ctx1@ // context1
+		ctx2@ // context2
+		dpc@ // dpc
+		dpc@ KeDPC_Function + @ KeDPCFunction
+
+		HALCPUInterruptDisable drop
+
+		ndpc@ dpc!
+	end
+
+	0 KeDPCActive!
+
+	HALCPUInterruptEnable
+end

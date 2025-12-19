@@ -1,0 +1,49 @@
+//
+// Implements module loading support for OSLoader.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "OSLoader.h"
+
+buffer LdrModuleNameBuffer 64
+
+var LdrAlwaysRelink 0
+public LdrAlwaysRelink
+
+fn ComDLLOpenFile { name -- file ok }
+	if (name@ "HAL.dll" strcmp)
+		LdrPlatformHALName@ name!
+	end
+
+	auto path
+	64 alloc path!
+
+	if (name@ gb '/' ~=)
+		path@ "/mintia/" strcpy
+		path@ 8 + name@ strcpy
+	end else
+		name@ path!
+	end
+
+	auto after
+	0 after!
+
+	if (path@ "/mintia/BootDrivers/" 20 strncmp ~~)
+		path@ "%s\n" Printf
+	end else
+		1 after!
+	end
+
+	path@ // path
+	LdrBootDevice // device
+	LdrFileOpen ok! file!
+
+	if (ok@ ~~)
+		if (after@)
+			path@ "%s\n" Printf
+		end
+	end
+end
+
+#include "../Common/ComDLLLoad.df"

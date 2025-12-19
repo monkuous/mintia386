@@ -1,0 +1,913 @@
+//
+// Implements management routines and eviction for filestream pages.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Transfer.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+var IOCachePagesUsed 0
+public IOCachePagesUsed
+
+var IOModifiedFilePageCountTotal 0 // not an exact count but that's fine
+public IOModifiedFilePageCountTotal
+
+fn IOCacheAddZeroPage { modify offset fcb -- }
+	auto pfdbe
+	auto ok
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	0 // process
+	CANBLOCK // priority
+	MmPageWait drop drop
+
+	0 // process
+	0 // iointent
+	IOKFLAG_ZEROES // kflags
+	offset@ PAGENUMBERMASK & // offset
+	fcb@ // fcb
+	IOiCachePageGet ok! pfdbe!
+
+	ipl@ KeIPLLower
+
+	if (ok@)
+		return
+	end
+
+	if (modify@)
+		pfdbe@ // pfdbe
+		KeProcessCurrent // process
+		MmEvictablePageModify
+	end
+
+	pfdbe@ MmEvictablePageDereference drop
+end
+
+fn IOiCachePageGet { process iointent kflags offset fcb -- pfdbe ok }
+	// we must enter and leave at IPLDPC.
+
+	if (DEBUGCHECKS)
+		if (offset@ PAGEOFFSETMASK &)
+			"IOiCachePageGet: offset wasn't page-aligned\n" KeCrash
+		end
+
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOiCachePageGet: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	0 ok!
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	auto filesize
+	fcb@ IOFileControlBlock_SizeInBytes + @ filesize!
+
+	if (DEBUGCHECKS)
+		if (offset@ filesize@ >=)
+			"IOiCachePageGet: offset was beyond end of file\n" KeCrash
+		end
+	end
+
+	auto pri
+	CANBLOCK pri!
+
+	kflags@ MmKflagToPriority pri |=
+
+	offset@ // value
+	cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+	ExAvlTreeFindNodeByValue pfdbe!
+
+	if (pfdbe@)
+		if (kflags@ IOKFLAG_ZEROES &)
+			-1 ok!
+
+			return
+		end
+
+		IOiPageFrameEntryCache_Parent pfdbe -=
+
+		// found the page, it was in the cache already!
+
+		if (kflags@ IOKFLAG_CLUSTR &)
+			if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_IOINPROGRESS MMEVICTFLAG_VALID | &)
+				-1 ok!
+
+				return
+			end
+		end
+
+		// ref it so it doesn't get evicted while caller is using it
+
+		pfdbe@ MmEvictablePageReference drop
+
+		if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb
+			MMEVICTFLAG_VALID MMEVICTFLAG_IOINPROGRESS | & MMEVICTFLAG_IOINPROGRESS ==)
+
+			// this page is in transition. wait for the I/O to complete.
+			// we check for the valid flag to be clear, since if its set, that
+			// means that the IOINPROGRESS flag actually indicates page-out
+			// rather than page-in, and we only have to wait for the latter.
+
+			process@ // process
+			pri@ // pri
+			pfdbe@ // pfdbe
+			MmEvictablePageWait ok!
+
+			if (ok@)
+				pfdbe@ MmEvictablePageDereference drop
+			end elseif (process@)
+				pfdbe@ MmEvictablePageDereference drop
+
+				STATUS_REFAULT ok!
+
+				return
+			end
+		end
+
+		if (ok@ ~~)
+			if (iointent@)
+				if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID & ~~)
+					// the caller has an intent to perform page-in IO on this
+					// page if it isn't already valid, and the page isn't
+					// valid, so mark the page as IOINPROGRESS. this has to be
+					// done atomically here before we drop IPL, otherwise
+					// someone else can swoop in and try to own the IO after
+					// we already determined that we didn't have to wait
+					// above.
+
+					pfdbe@ MmEvictablePageStartIO
+				end
+			end
+		end
+
+		return
+	end
+
+	// not in the cache -- allocate a page for it.
+
+	// we want to allocate a page of zeroes if this is either an incomplete
+	// page of data (due to this being the final page of the file and the size
+	// of the file not being page-aligned), or if the caller has specifically
+	// requested it. the former is for security reasons, and the latter is
+	// used as an optimization during writes of full pages.
+
+	auto zeroes
+	filesize@ offset@ - PAGESIZE <
+	kflags@ IOKFLAG_ZEROES & || zeroes!
+
+	if (zeroes@)
+		ZEROMUST pri |=
+	end else
+		FREEFIRST pri |=
+	end
+
+	// it shouldn't be possible for MmEvictablePageGet to return an error
+	// status since the caller already waited to ensure an available page.
+
+	0 // flags
+	MMEVICTTYPE_FILE // evictablefuncs
+	pri@ // priority
+	MmEvictablePageGet drop pfdbe!
+
+	if (iointent@)
+		// we definitely own this IO, since we're the ones who created the
+		// page, so mark the page as IOINPROGRESS.
+
+		pfdbe@ MmEvictablePageStartIO
+	end
+
+	// initialize this new file cache PFDBE.
+
+	if (kflags@ IOKFLAG_ZEROES &)
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID |
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + sb
+	end
+
+	offset@ pfdbe@ IOiPageFrameEntryCache_OffsetInFile + !
+	fcb@ pfdbe@ IOiPageFrameEntryCache_FCB + !
+
+	1 IOCachePagesUsed +=
+
+	// insert the PFDBE in the cacheblock page tree for this file.
+
+	pfdbe@ IOiPageFrameEntryCache_Parent + // node
+	cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+	ExAvlTreeInsert
+end
+
+fn (MmEvictionFunction) IOCachePageEvictionFunction { pfdbe -- }
+	auto cacheblock
+	pfdbe@ IOiPageFrameEntryCache_FCB + @ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	if (DEBUGCHECKS)
+		if (cacheblock@ ~~)
+			"IOCachePageEvictionFunction: no cacheblock\n" KeCrash
+		end
+	end
+
+	// remove from page tree
+	
+	pfdbe@ IOiPageFrameEntryCache_Parent + // node
+	cacheblock@ IOiCacheInfoBlock_PageTree + // tree
+	ExAvlTreeRemove
+
+	1 IOCachePagesUsed -=
+end
+
+fn IOCachePageFlush { pfdbe -- ok }
+	// synchronously write out a page
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	0 // transfer
+	IOKFLAG_PAGEOUT // kflags
+	pfdbe@ // pfdbe
+	IOCachePageWrite ok!
+
+	ipl@ KeIPLLower
+end
+
+fn IOCachePageWrite { transfer kflags pfdbe -- ok }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOCachePageWrite: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	// assumes caller referenced the page.
+	// will cluster pages that it finds are in order.
+
+	// We don't have to check pages for a DELETED flag since the setting of
+	// that flag is atomic with removal from the page tree, and if a page has
+	// been removed from the page tree, we will never ever see it in this
+	// function, since we set the IOINPROGRESS flag for the duration of our
+	// operation and cache truncation waits for it to be cleared before
+	// deleting a page. More details on this issue can be found in a big
+	// comment in IOCacheInfoBlockTruncate.
+
+	auto fcb
+	pfdbe@ IOiPageFrameEntryCache_FCB + @ fcb!
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	auto mdl
+
+	if (transfer@ ~~)
+		MmMDLHeader_SIZEOF IOCLUSTERMAX PAGESHIFT >> 1 + 4 * + alloc mdl!
+	end else
+		transfer@ mdl!
+	end
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto pagecount
+	0 pagecount!
+
+	while (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_IOINPROGRESS &)
+		if (DEBUGCHECKS)
+			if (transfer@)
+				"IOCachePageWrite: in progress yet transfer exists\n" KeCrash
+			end
+		end
+
+		// collided write, wait for it to finish.
+
+		0 // process
+		kflags@ MmKflagToPriority CANBLOCK | // pri
+		pfdbe@ // pfdbe
+		MmEvictablePageWait ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED & ~~)
+		if (DEBUGCHECKS)
+			if (transfer@)
+				"IOCachePageWrite: not modified yet transfer exists\n" KeCrash
+			end
+		end
+	
+		return
+	end
+
+	auto off
+	pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ off!
+
+	// search backward for more modified pages to cluster
+
+	while (pagecount@ IOCLUSTERMAX PAGESHIFT >> 1 - <)
+		if (off@ ~~)
+			// we're at the start of the file, no more.
+
+			break
+		end
+
+		auto spfdbe
+		pfdbe@ IOiPageFrameEntryCache_Parent + // node
+		ExAvlTreeNodePrevious spfdbe!
+
+		if (spfdbe@ ~~)
+			// no more cached pages previous to this one.
+
+			break
+		end
+
+		IOiPageFrameEntryCache_Parent spfdbe -=
+
+		if (spfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED & ~~)
+			// page isn't modified.
+
+			break
+		end
+
+		if (spfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_IOINPROGRESS &)
+			// page is already being written out.
+
+			break
+		end
+
+		if (spfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ off@ PAGESIZE - ~=)
+			// page isn't virtually contiguous with this one.
+
+			break
+		end
+
+		spfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ off!
+		spfdbe@ pfdbe!
+
+		1 pagecount +=
+	end
+
+	0 pagecount!
+
+	auto startoffset
+	off@ startoffset!
+	-1 off!
+
+	// now go forward to build the MDL
+	while (pagecount@ IOCLUSTERMAX PAGESHIFT >> <)
+		if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED & ~~)
+			// page isn't modified.
+
+			break
+		end
+
+		if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_IOINPROGRESS &)
+			// page is already being written out.
+
+			break
+		end
+
+		if (off@ -1 ~=)
+			// this isn't the first page in the cluster.
+
+			if (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ off@ PAGESIZE + ~=)
+				// this page isn't virtually contiguous with the last one.
+
+				break
+			end
+		end
+
+		// bias the page's refcount to keep it from getting deleted while
+		// in-flight, or getting selected for modified page writing.
+
+		pfdbe@ MmEvictablePageReference drop
+
+		// start the IO on the page. this sets the IOINPROGRESS flag.
+
+		pfdbe@ MmEvictablePageStartIO
+
+		// clear the modified flag.
+
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED ~ &
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + sb
+
+		// save the page in the MDL.
+
+		pfdbe@ mdlpos@!
+
+		pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ off!
+
+		4 mdlpos +=
+		1 pagecount +=
+
+		pfdbe@ IOiPageFrameEntryCache_Parent + // node
+		ExAvlTreeNodeNext pfdbe!
+
+		if (pfdbe@ ~~)
+			break
+		end
+
+		IOiPageFrameEntryCache_Parent pfdbe -=
+	end
+
+	IPLLOW KeIPLLower
+
+	-1 mdlpos@!
+
+	pagecount@ PAGESHIFT << // length
+	0 // vaddr
+	kflags@ // kflags
+	mdl@ // mdl
+	MmMDLInitialize
+
+	MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+	if (transfer@)
+		// if a transfer MDL was specified, this was a call from the modified
+		// page writer trying to cluster file pages together for the file page
+		// writer. don't dispatch the IO now, it'll be done from the context
+		// of the file page writer thread.
+
+		IPLDPC KeIPLRaise drop
+
+		return
+	end
+
+	// dispatch the write to the file.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	0 // iop
+	0 // completionroutine
+	IODISPATCH_WRITE // functioncode
+	0 // flags
+	kflags@ // kflags
+	mdl@ // mdl
+	startoffset@ // offset
+	fcb@ // fcb
+	IOMDLTransfer ok! drop
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+
+	ok@ // status
+	mdl@ // mdl
+	IOiCachePageMDLCleanup
+
+	IPLDPC KeIPLRaise drop
+end
+
+fn IOCachePageRead { localpteaddr flags kflags offset fcb -- pfdbe ok }
+	if (DEBUGCHECKS)
+		if (localpteaddr@ ~~)
+			"IOCachePageRead: localpteaddr == 0\n" KeCrash
+		end
+
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOCachePageRead: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	if (DEBUGCHECKS)
+		if (cacheblock@ ~~)
+			"IOCachePageRead: attempt to perform cached page read from noncached file\n" KeCrash
+		end
+	end
+
+	auto process
+
+	if (kflags@ IOKFLAG_SYSSPC &)
+		PsSystemProcess@ process!
+	end else
+		KeProcessCurrent process!
+	end
+
+	process@ // process
+	1 // iointent
+	kflags@ // kflags
+	offset@ // offset
+	fcb@ // fcb
+	IOiCachePageGet ok! pfdbe!
+
+	if (ok@)
+		return
+	end
+
+	if (pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID &)
+		// This cache page is already valid.
+
+		1 MmSoftPageFaultCount +=
+
+		return
+	end
+
+	auto ipl
+
+	auto readfunc
+	fcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_IOPRead + @ readfunc!
+
+	if (DEBUGCHECKS)
+		if (readfunc@ ~~)
+			"IOCachePageRead: no read function\n" KeCrash
+		end
+	end
+
+	1 MmHardPageFaultCount +=
+	1 MmPageInCount +=
+
+	auto capturedpte
+	auto transitionpte
+
+	localpteaddr@@ capturedpte!
+
+	auto phyaddr
+	pfdbe@ MmPFDBEToPhysicalAddress phyaddr!
+
+	if (kflags@ IOKFLAG_SYSSPC &)
+		// this is a kernel mapping
+		phyaddr@ PTE_TRANSITION | PTE_TLBHACK | transitionpte!
+	end else
+		phyaddr@ PTE_TRANSITION | transitionpte!
+	end
+
+	transitionpte@ localpteaddr@!
+
+	IPLAPC KeIPLLower
+
+	process@ MmVADListUnlock
+
+	// perform the read operation
+
+	auto mdl
+	MmMDLHeader_SIZEOF IOREADCLUSTERMAX PAGESHIFT >> 1 + 4 * + alloc mdl!
+
+	auto pagecount
+	pfdbe@ // firstpfdbe
+	fcb@ // fcb
+	mdl@ // mdl
+	IOiCachePageReadCluster pagecount!
+
+	pagecount@ PAGESHIFT << // length
+	0 // vaddr
+	kflags@ IOKFLAG_PAGEIN | // kflags
+	mdl@ // mdl
+	MmMDLInitialize
+
+	MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+	0 // iop
+	0 // completionroutine
+	IODISPATCH_READ // functioncode
+	flags@ // flags
+	kflags@ IOKFLAG_PAGEIN | // kflags
+	mdl@ // mdl
+	mdl@ MmMDLHeader_SIZEOF + @ IOiPageFrameEntryCache_OffsetInFile + @ // offset
+	fcb@ // fcb
+	IOMDLTransfer ok! drop
+
+	0 // alertable
+	process@ // processobject
+	MmVADListLock drop
+
+	IPLDPC KeIPLRaise ipl!
+
+	if (pagecount@ 1 >)
+		ok@ // status
+		pfdbe@ // firstpfdbe
+		mdl@ // mdl
+		IOiCachePageReadClusterComplete
+	end
+
+	pfdbe@ MmEvictablePageSatisfy
+
+	if (ok@ ~~)
+		// read succeeded, page is now valid
+
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID |
+		pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + sb
+
+		if (localpteaddr@@ transitionpte@ ~=)
+			// PTE was deleted.
+
+			STATUS_REFAULT ok!
+		end
+	end
+
+	if (ok@)
+		if (localpteaddr@@ transitionpte@ ==)
+			capturedpte@ localpteaddr@!
+		end
+
+		pfdbe@ MmEvictablePageDereference drop
+	end
+end
+
+fn IOCachePageModified { pfdbe -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	// There used to be a check right here that would return if the PFDBE had
+	// the DELETED flag. I have no idea why, since that should be completely
+	// impossible here, so long as IO waits are satisfied AFTER the page is
+	// re-modified on an error status, but I'm leaving this here just in case
+	// it ends up being the solution to a weird bug I just reintroduced.
+
+	auto fcb
+	pfdbe@ IOiPageFrameEntryCache_FCB + @ fcb!
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	auto oldcount
+	cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + @ oldcount!
+
+	oldcount@ 1 + cacheblock@ IOiCacheInfoBlock_ModifiedPageCount + !
+
+	1 IOModifiedFilePageCountTotal +=
+
+	if (IOModifiedFilePageCountTotal@ IODIRTYFILEPAGEMAX >=)
+		0 // priboost
+		IOiWritebehindEvent // event
+		KeEventSignal
+	end
+
+	if (cacheblock@ IOiCacheInfoBlock_Flags + @ IOCACHEBLOCKFLAG_DIRTY & ~~)
+		// add the cacheblock to the dirty list and enqueue the writebehind
+		// timer.
+
+		IOCACHEBLOCKFLAG_DIRTY cacheblock@ IOiCacheInfoBlock_Flags + |=
+
+		cacheblock@ IOiCacheInfoBlockReference drop
+
+		1 IOCacheInfoBlockDirtyCount +=
+
+		auto t
+		IOiCacheInfoBlockDirtyListTail@ t!
+
+		if (t@)
+			cacheblock@ t@ IOiCacheInfoBlock_Next + !
+		end else
+			cacheblock@ IOiCacheInfoBlockDirtyListHead!
+		end
+
+		0 cacheblock@ IOiCacheInfoBlock_Next + !
+		t@ cacheblock@ IOiCacheInfoBlock_Prev + !
+
+		cacheblock@ IOiCacheInfoBlockDirtyListTail!
+
+		IOiScheduleWritebehind
+	end
+
+	if (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ cacheblock@ IOiCacheInfoBlock_FirstModifiedPage + @ <)
+		pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ cacheblock@ IOiCacheInfoBlock_FirstModifiedPage + !
+	end
+
+	if (pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ cacheblock@ IOiCacheInfoBlock_LastModifiedPage + @ >)
+		pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ cacheblock@ IOiCacheInfoBlock_LastModifiedPage + !
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOiCachePageMDLCleanup { status mdl -- }
+	if (status@)
+		// TODO pop-up window or something
+		status@ "I/O error while writing unsaved data (%i)\n" Printf
+	end
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto pagecount
+	mdl@ MmMDLHeader_Length + @ PAGESHIFT >> pagecount!
+
+	auto ipl
+
+	while (pagecount@)
+		auto pfdbe
+		mdlpos@@ pfdbe!
+
+		if (status@)
+			pfdbe@ // pfdbe
+			0 // process
+			MmEvictablePageModify
+		end
+
+		IPLDPC KeIPLRaise ipl!
+
+		pfdbe@ MmEvictablePageSatisfy
+
+		ipl@ KeIPLLower
+
+		pfdbe@ MmEvictablePageDereference drop
+
+		1 pagecount -=
+		4 mdlpos +=
+	end
+end
+
+fn (KeAPCFunctionSpecial) IOiFilePageWriterAPCRoutine { normalfunc context1 context2 apc -- }
+	auto iop
+	context1@@ iop!
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	auto status
+	iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ status!
+
+	status@ // status
+	mdl@ // mdl
+	IOiCachePageMDLCleanup
+
+	// the I/O system won't free the IOP for us, so do it now.
+
+	iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_FREEIOP |
+	iop@ IOPacketHeader_IOPFlagsB + sb
+
+	iop@ IOPacketFinishEitherContext
+
+	// this requires no synchronization as the transfer structures are
+	// only accessed by the modified page writer, which is currently
+	// executing this routine.
+
+	mdl@ IOTransferComplete
+end
+
+fn IOiCachePageReadCluster { firstpfdbe fcb mdl -- pagecount }
+	// cluster pages into the MDL.
+	// try to create a cluster that covers a naturally aligned 32K region of
+	// the file, since this will lead to an effect that each page-in will tend
+	// to do a much more efficient contiguous 32K read rather than a random
+	// access piecemeal pattern. This is especially beneficial for executable
+	// image pages.
+
+	0 pagecount!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	// check for a sufficient amount of memory to create a full cluster here,
+	// since everything will break if we block in MmPageWait.
+
+	if (MmAvailablePageCount@
+		MmSufficientAvailablePageCount@ IOREADCLUSTERMAX PAGESHIFT >> + <)
+		ipl@ KeIPLLower
+
+		1 pagecount!
+
+		firstpfdbe@ mdl@ MmMDLHeader_SIZEOF + !
+		-1 mdl@ MmMDLHeader_SIZEOF + 4 + !
+
+		return
+	end
+
+	auto firstoffset
+	firstpfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ firstoffset!
+
+	auto offset
+	firstoffset@ offset!
+
+	auto ok
+	auto pfdbe
+
+	if (firstoffset@ IOREADCLUSTERMAX 1 - &)
+		// try to get to the beginning of a clusterbehind sequence
+
+		firstpfdbe@ IOiPageFrameEntryCache_Parent + // node
+		ExAvlTreeNodePrevious pfdbe!
+
+		auto gapstart
+		if (pfdbe@)
+			IOiPageFrameEntryCache_Parent pfdbe -=
+			pfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ PAGESIZE + gapstart!
+		end else
+			0 gapstart!
+		end
+
+		gapstart@ offset!
+
+		if (offset@ firstoffset@ IOREADCLUSTERMAX 1 - ~ & <)
+			firstoffset@ IOREADCLUSTERMAX 1 - ~ & offset!
+		end
+	end
+
+	auto clusterable
+	fcb@ IOFileControlBlock_SizeInBytes + @ offset@ - PAGEOFFSETMASK + PAGENUMBERMASK & PAGESHIFT >> clusterable!
+
+	if (clusterable@ IOREADCLUSTERMAX PAGESHIFT >> >)
+		IOREADCLUSTERMAX PAGESHIFT >> clusterable!
+	end
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	while (clusterable@)
+		if (offset@ firstoffset@ ==)
+			firstpfdbe@ pfdbe!
+		end else
+			0 // process
+			1 // iointent
+			IOKFLAG_CLUSTR // kflags
+			offset@ // offset
+			fcb@ // fcb
+			IOiCachePageGet ok! pfdbe!
+
+			if (ok@)
+				ipl@ KeIPLLower
+
+				return
+			end
+		end
+
+		pfdbe@ mdlpos@!
+		-1 mdlpos@ 4 + !
+
+		PAGESIZE offset +=
+		4 mdlpos +=
+		1 clusterable -=
+		1 pagecount +=
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOiCachePageReadClusterComplete { status firstpfdbe mdl -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOiCachePageReadClusterComplete: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto pagecount
+	mdl@ MmMDLHeader_Length + @ PAGESHIFT >> pagecount!
+
+	while (pagecount@)
+		auto pfdbe
+		mdlpos@@ pfdbe!
+
+		if (pfdbe@ firstpfdbe@ ~=)
+			if (status@ ~~)
+				pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + gb MMEVICTFLAG_VALID |
+				pfdbe@ IOiPageFrameEntryCache_EvictionFlagsB + sb
+			end
+
+			pfdbe@ MmEvictablePageSatisfy
+
+			pfdbe@ MmEvictablePageDereference drop
+		end
+
+		1 pagecount -=
+		4 mdlpos +=
+	end
+end
+
+fn IOFilePageWriterDispatch { transfer -- }
+	// use the first pfdbe in the transfer MDL to get an FCB pointer.
+
+	auto firstpfdbe
+	transfer@ MmMDLHeader_SIZEOF + @ firstpfdbe!
+
+	auto fcb
+	firstpfdbe@ IOiPageFrameEntryCache_FCB + @ fcb!
+
+	0 // iop
+	pointerof IOiFilePageWriterAPCRoutine // completionroutine
+	IODISPATCH_WRITE // functioncode
+	0 // flags
+	IOKFLAG_SWAPOUT // kflags
+	transfer@ // mdl
+	firstpfdbe@ IOiPageFrameEntryCache_OffsetInFile + @ // offset
+	fcb@ // fcb
+	IOMDLTransfer drop drop
+end

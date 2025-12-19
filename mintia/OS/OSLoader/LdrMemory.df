@@ -1,0 +1,459 @@
+//
+// Implements memory management for the MINTIA bootloader.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "OSLoader.h"
+
+buffer LdrKernelSpaceBitmapHeader ComBitmapHeader_SIZEOF
+
+var LdrKernelSpaceBitmap 0
+public LdrKernelSpaceBitmap
+
+var LdrKernelStructureBump KERNELSTRUCTURES
+
+var LdrMemoryDescriptorListHead 0
+public LdrMemoryDescriptorListHead
+
+var LdrMemoryDescriptorListTail 0
+public LdrMemoryDescriptorListTail
+
+var LdrMemoryPFDB 0
+public LdrMemoryPFDB
+
+var LdrMemoryTotalRAM 0
+public LdrMemoryTotalRAM
+
+fn LdrMemoryInit { -- }
+	// have the platform-dependent code "magically" populate our memory
+	// descriptor list, create the IDENTITYSPACE, enable paging, whatever else
+	// it needs to do.
+
+	LdrPlatformMemoryInit
+
+	MANAGEDKERNELSPACESIZE PAGESHIFT >> // sizeinbits
+	LdrKernelSpaceBitmap@ // data
+	LdrKernelSpaceBitmapHeader // header
+	ComBitmapInitialize
+
+	LdrMemoryPFDBInit
+
+	// create interrupt stack
+
+	auto ok
+	OSLOADERINTERRUPTSTACKPAGES // pages
+	KERNELSTRUCTURES // prefva
+	0 // fixed
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRangeAndMap ok! LdrInterruptStack!
+
+	if (ok@)
+		"LdrMemoryInit: couldn't create interrupt stack (%i)\n" LdrCrash
+	end
+
+	if (DEBUGCHECKS)
+		LdrInterruptStack@ "LdrMemoryInit: interrupt stack @ 0x%08x\n" Printf
+	end
+
+	LdrInterruptStack@ OSLOADERINTERRUPTSTACKPAGES PAGESHIFT << + LdrInterruptStackTop!
+end
+
+fn LdrMemoryPFDBInit { -- }
+	// virtually allocate the page frame database in kernel space.
+
+	// we do this so fancily so that large sparse physical address spaces
+	// don't necessitate a massive PFDB array backed by real memory. we also
+	// might be able to avoid allocating PFDB pages for large areas that are
+	// permanently reserved by kernel code/data and firmware.
+
+	// first we need to determine how large of an area in kernel space we need
+	// to reserve for the pfdb. we do this by scanning the descriptor list and
+	// bumping up a maxpfn for each PFDB-able region.
+
+	auto maxpfn
+	0 maxpfn!
+
+	auto desc
+	LdrMemoryDescriptorListHead@ desc!
+
+	auto pfdbable
+
+	while (desc@)
+		if (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_FREE ==)
+			1 pfdbable!
+		end elseif (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_RECLAIMABLE ==)
+			1 pfdbable!
+		end else
+			0 pfdbable!
+		end
+
+		if (pfdbable@)
+			if (desc@ LdrMemoryDescriptor_Pages + @)
+				desc@ LdrMemoryDescriptor_StartPFN + @ desc@ LdrMemoryDescriptor_Pages + @ + maxpfn!
+			end
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+
+	// reserve the virtual PFDB region.
+
+	auto ok
+	maxpfn@ PFDBESIZE * PAGEOFFSETMASK + PAGESHIFT >> // pages
+	KERNELSTRUCTURES // prefva
+	0 // fixed
+	LdrKernelSpaceAllocate ok! LdrMemoryPFDB!
+
+	if (ok@)
+		ok@ "LdrMemoryPFDBInit: couldn't reserve PFDB region in kernel space (%i)\n" LdrCrash
+	end
+
+	// allocate and initialize PFDB pages for each PFDB-able region.
+
+	LdrMemoryDescriptorListHead@ desc!
+
+	while (desc@)
+		if (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_FREE ==)
+			1 pfdbable!
+		end elseif (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_RECLAIMABLE ==)
+			1 pfdbable!
+		end else
+			0 pfdbable!
+		end
+
+		if (pfdbable@)
+			desc@ LdrMemoryCreatePFDBRegion
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+end
+
+fn LdrMemoryCreatePFDBRegion { desc -- }
+	// break-out function for LdrMemoryPFDBInit, to be a little nicer.
+	// allocates a physical page for each PFDB page needed to describe the
+	// region.
+
+	if (desc@ LdrMemoryDescriptor_Pages + @ ~~)
+		return
+	end
+
+	// calculate the offset into the PFDB region of the first page frame of
+	// the region.
+
+	auto vaddr
+	desc@ LdrMemoryDescriptor_StartPFN + @ PFDBESIZE * LdrMemoryPFDB@ + vaddr!
+
+	auto endaddr
+	vaddr@ desc@ LdrMemoryDescriptor_Pages + @ PFDBESIZE * + endaddr!
+
+	// round vaddr down
+	PAGENUMBERMASK vaddr &=
+
+	// round endaddr up
+	endaddr@ PAGEOFFSETMASK + PAGENUMBERMASK & endaddr!
+
+	auto pages
+	0 pages!
+
+	auto startaddr
+	vaddr@ startaddr!
+
+	auto adesc
+
+	while (vaddr@ endaddr@ <)
+		// look up the vaddr to make sure we aren't double-allocating an area
+
+		auto ok
+		vaddr@ LdrPlatformVirtualToPhysical ok! drop
+
+		if (ok@ ~~)
+			// valid, do the stuff for that last range
+
+			if (pages@)
+				pages@ // pages
+				OSLOADERMEM_USED // type
+				LdrMemoryAllocatePhysicalRange ok! adesc!
+
+				if (ok@)
+					ok@ "LdrMemoryCreatePFDBRegion: failed to allocate PFDB range (%i) 1\n" LdrCrash
+				end
+
+				startaddr@ // vaddr
+				adesc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // phyaddr
+				pages@ // pages
+				0 // noncached
+				0 // reclaimablept
+				LdrPlatformMapRange
+
+				startaddr@ // ptr
+				pages@ PAGESHIFT << // size
+				0 // word
+				memset
+
+				0 pages!
+			end
+		end else
+			// not valid.
+
+			if (pages@ ~~)
+				vaddr@ startaddr!
+			end
+
+			1 pages +=
+		end
+
+		PAGESIZE vaddr +=
+	end
+
+	if (pages@)
+		pages@ // pages
+		OSLOADERMEM_USED // type
+		LdrMemoryAllocatePhysicalRange ok! adesc!
+
+		if (ok@)
+			ok@ "LdrMemoryCreatePFDBRegion: failed to allocate PFDB range (%i)\n" LdrCrash
+		end
+
+		startaddr@ // vaddr
+		adesc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // phyaddr
+		pages@ // pages
+		0 // noncached
+		0 // reclaimablept
+		LdrPlatformMapRange
+
+		startaddr@ // ptr
+		pages@ PAGESHIFT << // size
+		0 // word
+		memset
+	end
+end
+
+var LdrHeapPointer 0
+public LdrHeapPointer
+
+var LdrHeapTop 0
+public LdrHeapTop
+
+fn LdrMemoryAllocate { size -- ptr ok }
+	// extremely simple bump allocator since this is all gonna get reclaimed
+	// by the kernel anyway.
+
+	size@ 3 + 0xFFFFFFFC & size!
+
+	if (LdrHeapPointer@ size@ + LdrHeapTop@ <=)
+		0 ok!
+
+		LdrHeapPointer@ ptr!
+		size@ LdrHeapPointer +=
+
+		return
+	end
+
+	// yoink a chunk off the end of a free descriptor and use that as heap
+
+	"TODO apparently we use more than 32K bootloader heap now\n" LdrCrash
+end
+
+fn LdrMemoryAllocatePhysicalRange { pages type -- desc ok }
+	auto searchdesc
+	LdrMemoryDescriptorListHead@ searchdesc!
+
+	while (searchdesc@)
+		if (searchdesc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_FREE ==)
+			if (searchdesc@ LdrMemoryDescriptor_Pages + @ pages@ >=)
+				// draw the range from the end of this descriptor.
+
+				pages@ searchdesc@ LdrMemoryDescriptor_Pages + -=
+
+				LdrMemoryDescriptor_SIZEOF // size
+				LdrMemoryAllocate ok! desc!
+
+				if (ok@)
+					return
+				end
+
+				pages@ desc@ LdrMemoryDescriptor_Pages + !
+
+				searchdesc@ LdrMemoryDescriptor_Pages + @ searchdesc@ LdrMemoryDescriptor_StartPFN + @ +
+				desc@ LdrMemoryDescriptor_StartPFN + !
+
+				type@ desc@ LdrMemoryDescriptor_Type + !
+
+				searchdesc@ LdrMemoryDescriptor_Next + @ desc@ LdrMemoryDescriptor_Next + !
+				desc@ searchdesc@ LdrMemoryDescriptor_Next + !
+
+				0 desc@ LdrMemoryDescriptor_OriginalExtent + !
+				0 desc@ LdrMemoryDescriptor_OriginalDescriptor + !
+
+				if (desc@ LdrMemoryDescriptor_Next + @ ~~)
+					desc@ LdrMemoryDescriptorListTail!
+				end
+
+				return
+			end
+		end
+
+		searchdesc@ LdrMemoryDescriptor_Next + @ searchdesc!
+	end
+
+	LDRSTATUS_NO_MEMORY ok!
+end
+
+fn LdrMemoryFreePhysicalRange { desc -- }
+	OSLOADERMEM_FREE desc@ LdrMemoryDescriptor_Type + !
+end
+
+var LdrKernelSpaceHint 0
+
+fn LdrKernelSpaceAllocate { pages prefva fixed -- realva ok }
+	if (prefva@ KERNELSPACE <)
+		if (fixed@)
+			LDRSTATUS_ADDRESS_NOT_AVAILABLE ok!
+
+			return
+		end
+
+		KERNELSPACE prefva!
+	end
+
+	if (prefva@ KERNELSTRUCTURES ==)
+		if (fixed@)
+			LDRSTATUS_ADDRESS_NOT_AVAILABLE ok!
+
+			return
+		end
+
+		0 ok!
+
+		LdrKernelStructureBump@ realva!
+
+		pages@ PAGESHIFT << LdrKernelStructureBump +=
+
+		return
+	end
+
+	auto isclear
+
+	pages@ // runlength
+	prefva@ KERNELSPACE - PAGESHIFT >> // index
+	LdrKernelSpaceBitmapHeader // header
+	ComBitmapCheckClearBits isclear!
+
+	if (isclear@)
+		// preferred range is available
+
+		pages@ // runlength
+		prefva@ KERNELSPACE - PAGESHIFT >> // index
+		LdrKernelSpaceBitmapHeader // header
+		ComBitmapSetBits
+
+		prefva@ realva!
+
+		0 ok!
+
+		return
+	end
+
+	// preferred range isn't available
+
+	if (fixed@)
+		// caller NEEDED that address
+
+		LDRSTATUS_ADDRESS_NOT_AVAILABLE ok!
+
+		return
+	end
+
+	auto hint
+	if (prefva@ KERNELSPACE ~=)
+		prefva@ KERNELSPACE - PAGESHIFT >> hint!
+	end else
+		LdrKernelSpaceHint@ hint!
+	end
+
+	// find some other place
+
+	hint@ // hint
+	pages@ // runlength
+	LdrKernelSpaceBitmapHeader // header
+	ComBitmapFindRun ok! realva!
+
+	if (ok@)
+		LDRSTATUS_ADDRESS_NOT_AVAILABLE ok!
+
+		return
+	end
+
+	if (prefva@ KERNELSPACE ==)
+		realva@ LdrKernelSpaceHint!
+	end
+
+	pages@ // runlength
+	realva@ // index
+	LdrKernelSpaceBitmapHeader // header
+	ComBitmapSetBits
+
+	realva@ PAGESHIFT << KERNELSPACE + realva!
+end
+
+fn LdrKernelSpaceFree { pages vaddr -- }
+	if (vaddr@ KERNELSPACE MANAGEDKERNELSPACESIZE + >=)
+		return
+	end
+
+	pages@ // runlength
+	vaddr@ KERNELSPACE - PAGESHIFT >> // index
+	LdrKernelSpaceBitmapHeader // header
+	ComBitmapClearBits
+end
+
+fn LdrMemoryMapIORegion { pages phyaddr noncached -- vaddr ok }
+	pages@ // pages
+	KERNELSTRUCTURES // prefva
+	0 // fixed
+	LdrKernelSpaceAllocate ok! vaddr!
+
+	if (ok@)
+		return
+	end
+
+	vaddr@ // vaddr
+	phyaddr@ // phyaddr
+	pages@ // pages
+	noncached@ // noncached
+	0 // reclaimablept
+	LdrPlatformMapRange
+end
+
+fn LdrMemoryAllocatePhysicalRangeAndMap { pages prefva fixed type -- realva ok }
+	pages@ // pages
+	prefva@ // prefva
+	fixed@ // fixed
+	LdrKernelSpaceAllocate ok! realva!
+
+	if (ok@)
+		return
+	end
+
+	auto desc
+	pages@ // pages
+	type@ // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		pages@ // pages
+		realva@ // vaddr
+		LdrKernelSpaceFree
+
+		return
+	end
+
+	realva@ // vaddr
+	desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // phyaddr
+	pages@ // pages
+	0 // noncached
+	0 // reclaimablept
+	LdrPlatformMapRange
+end

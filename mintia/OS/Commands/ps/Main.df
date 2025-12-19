@@ -1,0 +1,126 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/AMS/Ams.h"
+
+table StatusNames
+	"n/a"  // 0
+	"INIT" // 1
+	"RDY"  // 2
+	"SUSP" // 3
+	"CUR"  // 4
+	"WAIT" // 5
+	"UWIT" // 6
+	"DEAD" // 7
+	"TRAN" // 8
+	"STNB" // 9
+	"10"
+	"11"
+	"12"
+	"13"
+	"14"
+	"15"
+
+	"ZOMB" // 16
+	"?!?!" // 17
+endtable
+
+fn Main { ... -- ret }
+	0 ret!
+
+	auto info
+	AmsUserInformation_SIZEOF alloc info!
+
+	auto inited
+	1 inited!
+
+	AmsInit ret!
+
+	if (ret@)
+		0 inited!
+	end
+
+	auto count
+	OSProcessCountQuery ret! count!
+
+	if (ret@)
+		ret@ OSStatusGetName "ps: couldn't query process count: %s\n" OSError
+	end
+
+	auto querybuffer
+	count@ OSProcessInformation_SIZEOF * OSHeapAllocate ret! querybuffer!
+
+	if (ret@)
+		ret@ OSStatusGetName "ps: couldn't allocate buffer: %s\n" OSError
+	end
+
+	querybuffer@ // buffer
+	count@ // maxquery
+	OSProcessQueryAll ret! count!
+
+	if (ret@)
+		querybuffer@ OSHeapFree
+
+		ret@ OSStatusGetName "ps: couldn't query process list: %s\n" OSError
+	end
+
+	"OWNER"
+	"CONSOLE"
+	"PAGES"
+	"PAGEFAULTS"
+	"PRI"
+	"STATE"
+	"NAME"
+	"PID"
+
+	"%5s %16s %-5s  %4s %11s %7s %8s %s\n" Printf
+
+	auto record
+	querybuffer@ record!
+
+	auto userptr
+	32 alloc userptr!
+
+	while (count@)
+		auto status
+
+		if (record@ OSProcessInformation_Terminated + @)
+			16 status!
+		end else
+			record@ OSProcessInformation_Status + @ status!
+		end
+
+		if (status@ 16 >)
+			17 status!
+		end
+
+		if (inited@)
+			info@ // info
+			record@ OSProcessInformation_OwningUID + @ // uid
+			AmsQueryByUID ret!
+
+			if (ret@ ~~)
+				info@ AmsUserInformation_UserName + userptr!
+			end else
+				record@ OSProcessInformation_OwningUID + @ userptr@ itoa
+			end
+		end else
+			record@ OSProcessInformation_OwningUID + @ userptr@ itoa
+		end
+
+		userptr@
+		record@ OSProcessInformation_ConsoleName +
+		record@ OSProcessInformation_WorkingSetSize + @
+		record@ OSProcessInformation_PageFaultCount + @
+		record@ OSProcessInformation_Priority + @
+		[status@]StatusNames@
+		record@ OSProcessInformation_Name +
+		record@ OSProcessInformation_PID + @
+		"%5d %16s %-5s  %02d   %11d %7d %8s %s\n" Printf
+
+		1 count -=
+		OSProcessInformation_SIZEOF record +=
+	end
+
+	querybuffer@ OSHeapFree
+end

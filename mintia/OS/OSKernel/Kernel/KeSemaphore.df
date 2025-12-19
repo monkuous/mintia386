@@ -1,0 +1,73 @@
+//
+// Implements the kernel semaphore object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "KeInternal.h"
+
+// initializes a KeSemaphore
+
+fn KeSemaphoreInitialize { count name semaphore -- }
+	name@ DISPATCHOBJECT_SEMAPHORE semaphore@ KiDispatchInitialize
+
+	count@ semaphore@ KeSemaphore_DispatchHeader + KeDispatchHeader_Signaled + !
+end
+
+fn KeSemaphoreRelease { adjustment semaphore -- ok }
+	if (DEBUGCHECKS)
+		if (semaphore@ KeSemaphore_DispatchHeader + KeDispatchHeader_Type + @ DISPATCHOBJECT_SEMAPHORE ~=)
+			"KeSemaphoreRelease: not a semaphore\n" KeCrash
+		end
+	end
+
+	0 ok!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto count
+	semaphore@ KeSemaphore_DispatchHeader + KeDispatchHeader_Signaled + @ count!
+
+	if (count@ adjustment@ + count@ <)
+		// count+adjustment overflows
+		
+		ipl@ KeIPLLower
+
+		STATUS_OVERFLOW ok!
+
+		return
+	end
+
+	if (count@ 0 ==)
+		while (adjustment@)
+			auto wth
+
+			0 // waitstatus
+			1 // priboost
+			semaphore@ // object
+			0 // signal
+			KiDispatchSatisfyFirst wth!
+
+			if (wth@ ~~)
+				break
+			end
+
+			1 adjustment -=
+		end
+	end
+
+	adjustment@ count +=
+
+	count@ semaphore@ KeSemaphore_DispatchHeader + KeDispatchHeader_Signaled + !
+
+	ipl@ KeIPLLower
+end

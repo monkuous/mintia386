@@ -1,0 +1,408 @@
+//
+// Implements the KinnowFB video card driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<ll>/OSDLL/OSVideoControl.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALXRstationEBus.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+struct KinnowCard
+	4 BaseAddress
+	4 Width
+	4 Height
+	4 VRAMSize
+endstruct
+
+datasection "data"
+
+table DriverKinnowFBDispatch
+	0                                    // open
+	0                                    // close
+	pointerof KinnowFBIOControl          // iocontrol
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // system control
+	0                                    // parse
+	0                                    // create
+	0                                    // flush
+	pointerof IODeviceDeleteFileObject   // delete object
+	0                                    // set information
+	0                                    // get information
+	0                                    // rename
+	0                                    // readblock
+	0                                    // writeblock
+	0                                    // truncate
+	0                                    // readdirectory
+	pointerof KinnowFBGetPageAddress     // getpageaddr
+	0                                    // delete device object
+	0                                    // reserved
+	0                                    // reserved
+	pointerof KinnowFBRead               // read
+	pointerof KinnowFBWrite              // write
+endtable
+
+table DriverKinnowFB
+	IOVERSION_MAJOR                      // ioversion major
+	IOVERSION_MINOR                      // ioversion minor
+
+	"kinnowfb"                           // name
+	pointerof DriverKinnowFBDispatch     // dispatch table
+	0                                    // flags
+
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+endtable
+
+datasection "data"
+
+const KINNOWFB_MID 0x4B494E36
+
+fn (FDriverInit) DriverInit { stage -- ok }
+	if (stage@ STAGE_THREAD ==)
+		pointerof KinnowFBEnumerate // func
+		KINNOWFB_MID // mid
+		HALXRstationEBusEnumerate drop
+	end
+
+	0 ok!
+end
+
+const LGVRAMOffset      0x100000
+const LGRegistersOffset 0x3000
+
+struct LGRegisters
+	4 Screen
+	4 VRAMSize
+endstruct
+
+fn (HALXRstationEBusCallbackF) KinnowFBEnumerate { slotid phyaddr -- }
+	auto dev
+
+	auto vaddr
+	MMIO_NOCACHE // cached
+	512 // length
+	phyaddr@ LGRegistersOffset + // phyaddr
+	MmIORegionMap ok! vaddr!
+
+	if (ok@)
+		return
+	end
+
+	auto screenparam
+	vaddr@ LGRegisters_Screen + @ screenparam!
+
+	auto vramsize
+	vaddr@ LGRegisters_VRAMSize + @ vramsize!
+
+	512 // length
+	vaddr@ // vaddr
+	MmIORegionUnmap
+
+	auto name
+	OBNAMEMAX alloc name!
+
+	name@ // dest
+	"kinnowfb" // src
+	strcpy
+
+	slotid@ // n
+	name@ 8 + // str
+	itoa
+
+	auto ok
+
+	KinnowCard_SIZEOF // extensionsize
+	OSFILETYPE_CHARDEVICE // type
+	name@ // name
+	vramsize@ // sizeinbytes
+	DriverKinnowFB // driver
+	ACCESS_OWNER_READ ACCESS_OWNER_WRITE | ACCESS_GROUP_READ | ACCESS_GROUP_WRITE | // permissions
+	IODeviceCreate ok! dev!
+
+	if (ok@)
+		ok@ name@ "KinnowFBEnumerate: failed to create %s (%i)\n" KeCrash
+	end
+
+	auto kinnowfb
+	dev@ IODevice_Extension + @ kinnowfb!
+
+	phyaddr@ kinnowfb@ KinnowCard_BaseAddress + !
+	screenparam@ 0xFFF & kinnowfb@ KinnowCard_Width + !
+	screenparam@ 12 >> 0xFFF & kinnowfb@ KinnowCard_Height + !
+	vramsize@ kinnowfb@ KinnowCard_VRAMSize + !
+end
+
+fn (IODispatchIOControlFunction) KinnowFBIOControl { arg2 arg1 access fcb lastmode -- ret ok }
+	0 ok!
+
+	auto kinnowfb
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ IODevice_Extension + @ kinnowfb!
+
+	if (arg1@ OSVIDEOIOCONTROL_QUERY ==)
+		auto query
+
+		if (lastmode@ USERMODE ==)
+			OSVideoQuery_SIZEOF alloc query!
+
+			query@ // ptr
+			OSVideoQuery_SIZEOF // size
+			0 // word
+			memset
+		end else
+			arg2@ query!
+		end
+
+		kinnowfb@ KinnowCard_Width + @ query@ OSVideoQuery_Width + !
+		kinnowfb@ KinnowCard_Height + @ query@ OSVideoQuery_Height + !
+		OSFBFORMAT_I8 query@ OSVideoQuery_Format + !
+		kinnowfb@ KinnowCard_VRAMSize + @ query@ OSVideoQuery_VRAMSize + !
+
+		if (lastmode@ USERMODE ==)
+			arg2@ // dest
+			query@ // src
+			OSVideoQuery_SIZEOF // size
+			KeSafeCopyOut ok!
+		end
+	end else
+		STATUS_NOT_SUPPORTED ok!
+	end
+end
+
+fn (IODispatchGetPageAddressFunction) KinnowFBGetPageAddress { offset fcb -- phyaddr ok }
+	auto kinnowfb
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ IODevice_Extension + @ kinnowfb!
+
+	if (offset@ kinnowfb@ KinnowCard_VRAMSize + @ >=)
+		"KinnowFBGetPageAddress: beyond end of VRAM\n" KeCrash
+	end
+
+	0 ok!
+	kinnowfb@ KinnowCard_BaseAddress + @ LGVRAMOffset + offset@ + phyaddr!
+end
+
+const IOUNIT (PAGESIZE 4 *)
+const IOUNITOFFSETMASK (IOUNIT 1 -)
+const IOUNITNUMBERMASK (IOUNITOFFSETMASK ~)
+
+fn (IODispatchEnqueueIOPFunction) KinnowFBRead { iopl -- done ok }
+	0 ok!
+	1 done!
+
+	auto kinnowfb
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ IODevice_Extension + @ kinnowfb!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	if (offset@ kinnowfb@ KinnowCard_VRAMSize + @ >=)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto buf
+	iopl@ IOPacketLocationVirtualBuffer buf!
+
+	auto length
+	iopl@ IOPacketLocation_Length + @ length!
+
+	kinnowfb@ KinnowCard_VRAMSize + @ offset@ -
+	length@
+	min length!
+
+	length@ iopl@ IOPacketLocation_Length + !
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+	auto bytesread
+	0 bytesread!
+
+	while (bytesread@ length@ <)
+		auto pageoff
+		offset@ IOUNITOFFSETMASK & pageoff!
+
+		auto m
+		length@ bytesread@ -
+		IOUNIT pageoff@ -
+		min m!
+
+		auto vaddr
+		MMIO_WRITECOMBINE // cached
+		IOUNIT // length
+		kinnowfb@ KinnowCard_BaseAddress + @ LGVRAMOffset + offset@ IOUNITNUMBERMASK & + // phyaddr
+		MmIORegionMap ok! vaddr!
+
+		if (ok@)
+			ok@ // status
+			0 // priboost
+			iop@ // iop
+			IOPacketCompleteLow
+
+			return
+		end
+
+		if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_USERMODE &)
+			buf@ // dest
+			vaddr@ pageoff@ + // src
+			m@ // size
+			KeSafeCopyOut ok!
+		end else
+			buf@ // dest
+			vaddr@ pageoff@ + // src
+			m@ // size
+			memcpy
+		end
+
+		IOUNIT // length
+		vaddr@ // vaddr
+		MmIORegionUnmap
+
+		if (ok@)
+			ok@ // status
+			0 // priboost
+			iop@ // iop
+			IOPacketCompleteLow
+
+			return
+		end
+
+		m@ buf +=
+		m@ bytesread +=
+		m@ offset +=
+	end
+
+	0 // status
+	0 // priboost
+	iop@ // iop
+	IOPacketCompleteLow
+end
+
+fn (IODispatchEnqueueIOPFunction) KinnowFBWrite { iopl -- done ok }
+	0 ok!
+	1 done!
+
+	auto kinnowfb
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ IODevice_Extension + @ kinnowfb!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	if (offset@ kinnowfb@ KinnowCard_VRAMSize + @ >=)
+		STATUS_END_OF_DISK ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto buf
+	iopl@ IOPacketLocationVirtualBuffer buf!
+
+	auto length
+	iopl@ IOPacketLocation_Length + @ length!
+
+	kinnowfb@ KinnowCard_VRAMSize + @ offset@ -
+	length@
+	min length!
+
+	length@ iopl@ IOPacketLocation_Length + !
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+	auto byteswritten
+	0 byteswritten!
+
+	while (byteswritten@ length@ <)
+		auto pageoff
+		offset@ IOUNITOFFSETMASK & pageoff!
+
+		auto m
+		length@ byteswritten@ -
+		IOUNIT pageoff@ -
+		min m!
+
+		auto vaddr
+		MMIO_WRITECOMBINE // cached
+		IOUNIT // length
+		kinnowfb@ KinnowCard_BaseAddress + @ LGVRAMOffset + offset@ IOUNITNUMBERMASK & + // phyaddr
+		MmIORegionMap ok! vaddr!
+
+		if (ok@)
+			ok@ // status
+			0 // priboost
+			iop@ // iop
+			IOPacketCompleteLow
+
+			return
+		end
+
+		if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_USERMODE &)
+			vaddr@ pageoff@ + // dest
+			buf@ // src
+			m@ // size
+			KeSafeCopyIn ok!
+		end else
+			vaddr@ pageoff@ + // dest
+			buf@ // src
+			m@ // size
+			memcpy
+		end
+
+		IOUNIT // length
+		vaddr@ // vaddr
+		MmIORegionUnmap
+
+		if (ok@)
+			ok@ // status
+			0 // priboost
+			iop@ // iop
+			IOPacketCompleteLow
+
+			return
+		end
+
+		m@ buf +=
+		m@ byteswritten +=
+		m@ offset +=
+	end
+
+	0 // status
+	0 // priboost
+	iop@ // iop
+	IOPacketCompleteLow
+end

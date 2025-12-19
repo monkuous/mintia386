@@ -1,0 +1,985 @@
+//
+// Implements the file IO entrypoints.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IOInternal.h"
+
+fn IOFileFlush { purge filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+	auto access
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	if (access@ ACCESS_WRITE ACCESS_READ | & ~~)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	purge@ fileobject@ IOFileFlushObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileFlushObject { purge fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	if (fcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+		// no cacheblock, nothing to do
+
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	if (cacheblock@ ~~)
+		// no cacheblock, nothing to do
+
+		fcb@ IOFileControlBlockUnlock
+
+		return
+	end
+
+	if (fcb@ IOFileControlBlock_AsyncIOCount + @)
+		// wait for async IO to complete. no more can be enqueued after this
+		// value reaches zero because we are holding the rwlock exclusive.
+
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		fcb@ IOFileControlBlock_AsyncIOEvent + // object
+		KeThreadWaitForObject drop
+	end
+
+	if (purge@)
+		0 // newsize
+		1 // writeout
+		cacheblock@ // cacheblock
+		IOCacheInfoBlockTruncate ok!
+	end else
+		cacheblock@ IOCacheInfoBlockFlush ok!
+	end
+
+	fcb@ IOFileControlBlockUnlock
+end
+
+fn IOFileTruncate { newsize growing handle -- oldsize ok }
+	fnsection "PAGE$text"
+
+	auto fileobject
+	auto access
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Flags + @ IOFCBFLAG_SYSTEMFILE &)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_FORBIDDEN_OPERATION ok!
+
+		return
+	end
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_NOCACHE & ~~)
+		if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_CHARDEVICE ~=)
+			// try to initiate caching to make truncation more efficient
+
+			fcb@ IOFileControlBlockCacheCheck drop drop
+		end
+	end
+
+	newsize@ // newsize
+	growing@ // growing
+	0 // keeplocked
+	1 // zero
+	fileobject@ IOFile_Flags + @ // flags
+	fcb@ // fcb
+	IOFileControlBlockTruncate ok! oldsize!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileSeek { offset handle mode -- newoffset ok }
+	fnsection "PAGE$text"
+
+	if (mode@ 0 ==)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end elseif (mode@ OSSEEK_END >)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! drop
+
+	if (ok@)
+		return
+	end
+
+	offset@ // offset
+	fileobject@ // fileobject
+	mode@ // mode
+	IOFileSeekObject ok! newoffset!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileSeekObject { offset fileobject mode -- newoffset ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	fileobject@ IOFile_Offset + @ newoffset!
+
+	if (mode@ OSSEEK_CUR ==)
+		offset@ newoffset +=
+	end elseif (mode@ OSSEEK_END ==)
+		fileobject@ IOFile_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @ offset@ + newoffset!
+	end elseif (mode@ OSSEEK_SET ==)
+		offset@ newoffset!
+	end else
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	newoffset@ fileobject@ IOFile_Offset + !
+end
+
+fn IOFileAccessPoke { write fileobject -- }
+	fnsection "PAGE$text"
+
+	auto pokefunc
+	fileobject@ IOFile_FileControlBlock + @ IOFileControlBlock_DispatchTable + @ IODispatchTable_Poke + @ pokefunc!
+
+	if (pokefunc@)
+		// notify driver that the file was touched so it can update timestamps
+		// etc.
+
+		if (write@)
+			IOPOKE_WRITE // poketype
+			fileobject@ // object
+			pokefunc@ IODispatchPokeFunction
+		end else
+			IOPOKE_READ // poketype
+			fileobject@ // object
+			pokefunc@ IODispatchPokeFunction
+		end
+	end
+end
+
+fn IOFileAccessValidate { length buffer fileobject write -- fcb ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (KeProcessCurrent PsSystemProcess@ ~=)
+		// do these checks first to make sure no overflow
+
+		if (buffer@ MMHIGHESTUSERADDRESS >)
+			[write@]ExFaultStatuses@ ok!
+
+			return
+		end elseif (length@ MMHIGHESTUSERADDRESS >)
+			[write@]ExFaultStatuses@ ok!
+
+			return
+		end
+
+		if (buffer@ length@ + MMHIGHESTUSERADDRESS >)
+			[write@]ExFaultStatuses@ ok!
+
+			return
+		end
+	end
+
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	if (DEBUGCHECKS)
+		if (fcb@ ~~)
+			"IOFileAccessValidate: file object had no FCB\n" KeCrash
+		end
+	end
+
+	auto dispatchtable
+	fcb@ IOFileControlBlock_DispatchTable + @ dispatchtable!
+
+	if (write@)
+		if (dispatchtable@ IODispatchTable_IOPWrite + @ ~~)
+			STATUS_NOT_SUPPORTED ok!
+
+			return
+		end
+	end else
+		if (dispatchtable@ IODispatchTable_IOPRead + @ ~~)
+			STATUS_NOT_SUPPORTED ok!
+
+			return
+		end
+	end
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ==)
+		STATUS_IS_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Flags + @ IOFCBFLAG_SYSTEMFILE &)
+		STATUS_FORBIDDEN_OPERATION ok!
+
+		return
+	end
+end
+
+fn IOFileRead { timeout flags length buffer filehandle -- bytesread ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	timeout@ // timeout
+	flags@ // flags
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	IODISPATCH_READ // functioncode
+	IOFileReadWriteObject ok! bytesread!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileWrite { flags length buffer filehandle -- byteswritten ok }
+	fnsection "PAGE$text"
+
+	if (flags@ OSACCESSFLAG_KERNELSET &)
+		STATUS_INVALID_ARGUMENT ok!
+		return
+	end
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	OSWAIT_TIMEOUTINFINITE // timeout
+	flags@ // flags
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	IODISPATCH_WRITE // write
+	IOFileReadWriteObject ok! byteswritten!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileReadWriteObject { timeout flags length buffer fileobject functioncode -- bytes ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	functioncode@ IODISPATCH_WRITE == // write
+	IOFileAccessValidate ok! fcb!
+
+	if (ok@)
+		return
+	end
+
+	auto cacheblock
+	fcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	auto fileflags
+	fileobject@ IOFile_Flags + @ fileflags!
+
+	0 bytes!
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_CHARDEVICE ==)
+		// always bypass cache for character devices -- call directly into driver.
+
+		if (DEBUGCHECKS)
+			if (cacheblock@)
+				"IOFileReadWriteObject: file was character device, but is cached?\n" KeCrash
+			end
+		end
+
+		timeout@ // timeout
+		flags@ // flags
+		length@ // length
+		fileobject@ IOFile_Offset + @ // offset
+		buffer@ // buffer
+		fileobject@ // fileobject
+		functioncode@ // functioncode
+		IOReadWrite ok! bytes!
+
+		if (ok@ ~~)
+			bytes@ fileobject@ IOFile_Offset + +=
+		end
+
+		return
+	end
+
+	auto rs
+
+	if (fileflags@ OSFILEFLAG_NOCACHE & ~~)
+		if (cacheblock@ ~~)
+			fcb@ IOFileControlBlockCacheCheck ok! cacheblock!
+
+			if (ok@)
+				return
+			end
+		end
+	end else
+		0 cacheblock!
+	end
+
+	if (functioncode@ IODISPATCH_WRITE ==
+		fileflags@ OSFILEFLAG_APPENDONLY & &&)
+
+		1 // alertable
+		fcb@ // fcb
+		IOFileControlBlockLock ok!
+
+		fcb@ IOFileControlBlock_SizeInBytes + @ fileobject@ IOFile_Offset + !
+	end else
+		1 // alertable
+		fcb@ // fcb
+		IOFileControlBlockLockShared ok!
+	end
+
+	if (ok@)
+		return
+	end
+
+	if (cacheblock@ ~~)
+		// no caching -- call directly into driver.
+
+		timeout@ // timeout
+		flags@ // flags
+		length@ // length
+		fileobject@ IOFile_Offset + @ // offset
+		buffer@ // buffer
+		fileobject@ // fileobject
+		functioncode@ // functioncode
+		IOReadWrite ok! bytes!
+
+		fcb@ IOFileControlBlockUnlock
+	end else
+		// caching -- call into cache function.
+
+		if (functioncode@ IODISPATCH_WRITE ==)
+			fileflags@ // fileflags
+			flags@ // flags
+			length@ // length
+			fileobject@ IOFile_Offset + @ // offset
+			buffer@ // buffer
+			fcb@ // fcb
+			VcFileWrite ok! bytes!
+
+			// IOCacheFileWrite is responsible for unlocking the FCB now.
+			// fcb@ IOFileControlBlockUnlock
+		end else
+			flags@ // flags
+			length@ // length
+			fileobject@ IOFile_Offset + @ // offset
+			buffer@ // buffer
+			fcb@ // fcb
+			VcFileRead ok! bytes!
+
+			fcb@ IOFileControlBlockUnlock
+		end
+	end
+
+	if (ok@ ~~)
+		bytes@ fileobject@ IOFile_Offset + +=
+	end
+
+	functioncode@ IODISPATCH_WRITE == // write
+	fileobject@ // fileobject
+	IOFileAccessPoke
+end
+
+fn IOiRequestBlockReference { requestblock -- ok }
+	fnsection "PAGE$text"
+
+	// reference all of the handles specified in the requestblock,
+	// and check their access as applicable.
+
+	auto portobject
+	0 portobject!
+
+	auto eventobject
+	0 eventobject!
+
+	0 ok!
+
+	auto access
+
+	if (requestblock@ OSRequest_PortHandle + @ OSNONE ~=)
+		IPCPortObjectType@ // type
+		requestblock@ OSRequest_PortHandle + @ // handle
+		ObObjectReferenceByHandle ok! portobject! access!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (requestblock@ OSRequest_EventHandle + @ OSNONE ~=)
+		ExEventObjectType@ // type
+		requestblock@ OSRequest_EventHandle + @ // handle
+		ObObjectReferenceByHandle ok! eventobject! access!
+
+		if (ok@)
+			if (portobject@)
+				portobject@ ObObjectDereferenceByPointer drop
+			end
+
+			return
+		end
+
+		access@ ACCESS_EXEC SeCheckAccess ok!
+
+		if (ok@)
+			if (portobject@)
+				portobject@ ObObjectDereferenceByPointer drop
+			end
+
+			return
+		end
+	end
+
+	portobject@ requestblock@ OSRequest_PortHandle + !
+	eventobject@ requestblock@ OSRequest_EventHandle + !
+end
+
+fn IOiRequestBlockDereference { requestblock -- }
+	fnsection "PAGE$text"
+
+	// dereference all of the objects in the requestblock
+
+	if (requestblock@ OSRequest_PortHandle + @)
+		requestblock@ OSRequest_PortHandle + @ ObObjectDereferenceByPointer drop
+	end
+
+	if (requestblock@ OSRequest_EventHandle + @)
+		requestblock@ OSRequest_EventHandle + @ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn IOFileReadAsync { requestblock flags offset length buffer filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	requestblock@ IOiRequestBlockReference ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	requestblock@ // requestblock
+	flags@ // flags
+	offset@ // offset
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	IODISPATCH_READ // functioncode
+	IOFileReadWriteAsyncObject ok!
+
+	requestblock@ IOiRequestBlockDereference
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileWriteAsync { requestblock flags offset length buffer filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	requestblock@ IOiRequestBlockReference ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	requestblock@ // requestblock
+	flags@ // flags
+	offset@ // offset
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	IODISPATCH_WRITE // functioncode
+	IOFileReadWriteAsyncObject ok!
+
+	requestblock@ IOiRequestBlockDereference
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IOFileReadWriteAsyncObject { requestblock flags offset length buffer fileobject functioncode -- ok }
+	fnsection "PAGE$text"
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_NOCACHE & ~~)
+		// we don't currently support cached async IO
+
+		STATUS_NOT_IMPLEMENTED ok!
+
+		return
+	end
+
+	OSACCESSFLAG_ASYNC flags |=
+
+	auto fcb
+	length@ // length
+	buffer@ // buffer
+	fileobject@ // fileobject
+	functioncode@ IODISPATCH_WRITE == // write
+	IOFileAccessValidate ok! fcb!
+
+	if (ok@)
+		return
+	end
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLockShared ok!
+
+	if (ok@)
+		return
+	end
+
+	// FCB is kept locked shared for the duration of the enqueue.
+	// after that point, it is guarded by the AsyncIOCount and
+	// AsyncIOEvent.
+
+	requestblock@ // requestblock
+	flags@ // flags
+	length@ // length
+	offset@ // offset
+	buffer@ // buffer
+	fileobject@ // fileobject
+	functioncode@ // functioncode
+	IOReadWriteAsync ok!
+
+	fcb@ IOFileControlBlockUnlock
+
+	if (ok@)
+		return
+	end
+
+	functioncode@ IODISPATCH_WRITE == // write
+	fileobject@ // fileobject
+	IOFileAccessPoke
+end
+
+fn IODirectoryRename { srcname srcfilehandle destname destfilehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto srcfileobject
+
+	IOFileTypeObject@ // type
+	srcfilehandle@ // handle
+	ObObjectReferenceByHandle ok! srcfileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE ACCESS_EXEC | SeCheckAccess ok!
+
+	if (ok@)
+		srcfileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto destfileobject
+
+	if (srcfilehandle@ destfilehandle@ ==)
+		// small optimization, don't ref a second time if they're the same.
+		srcfileobject@ destfileobject!
+	end else
+		IOFileTypeObject@ // type
+		destfilehandle@ // handle
+		ObObjectReferenceByHandle ok! destfileobject! access!
+
+		if (ok@)
+			srcfileobject@ ObObjectDereferenceByPointer drop
+
+			return
+		end
+
+		access@ ACCESS_WRITE ACCESS_EXEC | SeCheckAccess ok!
+
+		if (ok@)
+			destfileobject@ ObObjectDereferenceByPointer drop
+			srcfileobject@ ObObjectDereferenceByPointer drop
+
+			return
+		end
+	end
+
+	srcname@ // srcname
+	srcfileobject@ // srcfileobject
+	destname@ // destname
+	destfileobject@ // destfileobject
+	IODirectoryRenameObject ok!
+
+	if (srcfilehandle@ destfilehandle@ ~=)
+		destfileobject@ ObObjectDereferenceByPointer drop
+	end
+
+	srcfileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IODirectoryRenameObject { srcname srcfileobject destname destfileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto srcfcb
+	auto destfcb
+	auto dispatchtable
+
+	destfileobject@ IOFile_FileControlBlock + @ destfcb!
+
+	srcfileobject@ IOFile_FileControlBlock + @ srcfcb!
+
+	srcfcb@ IOFileControlBlock_DispatchTable + @ dispatchtable!
+
+	if (destfcb@ IOFileControlBlock_DispatchTable + @ dispatchtable@ ~=)
+		// filter out renames across different filesystem drivers.
+		// if the filesystem forbids renames across volumes, it needs to take
+		// care of that.
+
+		STATUS_CROSS_VOLUME ok!
+
+		return
+	end
+
+	auto renamefunc
+	dispatchtable@ IODispatchTable_Rename + @ renamefunc!
+
+	if (renamefunc@ ~~)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	// some sanity checks for silly situations that the FS driver shouldn't
+	// have to worry about
+
+	if (srcfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+		STATUS_NOT_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (destfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+		STATUS_NOT_A_DIRECTORY ok!
+
+		return
+	end
+
+	// used to lock the FCBs here but that's now the FS driver's job because
+	// of lock ordering issues that only the filesystem knows how to resolve.
+
+	srcname@ // srcname
+	srcfcb@ // srcfcb
+	destname@ // destname
+	destfcb@ // destfcb
+	renamefunc@ IODispatchRenameFunction ok!
+end
+
+fn IODirectoryUnlink { name filehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE ACCESS_EXEC | SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	name@ // name
+	fileobject@ // fileobject
+	IODirectoryUnlinkObject ok!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IODirectoryUnlinkObject { name fileobject -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	auto dispatchtable
+
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	if (DEBUGCHECKS)
+		if (fcb@ 0 ==)
+			"IODirectoryUnlinkObject: file object had no FCB\n" KeCrash
+		end
+	end
+
+	fcb@ IOFileControlBlock_DispatchTable + @ dispatchtable!
+
+	if (DEBUGCHECKS)
+		if (dispatchtable@ 0 ==)
+			"IODirectoryUnlinkObject: file object had no dispatch table\n" KeCrash
+		end
+	end
+
+	auto unlinkfunc
+	dispatchtable@ IODispatchTable_Unlink + @ unlinkfunc!
+
+	if (unlinkfunc@ ~~)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+		STATUS_NOT_A_DIRECTORY ok!
+
+		return
+	end
+
+	name@ // name
+	fcb@ // dirfcb
+	unlinkfunc@ IODispatchUnlinkFunction ok!
+end
+
+fn IODirectoryRead { count dirent filehandle lastmode -- readcount ok }
+	fnsection "PAGE$text"
+
+	auto access
+	auto fileobject
+
+	IOFileTypeObject@ // type
+	filehandle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	count@ // count
+	dirent@ // dirent
+	fileobject@ // fileobject
+	lastmode@ // lastmode
+	IODirectoryReadObject ok! readcount!
+
+	fileobject@ ObObjectDereferenceByPointer drop
+end
+
+fn IODirectoryReadObject { count dirent fileobject lastmode -- readcount ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	auto dispatchtable
+
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	if (DEBUGCHECKS)
+		if (fcb@ 0 ==)
+			"IODirectoryReadObject: file object had no FCB\n" KeCrash
+		end
+	end
+
+	fcb@ IOFileControlBlock_DispatchTable + @ dispatchtable!
+
+	if (DEBUGCHECKS)
+		if (dispatchtable@ 0 ==)
+			"IODirectoryReadObject: file object had no dispatch table\n" KeCrash
+		end
+	end
+
+	auto readfunc
+	dispatchtable@ IODispatchTable_ReadDirectory + @ readfunc!
+
+	if (readfunc@ ~~)
+		STATUS_NOT_SUPPORTED ok!
+
+		return
+	end
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+		STATUS_NOT_A_DIRECTORY ok!
+
+		return
+	end
+
+	count@ // count
+	fileobject@ IOFile_Offset + @ // seek
+	dirent@ // dirent
+	fcb@ // fcb
+	lastmode@ // lastmode
+	readfunc@ IODispatchReadDirectoryFunction ok! readcount! fileobject@ IOFile_Offset + !
+end

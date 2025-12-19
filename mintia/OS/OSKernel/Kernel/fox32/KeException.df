@@ -1,0 +1,1101 @@
+#include "<df>/dragonfruit.h"
+#include "<inc>/HALCrash.h"
+
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../KeInternal.h"
+
+// if this seems janked up, its because it is, because this all used to be in
+// the HAL, and the process of moving it into the kernel was rough.
+
+externptr HALfox32InterruptHandlers
+
+externptr KeThreadCurrentStackTop
+externptr KeThreadCurrentStackBottom
+externptr HALInterruptStackTop
+
+externptr OSCallCount
+externptr OSCallTable
+
+externptr KeIPLCurrent
+
+externptr HALfox32InterruptsDisabled
+
+extern HALfox32TLBFlushAll { -- }
+
+extern KiContinue { tf -- }
+
+asm "
+
+VFox32DismissVector:
+.global VFox32DismissVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0xFFFF
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32VsyncVector:
+.global VFox32VsyncVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0xFF
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32DivideZeroVector:
+.global VFox32DivideZeroVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0x100
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32SyscallVector:
+.global VFox32SyscallVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0x30
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32InvalidOpcodeVector:
+.global VFox32InvalidOpcodeVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0x101
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32PageFaultVector:
+.global VFox32PageFaultVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0x102
+	call KiFox32Exception
+
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+VFox32PageFaultWriteVector:
+.global VFox32PageFaultWriteVector
+	push fp
+	push r31
+	push tp
+	push at
+	push s17
+	push s16
+	push s15
+	push s14
+	push s13
+	push s12
+	push s11
+	push s10
+	push s9
+	push s8
+	push s7
+	push s6
+	push s5
+	push s4
+	push s3
+	push s2
+	push s1
+	push s0
+	push a3
+	push a2
+	push a1
+	push a0
+	push t6
+	push t5
+	push t4
+	push t3
+	push t2
+	push t1
+	push t0
+
+	mov  fp, sp
+
+	mov  a0, sp
+	mov  a1, 0x103
+	call KiFox32Exception
+
+ExceptionReturn:
+	pop  t0
+	pop  t1
+	pop  t2
+	pop  t3
+	pop  t4
+	pop  t5
+	pop  t6
+	pop  a0
+	pop  a1
+	pop  a2
+	pop  a3
+	pop  s0
+	pop  s1
+	pop  s2
+	pop  s3
+	pop  s4
+	pop  s5
+	pop  s6
+	pop  s7
+	pop  s8
+	pop  s9
+	pop  s10
+	pop  s11
+	pop  s12
+	pop  s13
+	pop  s14
+	pop  s15
+	pop  s16
+	pop  s17
+	pop  at
+	pop  tp
+	pop  r31
+	pop  fp
+	add  sp, 4
+	reti
+
+; a0 - tf
+KiContinue:
+	mov  [HALfox32InterruptsDisabled], 0
+	mov  sp, a0
+	jmp  ExceptionReturn
+
+; a0 - tf
+KiFox32Syscall:
+.global KiFox32Syscall
+	push fp
+	mov  fp, sp
+
+	push s17
+	mov  s17, a0 ;trampolines expect trapframe in s17
+
+	mov  t1, s17
+	mov  t1, [t1 + OSContext_t0]
+	ifz  jmp .sysout
+
+	mov  t0, [OSCallCount]
+	cmp  t1, t0
+	ifgt jmp .sysout
+
+	mov  t0, OSCallTable
+	sla  t1, 2
+	add  t0, t1
+	call [t0]
+
+.sysout:
+	pop  s17
+
+	pop  fp
+	ret
+
+KiThreadTrampoline:
+.global KiThreadTrampoline
+	mov  [HALfox32InterruptsDisabled], 0
+	ise
+
+	mov  a0, IPLLOW
+	call KeIPLLower
+
+	mov  a0, s0
+	mov  a1, s1
+
+	jmp  s2
+
+KeIPLCurrentGet:
+.global KeIPLCurrentGet
+	mov  a0, [KeIPLCurrent]
+	ret
+
+"
+
+extern KiThreadTrampoline { -- }
+
+extern KiFox32Syscall { tf -- }
+
+const EXCNAMESMAX 4
+
+table ExceptionNames
+	"DIVZERO"
+	"INVINST"
+	"PF"
+	"PFW"
+endtable
+
+extern PsDispatchUsermodeInterrupts { trapframe -- }
+
+fn KiStackOverflow { rs -- }
+	auto current
+	KeThreadCurrent@ current!
+
+	if (current@)
+		current@ KeThread_Name +
+		current@ KeThread_Process + @ KeProcess_Name +
+		"process '%s' thread '%s' kernel stack overflow\n" KeCrash
+	end
+
+	rs@ "Kernel stack overflow %x\n" KeCrash
+end
+
+fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
+	// Cause a usermode interrupt of the current thread by saving the context
+	// on the user stack and redirecting the trapframe to the usermode
+	// interrupt handler. This is used to implement signal and APC dispatch.
+
+	auto usp
+	trapframe@ OSContext_sp + @ usp!
+
+	if (DEBUGCHECKS)
+		if (trapframe@ OSContext_eflagsB + gb FOX32_RS_USER & ~~)
+			trapframe@ "KiInterruptUsermode: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	OSContext_SIZEOF usp -=
+
+	auto ok
+	usp@ // dest
+	trapframe@ // src
+	OSContext_SIZEOF // sz
+	KeSafeCopyOut ok!
+
+	if (ok@)
+		// Failed to copy out context frame, this is fatal to the entire
+		// process.
+
+		// TODO automatically switch to an overflow stack?
+
+		OSSIGNAL_KILL // signal
+		KeThreadCurrent@ KeThread_Process + @ // process
+		KeProcessSignal drop
+
+		return
+	end
+
+	// Redirect the trapframe to the usermode interrupt handler.
+
+	usp@ trapframe@ OSContext_sp + !
+	dispatchfunc@ trapframe@ OSContext_epc + !
+	context@ trapframe@ OSContext_a0 + !
+	usp@ trapframe@ OSContext_a1 + !
+	userfunc@ trapframe@ OSContext_a2 + !
+end
+
+fn KeThreadContinue { alertable signum context thread -- ok }
+	if (signum@ -1 ~=)
+		if (signum@ ~~)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+
+		if (signum@ 32 >=)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+	end
+
+	0 ok!
+
+	auto tf
+	thread@ KeThread_TrapFrame + @ tf!
+
+	auto ers
+	tf@ OSContext_eflagsB + gb ers!
+
+	if (DEBUGCHECKS)
+		if (ers@ FOX32_RS_USER & ~~)
+			tf@ "KeThreadContinue: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	tf@ // dest
+	context@ // src
+	OSContext_SIZEOF // size
+	memcpy
+
+	// don't modify ers lest we allow our user programs to get kernelmode...
+	ers@ tf@ OSContext_eflagsB + sb
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (DEBUGCHECKS)
+		0 KeThreadCurrent@ KeThread_TrapFrame + !
+	end
+
+	if (signum@ -1 ~=)
+		// atomically unmask the signal.
+
+		1 signum@ << thread@ KeThread_SignalAcceptMask + |=
+
+		if (thread@ KeThread_SignalAcceptMask + @
+			thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+			thread@ KeThread_Signals + @ &)
+
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	if (alertable@)
+		// check for another user APC to deliver, so that they "chain"
+		// properly.
+
+		if (thread@ KeThread_UserAPCListHead + @)
+			1 thread@ KeThread_UserAPCTriggeredB + sb
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	// Perform a direct return to avoid corrupting the newly-built trapframe
+	// on our way out from the syscall handler, and to make sure we can't
+	// miss any user APCs that get enqueued after we return.
+
+	if (thread@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
+end
+
+const EXCDIVZERO        0
+const EXCINVINST        1
+const EXCPAGEFAULT      2
+const EXCPAGEFAULTWRITE 3
+
+externptr KeInterlockedIncrementEnd
+
+fn KiFox32Exception { ecause tf -- }
+	1 HALfox32InterruptsDisabled!
+
+	auto ipl
+	KeIPLCurrent@ ipl!
+	ipl@ KiOldIPL!
+
+	auto handled
+	1 handled!
+
+	if (DEBUGCHECKS)
+		if (tf@ OSContext_eflagsB + gb FOX32_RS_INT &)
+			if (ipl@ IPLDPC >)
+				ipl@ tf@ OSContext_eflagsB + gb ecause@ "ecause=%x ef=%x interrupts enabled but ipl=%d\n" KeCrash
+			end
+		end else
+			if (ipl@ IPLDPC <=)
+				//ipl@ tf@ OSContext_eflagsB + gb ecause@ "ecause=%x ef=%x interrupts disabled but ipl=%d\n" KeCrash
+				0 handled!
+			end
+		end
+	end
+
+	if (tf@ OSContext_eflagsB + gb FOX32_RS_USER &)
+		if (DEBUGCHECKS)
+			if (KeThreadCurrent@ KeThread_TrapFrame + @)
+				"already has trapframe\n" KeCrash
+			end
+		end
+
+		auto osdll
+		PsOSDLLInformation osdll!
+
+		tf@ KeThreadCurrent@ KeThread_TrapFrame + !
+
+		// check for interlocked operation and restart if one was interrupted.
+
+		if (tf@ OSContext_epc + @ osdll@ PsOSDLLInfo_InterlockedIncStart + @ >)
+			if (tf@ OSContext_epc + @ osdll@ PsOSDLLInfo_InterlockedIncEnd + @ <)
+				osdll@ PsOSDLLInfo_InterlockedIncStart + @ tf@ OSContext_epc + !
+			end
+		end elseif (tf@ OSContext_epc + @ osdll@ PsOSDLLInfo_TryAcquireStart + @ >)
+			if (tf@ OSContext_epc + @ osdll@ PsOSDLLInfo_TryAcquireEnd + @ <)
+				osdll@ PsOSDLLInfo_TryAcquireStart + @ tf@ OSContext_epc + !
+			end
+		end
+	end elseif (tf@ OSContext_epc + @ pointerof KeInterlockedIncrement >)
+		// check for interlocked kernel operation and restart if one was
+		// interrupted. this is needed for kernel mode because we often do an
+		// interlocked increment on paged kernel data that must not be guarded
+		// by means other than mutex.
+
+		if (tf@ OSContext_epc + @ KeInterlockedIncrementEnd <)
+			pointerof KeInterlockedIncrement tf@ OSContext_epc + !
+		end
+	end
+
+	auto excname
+
+	if (handled@)
+		0 handled!
+
+		if (ecause@ 0x100 <)
+			// interrupt
+
+			1 handled!
+
+			if (ecause@ 0x30 ==)
+				if (DEBUGCHECKS)
+					if (ipl@ IPLDPC >=)
+						"syscall at >= IPLDPC\n" KeCrash
+					end
+				end
+
+				1 KeStatistics OSStatistics_SystemCalls + +=
+
+				HALCPUInterruptEnable
+
+				tf@ KiFox32Syscall
+
+				HALCPUInterruptDisable drop
+			end else
+				1 KeStatistics OSStatistics_Interrupts + +=
+
+				IPLHIGH KeIPLCurrent!
+
+				tf@ // trapframe
+				ecause@ // int
+				[ecause@]HALPlatformInterruptHandlers@ HALInterruptHandler
+
+				ipl@ KeIPLCurrent!
+
+				if (ipl@ IPLDPC <)
+					if (KiPendingSoftwareInterrupts@)
+						KiDispatchSoftwareInterrupts
+					end
+				end
+			end
+		end else
+			HALCPUInterruptEnable
+
+			if (ecause@ 0x100 - EXCPAGEFAULT ==)
+				0 // writing
+				tf@ OSContext_badaddr + @ // badaddr
+				tf@ // trapframe
+				MmPageFault handled!
+			end elseif (ecause@ 0x100 - EXCPAGEFAULTWRITE ==)
+				1 // writing
+				tf@ OSContext_badaddr + @ // badaddr
+				tf@ // trapframe
+				MmPageFault handled!
+			end elseif (tf@ OSContext_eflagsB + gb FOX32_RS_USER &)
+				if (ecause@ 0x100 - EXCINVINST ==)
+					OSSIGNAL_ILL // signal
+					KeThreadCurrent@ // thread
+					KeThreadSignal drop
+
+					1 handled!
+				end elseif (ecause@ 0x100 - EXCDIVZERO ==)
+					OSSIGNAL_FPE // signal
+					KeThreadCurrent@ // thread
+					KeThreadSignal drop
+					
+					1 handled!
+				end
+			end
+
+			HALCPUInterruptDisable drop
+		end
+	end
+
+	if (handled@ ~~)
+		if (ecause@ 0x100 >=)
+			// exception
+			if (ecause@ 0x100 - EXCNAMESMAX >=)
+				"UNKNOWN" excname!
+			end else
+				[ecause@ 0x100 -]ExceptionNames@ excname!
+			end
+		end else
+			"?" excname!
+		end
+
+		excname@
+		tf@ OSContext_badaddr + @
+		tf@ OSContext_epc + @
+		tf@ OSContext_eflagsB + gb
+		KeIPLCurrent@
+		"IP%d,EF%02x,PC%08x,VA%08x,%s\n" KeCrash
+	end
+
+	if (tf@ OSContext_eflagsB + gb FOX32_RS_USER &)
+		// we interrupted usermode code
+
+		if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+			tf@ PsDispatchUsermodeInterrupts
+		end
+
+		if (DEBUGCHECKS)
+			0 KeThreadCurrent@ KeThread_TrapFrame + !
+		end
+	end
+
+	0 HALfox32InterruptsDisabled!
+end
+
+extern HALfox32MapSwitch { pgtb -- }
+
+fn KeAddressSpaceSwitch { process -- }
+	// the PageDirectory field is actually in PTE format, but fox32 stores the
+	// PFN in the upper 20 bits of the PTE so this happens to work even if the
+	// PageDirectory is the HALPlatformKernelPageDirectory.
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	process@ KeProcess_PageDirectory + @ PAGENUMBERMASK & HALfox32MapSwitch
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
+	// make a fake trap frame to return to
+
+	auto tf
+	OSContext_SIZEOF alloc tf!
+
+	tf@ // ptr
+	OSContext_SIZEOF // sz
+	0 // word
+	memset
+
+	teb@ tf@ OSContext_tp + !
+
+	FOX32_RS_UTHREAD tf@ OSContext_eflagsB + sb
+
+	entryfunc@ tf@ OSContext_epc + !
+
+	context@ tf@ OSContext_a0 + !
+
+	ustack@ 4 - tf@ OSContext_sp + !
+
+	// put exitfunc somewhere on the stack so we can copy it out with
+	// KeSafeCopyOut.
+
+	auto exitfuncr
+	4 alloc exitfuncr!
+
+	exitfunc@ exitfuncr@!
+
+	ustack@ 4 - // dest
+	exitfuncr@ // src
+	4 // size
+	KeSafeCopyOut drop
+
+	HALCPUInterruptDisable drop
+
+	if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
+end
+
+fn KiCPUInit { -- }
+	fnsection "INIT$text"
+
+	auto i
+	256 i!
+
+	auto vec
+	0 vec!
+
+	while (i@)
+		pointerof VFox32DismissVector vec@!
+
+		1 i -=
+		4 vec +=
+	end
+
+	// set the interrupt vectors
+
+	pointerof VFox32VsyncVector
+	0xFF 4 * !
+
+	pointerof VFox32SyscallVector
+	0x30 4 * !
+
+	// set the exception vectors
+
+	256 4 * vec!
+
+	pointerof VFox32DivideZeroVector vec@!
+	4 vec +=
+
+	pointerof VFox32InvalidOpcodeVector vec@!
+	4 vec +=
+
+	pointerof VFox32PageFaultVector vec@!
+	4 vec +=
+
+	pointerof VFox32PageFaultWriteVector vec@!
+	4 vec +=
+
+	// enable interrupts
+
+	0 HALfox32InterruptsDisabled!
+end
+
+fn HALCPUIsUserTrapFrame { tf -- user }
+	tf@ OSContext_eflagsB + gb FOX32_RS_USER & user!
+end
+
+fn HALCPUTrapFrameAbort { ok abort tf -- }
+	ok@ tf@ OSContext_a0 + !
+	abort@ tf@ OSContext_epc + !
+end
+
+fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
+	kstack@ OSContext_SIZEOF - ctx!
+
+	ctx@ // ptr
+	OSContext_SIZEOF // size
+	0 // word
+	memset
+
+	// these have to be in saved registers since the temporaries don't get
+	// saved by the context switcher.
+
+	startfunc@ ctx@ OSContext_s2 + !
+	context1@ ctx@ OSContext_s1 + !
+	context2@ ctx@ OSContext_s0 + !
+
+	0 ctx@ OSContext_fp + !
+
+	pointerof KiThreadTrampoline ctx@ OSContext_epc + !
+end

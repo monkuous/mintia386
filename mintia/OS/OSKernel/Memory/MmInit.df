@@ -1,0 +1,964 @@
+//
+// Initialization of the MINTIA memory manager.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALResource.h"
+
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSBootFlags.h"
+
+#include "MmInternal.h"
+
+rosection "INIT$text"
+
+externptr HALLoaderPFDB
+externptr HALLoaderTotalRAM
+
+externptr HALResourceKeepHeaders
+externptr HALLoaderInfo
+
+externptr ObFullyNonpagedObjects
+
+var MiPageFrameDatabase 0
+public MiPageFrameDatabase
+
+var MiPageFreeListHead 0
+public MiPageFreeListHead
+
+var MiPageZeroListHead 0
+public MiPageZeroListHead
+
+var MmFluidPageCount 0
+public MmFluidPageCount
+
+var MmRealPageCount 0
+public MmRealPageCount
+
+var MiFreeListCount 0
+public MiFreeListCount
+
+var MiZeroListCount 0
+public MiZeroListCount
+
+var MmAvailablePageCount 0 // zeroed + freed + evictable
+public MmAvailablePageCount
+
+var MmConstantZeroPage 0
+public MmConstantZeroPage
+
+var MmSoftPageFaultCount 0
+public MmSoftPageFaultCount
+
+var MmHardPageFaultCount 0
+public MmHardPageFaultCount
+
+var MmPageInCount 0
+public MmPageInCount
+
+var MiWorkingSetDefaultMinimum 8
+public MiWorkingSetDefaultMinimum
+
+var MiWorkingSetDefaultMaximum 64
+public MiWorkingSetDefaultMaximum
+
+var MiWorkingSetDefaultQuota 256
+public MiWorkingSetDefaultQuota
+
+var MiZeroingThreshold 0
+public MiZeroingThreshold
+
+var MiQuickPage 0
+public MiQuickPage
+
+var MiZeroingPage 0
+public MiZeroingPage
+
+var MiFreedBootPageCount 0
+var MiDebugBootPageCount 0
+var MiWiredBootPageCount 0
+var MiPagedBootPageCount 0
+
+var MmViewCachePageCount 0
+public MmViewCachePageCount
+
+buffer MmQuotaListMutex KeMutex_SIZEOF
+public MmQuotaListMutex
+
+var MmUnwireRecordListHead 0
+
+struct MmUnwireRecord
+	4 Next
+
+	4 Type
+	4 StartVA
+	4 Pages
+endstruct
+
+const MMUNWIRE_FREE 1
+const MMUNWIRE_PAGE 2
+
+var MiInited 0
+public MiInited
+
+buffer MmSystemQuota MiQuotaBlock_SIZEOF
+public MmSystemQuota
+
+buffer MmLowMemoryEvent KeEvent_SIZEOF
+public MmLowMemoryEvent
+
+buffer MmModifiedPageEvent KeEvent_SIZEOF
+public MmModifiedPageEvent
+
+var MmLowAvailablePageCount 0
+public MmLowAvailablePageCount
+
+var MmSufficientAvailablePageCount 0
+public MmSufficientAvailablePageCount
+
+var MmModifiedPageMaximum 0
+public MmModifiedPageMaximum
+
+var MmTheoreticalCommitLimit 0
+public MmTheoreticalCommitLimit
+
+var MmCommitLimit 0
+public MmCommitLimit
+
+var MmCommitUsage 0
+public MmCommitUsage
+
+var MmPhysicalLimit 0
+
+var MiPhysicalUsage 0
+public MiPhysicalUsage
+
+buffer MiPageAvailableEvent KeEvent_SIZEOF
+public MiPageAvailableEvent
+
+buffer MiMustSucceedEvent KeEvent_SIZEOF
+public MiMustSucceedEvent
+
+var MmModifiedPageWriterThread 0
+public MmModifiedPageWriterThread
+
+extern MiPlatformInit { -- }
+
+fn MmInitPhase0 { -- }
+	fnsection "INIT$text"
+
+	HALLoaderPFDB@ MiPageFrameDatabase!
+
+	HALLoaderTotalRAM@ PAGESHIFT >> MmRealPageCount!
+
+	// initialize the page DB by walking the memory descriptor list given to
+	// us by OSLoader and adding the pages of all the regions marked free to
+	// the free list.
+
+	auto desc
+	HALLoaderInfo@ LdrInfo_MemoryDescriptorListHead + @ desc!
+
+	while (desc@)
+		if (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_FREE ==)
+			auto pages
+			desc@ LdrMemoryDescriptor_Pages + @ pages!
+
+			auto pfdbe
+			desc@ LdrMemoryDescriptor_StartPFN + @ MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			pages@ MiFreeListCount +=
+			pages@ MmAvailablePageCount +=
+			pages@ MmFluidPageCount +=
+
+			while (pages@)
+				MiPageFreeListHead@ pfdbe@ MiPageFrameEntryFree_Next + !
+				pfdbe@ MiPageFreeListHead!
+
+				MiPageFrameEntry_SIZEOF pfdbe +=
+				1 pages -=
+			end
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+
+	1 MiInited!
+
+	auto idleproc
+	KeProcessCurrent idleproc!
+
+	auto ok
+	-1 // uid
+	MMQUOTAINFINITE // wsmax
+	MMQUOTAINFINITE // pghpmax
+	MMQUOTAINFINITE // vmmax
+	MMQUOTAINFINITE // heapmax
+	MmSystemQuota // quota
+	MmQuotaBlockInitialize ok!
+
+	if (ok@)
+		"MmInitPhase0: couldn't initialize system quota block\n" KeCrash
+	end
+
+	// bias the reference by one to make sure the system never attempts to
+	// free this
+	MmSystemQuota MmQuotaBlockReference
+
+	MmSystemQuota idleproc@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + !
+
+rosection "text"
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"MmLowMemoryEvent" // name
+	MmLowMemoryEvent // event
+	KeEventInitialize
+
+	1 // signaled
+	OSEVENT_NOTIF // type
+	"MiPageAvailableEvent" // name
+	MiPageAvailableEvent // event
+	KeEventInitialize
+
+	1 // signaled
+	OSEVENT_NOTIF // type
+	"MiMustSucceedEvent" // name
+	MiMustSucceedEvent // event
+	KeEventInitialize
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"MmModifiedPageEvent" // name
+	MmModifiedPageEvent // event
+	KeEventInitialize
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"IOPageFileExtendEvent" // name
+	IOPageFileExtendEvent // event
+	KeEventInitialize
+
+	"MmQuotaListMutex" // name
+	KERNELMODE // mode
+	MmQuotaListMutex // mutex
+	KeMutexInitialize
+
+rosection "INIT$text"
+
+	MiPoolInit
+
+	// initialize the commit limit to the free page count plus 100 pages.
+	// will get set to the size of the pagefile later.
+
+	MmAvailablePageCount@ 100 + MmCommitLimit!
+	MmCommitLimit@ MmTheoreticalCommitLimit!
+	MmCommitLimit@ MmPhysicalLimit!
+
+	MmReclaimMemory
+
+	MiPlatformInit
+
+	MiMDLZonesInit
+
+	// allocate a virtual page for the zero thread to use to map pages to
+	// zero out.
+
+	auto vaddr
+	0 // pri
+	2 // pages
+	MiPoolSpaceReserve ok! drop vaddr!
+
+	if (ok@)
+		"MmInitPhase0: couldn't allocate the zero thread pool page\n" KeCrash
+	end
+
+	vaddr@ MiQuickPage!
+	vaddr@ PAGESIZE + MiZeroingPage!
+
+	// allocate one constantly-zeroed page which will be used by a lot of
+	// stuff.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	ZEROMUST MUSTSUCCEED | // priority
+	MmPageGet ok! pfdbe!
+
+	ipl@ KeIPLLower
+
+	if (ok@)
+		"MmInitPhase0: couldn't allocate the constant zero page\n" KeCrash
+	end
+
+	pfdbe@ MmConstantZeroPage!
+end
+
+var MmSystemSize 0
+public MmSystemSize
+
+var MmSectionObjectType 0
+public MmSectionObjectType
+
+fn MmInitPhase1 { -- }
+	fnsection "INIT$text"
+
+	auto phdr
+	PsSystemProcess@ PsProcess_MmHeader + @ phdr!
+
+	auto oldmin
+	phdr@ MiProcessHeader_WorkingSetMinimum + @ oldmin!
+	256 phdr@ MiProcessHeader_WorkingSetMaximum + !
+	-1 phdr@ MiProcessHeader_WorkingSetQuota + !
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	// create Section type
+
+	auto type
+
+	"Section" typeinit@ ObTypeInitializer_Name + !
+	'Sect' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_SECTION typeinit@ ObTypeInitializer_TypeIdentifier + !
+	pointerof MiSectionObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+//	1 typeinit@ ObTypeInitializer_Paged + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "MmInitPhase1: couldn't create Section type (%i)\n" KeCrash
+	end
+
+	type@ MmSectionObjectType!
+
+	// initialize eviction/swap
+
+	auto membytes
+	MmRealPageCount@ PAGESHIFT << membytes!
+
+	MMNORMALTHRESH 8 + MmLowAvailablePageCount!
+	MMNORMALTHRESH 50 + MmSufficientAvailablePageCount!
+
+	100 MmModifiedPageMaximum!
+	150 MiZeroingThreshold!
+
+	auto sysmin
+
+	if (membytes@ 3 1024 * 1024 * <=)
+		// tiny system, 0-3MB
+
+		MMTINYSYSTEM MmSystemSize!
+
+		6 MiWorkingSetDefaultMinimum!
+		10 sysmin!
+
+		75 MiZeroingThreshold!
+		50 MmModifiedPageMaximum!
+		40 MmPinnedPagesLimit!
+	end elseif (membytes@ 5 1024 * 1024 * <=)
+		// small system, 3-5MB
+
+		MMSMALLSYSTEM MmSystemSize!
+
+		12 MiWorkingSetDefaultMinimum!
+		20 sysmin!
+
+		80 MmPinnedPagesLimit!
+	end elseif (membytes@ 9 1024 * 1024 * <=)
+		// medium system, 5-9MB
+
+		MMMEDIUMSYSTEM MmSystemSize!
+
+		16 MiWorkingSetDefaultMinimum!
+		24 sysmin!
+
+		120 MmPinnedPagesLimit!
+	end elseif (membytes@ 33 1024 * 1024 * <)
+		// large system, 9-33MB
+
+		MMLARGESYSTEM MmSystemSize!
+
+		500 MiZeroingThreshold!
+
+		20 MiWorkingSetDefaultMinimum!
+		28 sysmin!
+
+		300 MmPinnedPagesLimit!
+	end else
+		// massive system, >33MB
+
+		MMHUGESYSTEM MmSystemSize!
+
+		1000 MiZeroingThreshold!
+
+		32 MiWorkingSetDefaultMinimum!
+		40 sysmin!
+
+		500 MmPinnedPagesLimit!
+	end
+
+	if (sysmin@ oldmin@ >)
+		MUSTSUCCEED // pri
+		sysmin@ oldmin@ - // charge
+		MmChargeCommit drop
+	end
+
+	MmSufficientAvailablePageCount@
+	MmLowAvailablePageCount@
+	"free page targets: %d pages -> %d pages\n" "MmInitPhase1" HALLog
+
+	MmModifiedPageMaximum@ PAGESHIFT <<
+	MmModifiedPageMaximum@ "modified page maximum: %d pages (%d bytes)\n" "MmInitPhase1" HALLog
+
+	auto ok
+	0 // context1
+	0 // context2
+	pointerof MiModifiedPageWriter // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"ModifiedPageWriter" // name
+	PsSystemProcess@ // processobject
+	PsThreadCreateObject ok! MmModifiedPageWriterThread!
+
+	if (ok@)
+		ok@ "MmInitPhase1: couldn't create 'ModifiedPageWriter' thread (%i)\n" KeCrash
+	end
+
+	0 ObFullyNonpagedObjects!
+end
+
+fn MmReclaimMemory { -- }
+	fnsection "INIT$text"
+
+	// lift the resource list and DLL list into our kernel heap and then
+	// reclaim the reclaimable regions in the descriptor list.
+
+	auto ok
+
+	auto newlisthead
+
+	// rebuild the resource list on our own heap
+
+	auto prev
+	auto new
+
+	auto current
+	HALLoaderInfo@ LdrInfo_ResourceListHead + @ current!
+
+	0 newlisthead!
+
+	while (current@)
+		LdrBootResource_SIZEOF // bytes
+		'nRSR' // tag
+		MUSTSUCCEED // flags
+		MmAllocWithTag ok! new!
+
+		if (ok@)
+			ok@ "MmReclaimMemory: couldn't relocate resources list (%i)\n" KeCrash
+		end
+
+		if (newlisthead@ ~~)
+			new@ newlisthead!
+		end else
+			new@ prev@ LdrBootResource_Next + !
+		end
+
+		new@ prev!
+
+		new@ // dest
+		current@ // src
+		LdrBootResource_SIZEOF // size
+		memcpy
+
+		0 new@ LdrBootResource_Next + !
+
+		current@ LdrBootResource_Next + @ current!
+	end
+
+	newlisthead@ HALResourceListHead!
+
+	// iterate the sections of all the DLLs and build a list of unwireable
+	// regions.
+
+	HALLoaderInfo@ LdrInfo_DLLListHead + @ current!
+
+	auto pages
+
+	while (current@)
+		auto head
+		current@ ComDLL_HeadVAddr + @ head!
+
+		auto sectionheader
+		head@ XLOFFHeader_SectionTableOffset + @ head@ + sectionheader!
+
+		head@ XLOFFHeader_SectionCount + @ sz!
+
+		while (sz@)
+			auto name
+			sectionheader@ XLOFFSectionHeader_NameOffset + @
+			head@ XLOFFHeader_StringTableOffset + @ + head@ + name!
+
+			sectionheader@ XLOFFSectionHeader_DataSize + @ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+			auto type
+			0 type!
+
+			if (sectionheader@ XLOFFSectionHeader_Flags + @ XLOFF_SECTIONFLAG_DEFERREDFREE &)
+				// this module failed to load and the bootloader left it to us
+				// to free its sections.
+
+				MMUNWIRE_FREE type!
+				pages@ MiFreedBootPageCount +=
+				pages@ MiWiredBootPageCount -=
+			end elseif (name@ "INIT" 4 strncmp)
+				MMUNWIRE_FREE type!
+				pages@ MiFreedBootPageCount +=
+				pages@ MiWiredBootPageCount -=
+			end elseif (name@ "PAGE" 4 strncmp)
+				if (ExBootFlags@ OSBOOTFLAG_NONPAGEDEXEC & ~~)
+					MMUNWIRE_PAGE type!
+					pages@ MiPagedBootPageCount +=
+					pages@ MiWiredBootPageCount -=
+				end
+			end
+
+			if (type@)
+				MmUnwireRecord_SIZEOF // bytes
+				'Unwi' // tag
+				MUSTSUCCEED // flags
+				MmAllocWithTag ok! start!
+
+				if (ok@)
+					ok@ "MmReclaimMemory: couldn't build unwire list (%i)\n" KeCrash
+				end
+
+				type@ start@ MmUnwireRecord_Type + !
+				sectionheader@ XLOFFSectionHeader_VirtualAddress + @ start@ MmUnwireRecord_StartVA + !
+				pages@ start@ MmUnwireRecord_Pages + !
+
+				MmUnwireRecordListHead@ start@ MmUnwireRecord_Next + !
+				start@ MmUnwireRecordListHead!
+			end
+
+			1 sz -=
+			XLOFFSectionHeader_SIZEOF sectionheader +=
+		end
+
+		current@ ComDLL_Next + @ current!
+	end
+
+	// rebuild the DLL list on our own heap
+
+	auto start
+	auto sz
+	auto rs
+
+	0 newlisthead!
+
+	HALLoaderInfo@ LdrInfo_DLLListHead + @ current!
+
+	while (current@)
+		if (current@ ComDLL_LoadCount + @ ~~)
+			// this module failed to load and the bootloader left it to us to
+			// notify the system operator at runtime.
+
+			// TODO that, somehow
+
+			current@ ComDLL_Next + @ current!
+
+			continue
+		end
+
+		auto namelen
+		current@ ComDLL_Name + @ strlen 1 + namelen!
+
+		ComDLL_SIZEOF namelen@ + // bytes
+		'nDLL' // tag
+		MUSTSUCCEED // flags
+		MmAllocWithTag ok! new!
+
+		if (ok@)
+			ok@ "MmReclaimMemory: couldn't relocate DLL list (%i)\n" KeCrash
+		end
+
+		if (newlisthead@ ~~)
+			new@ newlisthead!
+		end else
+			new@ prev@ ComDLL_Next + !
+		end
+
+		new@ prev!
+
+		new@ // dest
+		current@ // src
+		ComDLL_SIZEOF // size
+		memcpy
+
+		new@ ComDLL_SIZEOF + // dest
+		current@ ComDLL_Name + @ // src
+		namelen@ // sz
+		memcpy
+
+		new@ ComDLL_SIZEOF + new@ ComDLL_Name + !
+
+		0 new@ ComDLL_Next + !
+
+		current@ ComDLL_Next + @ current!
+	end
+
+	newlisthead@ HALLoaderInfo@ LdrInfo_DLLListHead + !
+
+	auto desc
+	HALLoaderInfo@ LdrInfo_MemoryDescriptorListHead + @ desc!
+
+	while (desc@)
+		auto reclaim
+		0 reclaim!
+
+		desc@ LdrMemoryDescriptor_Pages + @ pages!
+
+		if (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_RECLAIMABLE ==)
+			1 reclaim!
+		end elseif (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_DEBUG ==)
+			if (HALResourceKeepHeaders@ ~~)
+				1 reclaim!
+			end else
+				pages@ MiDebugBootPageCount +=
+			end
+		end
+
+		if (reclaim@)
+			pages@ MiFreedBootPageCount +=
+			pages@ MmAvailablePageCount +=
+			pages@ MiFreeListCount +=
+			pages@ MmFluidPageCount +=
+
+			auto pfn
+			desc@ LdrMemoryDescriptor_StartPFN + @ pfn!
+
+			auto pfdbe
+			pfn@ MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			while (pages@)
+				MiPageFreeListHead@ pfdbe@ MiPageFrameEntryFree_Next + !
+				pfdbe@ MiPageFreeListHead!
+
+				MiPageFrameEntry_SIZEOF pfdbe +=
+				1 pages -=
+			end
+		end elseif (desc@ LdrMemoryDescriptor_Type + @ OSLOADERMEM_FREE ~=)
+			pages@ MiWiredBootPageCount +=
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+end
+
+rosection "text"
+
+fn MmResourceJettison { -- }
+	fnsection "INIT$text"
+
+	auto rsrc
+	HALResourceListHead@ rsrc!
+
+	auto sz
+	auto start
+	auto ok
+
+	auto rs
+
+	while (rsrc@)
+		if (rsrc@ LdrBootResource_Jettison + @)
+			rsrc@ LdrBootResource_Size + @ PAGEOFFSETMASK + PAGESHIFT >> sz!
+
+			sz@ MiFreedBootPageCount +=
+			sz@ MiWiredBootPageCount -=
+
+			// XXX assumes boot resources are allocated contiguously in
+			// physical memory, which is OSLoader's current behavior.
+
+			auto pfdbe
+			rsrc@ LdrBootResource_Data + @ MmVirtualToPFDBE pfdbe!
+
+			while (sz@)
+				pfdbe@ MiPageFreeByEntry
+
+				// the page is now un-wired
+				1 MmFluidPageCount KeInterlockedIncrement drop
+
+				MiPageFrameEntry_SIZEOF pfdbe +=
+				1 sz -=
+			end
+
+			0 rsrc@ LdrBootResource_Data + ! // mark jettisoned
+		end
+
+		auto nrsrc
+		rsrc@ LdrBootResource_Next + @ nrsrc!
+
+		rsrc@ MmFree
+
+		nrsrc@ rsrc!
+	end
+
+	0 HALResourceListHead!
+
+	MiDebugBootPageCount@ PAGESHIFT << 1024 /
+	MiWiredBootPageCount@ PAGESHIFT << 1024 /
+	MiPagedBootPageCount@ PAGESHIFT << 1024 /
+	MiFreedBootPageCount@ PAGESHIFT << 1024 /
+	"%dK freed, %dK paged, %dK wired (%dK debug)\n" "MmResourceJettison" HALLog
+end
+
+fn MmIncrementCommitLimit { min max -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	min@ MmCommitLimit +=
+	max@ MmTheoreticalCommitLimit +=
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn MmInitPhysicalCommit { -- }
+	fnsection "PAGE$text"
+
+	auto limit
+	MmFluidPageCount@ limit!
+
+	// subtract an arbitrary 12 pages for system usage
+
+	if (MMSYSTEMPROMISE limit@ <)
+		MMSYSTEMPROMISE limit -=
+	end
+
+	// guarantee a minimum of 4 working sets
+
+	if (limit@ MiWorkingSetDefaultMinimum@ 4 * 20 + <)
+		MiWorkingSetDefaultMinimum@ 4 * 20 + limit!
+	end
+
+	// limit to total number of pages
+
+	if (limit@ MmFluidPageCount@ >)
+		MmFluidPageCount@ limit!
+	end
+
+	auto change
+	limit@ MmPhysicalLimit@ - change!
+
+	limit@ MmPhysicalLimit!
+
+	change@ // min
+	change@ // max
+	MmIncrementCommitLimit
+end
+
+fn MiSysPteDereferenceAndSet { pfdbe pte pteaddr -- }
+	// Nonpaged helper routine for MmPageTheKernel.
+	// Atomically dereferences the kernel page to place it on the evictable
+	// list, and sets the PTE to transition. This has to be atomic because
+	// arbitrary other activity could be going on in the kernel while its
+	// being made pageable, and poor timing of a fault here could otherwise
+	// cause catastrophe. On MP, this can be guarded with the PFN lock (or
+	// whatever lock ends up guarding PTE state).
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	pfdbe@ MmEvictablePageDereference drop
+
+	pte@ // pte
+	pteaddr@ // pteaddr
+	MiPTESet
+
+	ipl@ KeIPLLower
+end
+
+fn MmPageTheKernel { -- }
+	fnsection "PAGE$text"
+
+	auto unwr
+	MmUnwireRecordListHead@ unwr!
+
+	while (unwr@)
+		auto nunwr
+		unwr@ MmUnwireRecord_Next + @ nunwr!
+
+		auto vaddr
+		unwr@ MmUnwireRecord_StartVA + @ vaddr!
+
+		auto pages
+		unwr@ MmUnwireRecord_Pages + @ pages!
+
+		if (unwr@ MmUnwireRecord_Type + @ MMUNWIRE_PAGE ==)
+			MUSTSUCCEED // pri
+			pages@ // pages
+			MmChargeCommit drop
+		end
+
+		while (pages@)
+			auto pteaddr
+			vaddr@ // vaddr
+			MmVirtualtoPTEAddress pteaddr!
+
+			auto ok
+			auto flags
+			auto phyaddr
+
+			pteaddr@ MiPTEInterpret ok! flags! phyaddr!
+
+			if (DEBUGCHECKS)
+				if (ok@)
+					ok@ "MmPageTheKernel: failed to interpret PTE (%i)\n" KeCrash
+				end
+			end
+
+			auto pfdbe
+			phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			if (unwr@ MmUnwireRecord_Type + @ MMUNWIRE_FREE ==)
+				// unmap the page
+
+				0 // phyaddr
+				0 // flags
+				pteaddr@ // pteaddr
+				MiPTEUpdate drop drop
+
+				// free the page frame
+
+				pfdbe@ MiPageFreeByEntry
+
+				1 MmFluidPageCount KeInterlockedIncrement drop
+			end elseif (unwr@ MmUnwireRecord_Type + @ MMUNWIRE_PAGE ==)
+				// convert the page to a modified private anonymous page, and
+				// set the PTE to transition.
+				
+				MMEVICTFLAG_PRIVATE MMEVICTFLAG_MODIFIED | // flags
+				MMEVICTTYPE_ANON // evictabletype
+				pfdbe@ // pfdbe
+				MmEvictablePageInitialize
+
+				PTE_TLBHACK pfdbe@ MiPageFrameEntryAnonymous_SwapPTE + !
+
+				pteaddr@ MmVirtualToPhysical pfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + !
+
+				PsSystemProcess@ pfdbe@ MiPageFrameEntryAnonymous_Process + !
+				vaddr@ pfdbe@ MiPageFrameEntryAnonymous_VirtualAddress + !
+
+				pfdbe@ // pfdbe
+				phyaddr@ PTE_TRANSITION | PTE_TLBHACK | // pte
+				pteaddr@ // pteaddr
+				MiSysPteDereferenceAndSet
+
+				1 MmFluidPageCount KeInterlockedIncrement drop
+				1 MmAnonymousPageCount KeInterlockedIncrement drop
+			end
+
+			PAGESIZE vaddr +=
+			1 pages -=
+		end
+
+		unwr@ MmFree
+
+		nunwr@ unwr!
+	end
+
+	MmInitPhysicalCommit
+end
+
+fn MmQuery { query -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	query@ // ptr
+	OSMemoryInformation_SIZEOF // size
+	0 // word
+	memset
+
+	MmRealPageCount@ query@ OSMemoryInformation_RealPageCount + !
+	MmFluidPageCount@ query@ OSMemoryInformation_FluidPageCount + !
+	
+	MmAvailablePageCount@ query@ OSMemoryInformation_AvailablePageCount + !
+	MiEvictableListCount@ query@ OSMemoryInformation_EvictablePageCount + !
+	MiZeroListCount@ query@ OSMemoryInformation_ZeroPageCount + !
+	MiFreeListCount@ query@ OSMemoryInformation_FreePageCount + !
+
+	IOCachePagesUsed@ query@ OSMemoryInformation_FileCachePageCount + !
+	MmAnonymousPageCount@ query@ OSMemoryInformation_AnonymousPageCount + !
+
+	IOCacheInfoBlockDirtyCount@ query@ OSMemoryInformation_DirtyFileCount + !
+
+	IOSwapPagesCount@ query@ OSMemoryInformation_SwapPageTotalCount + !
+	IOSwapPagesUsed@ query@ OSMemoryInformation_SwapPageUsedCount + !
+	IOSwapPagesUsedPeak@ query@ OSMemoryInformation_SwapPagePeakCount + !
+
+	IOSwapPagesRead@ query@ OSMemoryInformation_SwapPagesRead + !
+	IOSwapPagesWritten@ query@ OSMemoryInformation_SwapPagesWritten + !
+
+	MmNonpagedHeapBytesUsedInternally@ MmNonpagedPoolBytesUsed@ +
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedInternally + !
+
+	MmNonpagedHeapBytesUsedExternally@ MmNonpagedPoolBytesUsed@ +
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedExternally + !
+
+	MmNonpagedHeapBytesUsedPeak@ MmNonpagedPoolBytesPeak@ +
+	query@ OSMemoryInformation_NonpagedPoolBytesUsedPeak + !
+
+	MmPagedHeapBytesUsedInternally@ MmPagedPoolBytesUsed@ +
+	query@ OSMemoryInformation_PagedPoolBytesUsedInternally + !
+
+	MmPagedHeapBytesUsedExternally@ MmPagedPoolBytesUsed@ +
+	query@ OSMemoryInformation_PagedPoolBytesUsedExternally + !
+
+	MmPagedHeapBytesUsedPeak@ MmPagedPoolBytesPeak@ +
+	query@ OSMemoryInformation_PagedPoolBytesUsedPeak + !
+
+	MmModifiedPageCount@ query@ OSMemoryInformation_ModifiedPageCount + !
+	MmModifiedPageMaximum@ query@ OSMemoryInformation_ModifiedPageMaximum + !
+
+	MmTotalWorkingSetSize@ query@ OSMemoryInformation_WorkingSetPageTotalCount + !
+	MmPeakWorkingSetSize@ query@ OSMemoryInformation_WorkingSetPagePeakCount + !
+
+	MmPageFaultCount@ query@ OSMemoryInformation_PageFaultCount + !
+	MmHardPageFaultCount@ query@ OSMemoryInformation_HardPageFaultCount + !
+	MmSoftPageFaultCount@ query@ OSMemoryInformation_SoftPageFaultCount + !
+	MmPageInCount@ query@ OSMemoryInformation_PageInCount + !
+
+	MmTheoreticalCommitLimit@ query@ OSMemoryInformation_TheoreticalCommitLimit + !
+	MmCommitLimit@ query@ OSMemoryInformation_CommitLimit + !
+	MmCommitUsage@ query@ OSMemoryInformation_CommitUsage + !
+
+	MmPhysicalLimit@ query@ OSMemoryInformation_PhysicalCommitLimit + !
+	MiPhysicalUsage@ query@ OSMemoryInformation_PhysicalCommitUsage + !
+
+	MmModifiedFilePageCount@ query@ OSMemoryInformation_ModifiedFilePageCount + !
+
+	MmViewCachePageCount@ query@ OSMemoryInformation_ViewCachePageCount + !
+end

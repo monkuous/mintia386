@@ -1,0 +1,1198 @@
+//
+// Implements the Working Set List (WSL) data structure.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+const MMWORKINGSETTABLESIZE       (PAGESIZE MiProcessHeader_SIZEOF -)
+const MMWORKINGSETENTRIESPERTABLE (MMWORKINGSETTABLESIZE 4 /)
+
+const MMWORKINGSETINITIALENTRIES  32
+const MMWORKINGSETEXTENDENTRIES   8
+
+const MMWORKINGSETENTRY_VALID 1
+
+fn MiWorkingSetListInitialize { process -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	MiWorkingSetDefaultMinimum@ // charge
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockChargeWS ok!
+
+	if (ok@)
+		return
+	end
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	0 phdr@ MiProcessHeader_WorkingSetSize + !
+	MiWorkingSetDefaultMinimum@ phdr@ MiProcessHeader_WorkingSetMinimum + !
+	MiWorkingSetDefaultMaximum@ phdr@ MiProcessHeader_WorkingSetMaximum + !
+	MiWorkingSetDefaultQuota@ phdr@ MiProcessHeader_WorkingSetQuota + !
+
+	0 phdr@ MiProcessHeader_WorkingSetReplacementIndex + !
+	0 phdr@ MiProcessHeader_WorkingSetTrimFaultCount + !
+	0 phdr@ MiProcessHeader_WorkingSetLastReplacedVirtual + !
+
+	0 phdr@ MiProcessHeader_ModifiedPageCount + !
+
+	// initialize the working set list.
+
+	auto entryptr
+	phdr@ MiProcessHeader_SIZEOF +
+	MMWORKINGSETINITIALENTRIES 4 * + entryptr!
+
+	auto last
+	-1 last!
+
+	auto ihandle
+	MMWORKINGSETINITIALENTRIES ihandle!
+
+	auto count
+	MMWORKINGSETINITIALENTRIES count!
+
+	// initialize the free list
+
+	while (count@)
+		4 entryptr -=
+		1 ihandle -=
+
+		last@ PAGESHIFT << entryptr@!
+
+		ihandle@ last!
+		1 count -=
+	end
+
+	last@ phdr@ MiProcessHeader_WorkingSetFreeListHead + !
+	MMWORKINGSETINITIALENTRIES 1 - phdr@ MiProcessHeader_WorkingSetMaximumIndex + !
+end
+
+// unless explicitly stated otherwise, all working set manipulation functions
+// assume the caller took care of the necessary locking.
+
+fn MiWorkingSetListFree { process -- }
+	if (DEBUGCHECKS)
+		if (process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @)
+			process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @
+			"MiWorkingSetListFree: working set size > 0 (%d)\n" KeCrash
+		end
+	end
+
+	process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetMinimum + @ // charge
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockUnchargeWS
+
+	return
+end
+
+fn MiWorkingSetTrimPage { wsli wsleptr process -- }
+	wsleptr@ // wsleptr
+	process@ // process
+	MiWorkingSetEntryRemove
+
+	wsli@ // wsli
+	wsleptr@ // wsleptr
+	process@ // process
+	MiWorkingSetEntryFree
+end
+
+fn MiWorkingSetTrim { dire pages process -- trimmed }
+	// trim the working set of the specified process.
+	// attempt to trim the given number of pages, and return the real number
+	// of pages trimmed.
+
+	0 trimmed!
+
+	auto wsli
+	auto wsleptr
+	auto ok
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	process@ PsProcess_PageFaultCount + @ phdr@ MiProcessHeader_WorkingSetTrimFaultCount + !
+
+	while (phdr@ MiProcessHeader_WorkingSetSize + @ phdr@ MiProcessHeader_WorkingSetMaximum + @ >)
+		// greater than the maximum, nuke all the way down to it
+
+		if (pages@ ~~)
+			return
+		end
+
+		process@ // process
+		MiWorkingSetEntryReplace ok! wsleptr! wsli!
+
+		if (ok@)
+			return
+		end
+
+		wsli@ // wsli
+		wsleptr@ // wsleptr
+		process@ // process
+		MiWorkingSetTrimPage
+
+		1 pages -=
+		1 trimmed +=
+	end
+
+	if (trimmed@)
+		return
+	end
+
+	if (dire@)
+		15 pages@ min pages!
+	end else
+		5 pages@ min pages!
+	end
+
+	while (phdr@ MiProcessHeader_WorkingSetSize + @ phdr@ MiProcessHeader_WorkingSetMinimum + @ >)
+		// between minimum and maximum, nuke at most 5 entries, or 15 if dire
+
+		if (pages@ ~~)
+			return
+		end
+
+		process@ // process
+		MiWorkingSetEntryReplace ok! wsleptr! wsli!
+
+		if (ok@)
+			return
+		end
+
+		wsli@ // wsli
+		wsleptr@ // wsleptr
+		process@ // process
+		MiWorkingSetTrimPage
+
+		1 pages -=
+		1 trimmed +=
+	end
+
+	if (trimmed@)
+		return
+	end
+
+	if (dire@ ~~)
+		return
+	end
+	
+	1 pages@ min pages!
+
+	while (phdr@ MiProcessHeader_WorkingSetSize + @)
+		// below minimum, nuke only 1 entry, or 5 if dire
+
+		if (pages@ ~~)
+			return
+		end
+
+		process@ // process
+		MiWorkingSetEntryReplace ok! wsleptr! wsli!
+
+		if (ok@)
+			return
+		end
+
+		wsli@ // wsli
+		wsleptr@ // wsleptr
+		process@ // process
+		MiWorkingSetTrimPage
+
+		1 pages -=
+		1 trimmed +=
+	end
+end
+
+fn MiWorkingSetPurge { process -- }
+	// purge the entire working set of the process
+
+	0 // startva
+	MMHIGHESTUSERADDRESS 1 + // endva
+	process@ // process
+	MiWorkingSetTrimRange
+end
+
+fn MiWorkingSetRemap { flags startva endva process -- }
+	// update all of the mapped PTEs in the process to have the new flags.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (process@ KeProcess_MemoryStateB + gb PROCESSSTATE_RESIDENT ~=)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	auto maxi
+	process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetMaximumIndex + @ maxi!
+
+	if (maxi@ -1 ==)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	auto ok
+
+	auto pteaddr
+	0 pteaddr!
+
+	auto oldflags
+
+	auto phyaddr
+
+	auto pfdbe
+
+	if (endva@ startva@ - maxi@ PAGESHIFT << >)
+		// there's more in the mapped range than in the working set, so remap
+		// via working set entries rather than search the entire range of
+		// PTEs.
+
+		auto wsli
+		0 wsli!
+
+		auto wsleptr
+		process@ PsProcess_MmHeader + @ MiProcessHeader_SIZEOF + wsleptr!
+
+		auto wsle
+
+		while (wsli@ maxi@ <=)
+			wsleptr@@ wsle!
+
+			if (wsle@ MMWORKINGSETENTRY_VALID &)
+				wsle@ PAGENUMBERMASK & wsle!
+
+				if (wsle@ startva@ >=)
+					if (wsle@ endva@ <)
+						// found one, remap it
+
+						if (process@ PsSystemProcess@ ==)
+							wsle@ // vaddr
+							MmVirtualtoPTEAddress pteaddr!
+						end else
+							wsle@ // vaddr
+							MmVirtualtoPTEAddressUser pteaddr!
+						end
+
+						pteaddr@ // pteaddr
+						MiPTEInterpret ok! oldflags! phyaddr!
+
+						if (DEBUGCHECKS)
+							if (ok@)
+								pteaddr@@ "MiWorkingSetRemap: invalid PTE %08x\n" KeCrash
+							end
+						end
+
+						if (oldflags@ PTE_D &)
+							// page was dirty, reflect that in the pfdbe.
+
+							phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+							pfdbe@ // pfdbe
+							process@ // process
+							MmEvictablePageModify
+						end
+
+						phyaddr@ // phyaddr
+						flags@ // flags
+						pteaddr@ // pteaddr
+						MiPTEUpdate drop drop
+					end
+				end
+			end
+
+			4 wsleptr +=
+			1 wsli +=
+		end
+	end else
+		// there's more in the working set than in the range, so remap via
+		// PTEs rather than search the entire working set list.
+
+		while (startva@ endva@ <)
+			if (startva@ PERPAGETABLEOFFSETMASK & ~~ pteaddr@ ~~ ||)
+				startva@ MmVirtualtoPTEAddressWithFail ok! pteaddr!
+
+				if (ok@)
+					PERPAGETABLE startva +=
+					PERPAGETABLENUMBERMASK startva &=
+
+					continue
+				end
+			end
+
+			pteaddr@ // pteaddr
+			MiPTEInterpret ok! oldflags! phyaddr!
+
+			if (ok@)
+				PAGESIZE startva +=
+				PTESIZE pteaddr +=
+
+				continue
+			end
+
+			if (oldflags@ PTE_D &)
+				// page was dirty, reflect that in the pfdbe.
+
+				phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+				pfdbe@ // pfdbe
+				process@ // process
+				MmEvictablePageModify
+			end
+
+			phyaddr@ // phyaddr
+			flags@ // flags
+			pteaddr@ // pteaddr
+			MiPTEUpdate drop drop
+
+			PTESIZE pteaddr +=
+			PAGESIZE startva +=
+		end
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn MiWorkingSetTrimRange { startva endva process -- }
+	// trim any entries between startva and endva out of the working set.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (process@ KeProcess_MemoryStateB + gb PROCESSSTATE_RESIDENT ~=)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	auto wsli
+	0 wsli!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	auto wsleptr
+	process@ PsProcess_MmHeader + @ MiProcessHeader_SIZEOF + wsleptr!
+
+	auto wsle
+
+	auto maxi
+	phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ maxi!
+
+	if (maxi@ -1 ==)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	while (wsli@ maxi@ <=)
+		if (phdr@ MiProcessHeader_WorkingSetSize + @ ~~)
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		wsleptr@@ wsle!
+
+		if (wsle@ MMWORKINGSETENTRY_VALID &)
+			wsle@ PAGENUMBERMASK & wsle!
+
+			if (wsle@ startva@ >=)
+				if (wsle@ endva@ <)
+					// found one, remove it
+
+					wsli@ // wsli
+					wsleptr@ // wsleptr
+					process@ // process
+					MiWorkingSetTrimPage
+				end
+			end
+		end
+
+		4 wsleptr +=
+		1 wsli +=
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn MiWorkingSetSwapOut { process -- }
+	// does two passes. the first removes normal pages, and the second removes
+	// page tables. it must be done like this otherwise there's a chicken and
+	// egg problem with removing the page tables.
+
+	auto wsli
+	0 wsli!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	auto wsleptr
+	process@ PsProcess_MmHeader + @ MiProcessHeader_SIZEOF + wsleptr!
+
+	auto wsle
+
+	auto maxi
+	phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ maxi!
+
+	if (maxi@ -1 ==)
+		return
+	end
+
+	while (wsli@ maxi@ <=)
+		if (phdr@ MiProcessHeader_WorkingSetSize + @ ~~)
+			return
+		end
+
+		wsleptr@@ wsle!
+
+		if (wsle@ MMWORKINGSETENTRY_VALID &)
+			wsle@ PAGENUMBERMASK & wsle!
+
+			if (wsle@ PAGETABLE < wsle@ SYSPAGETABLE >= ||)
+				// found one, remove it
+
+				wsli@ // wsli
+				wsleptr@ // wsleptr
+				process@ // process
+				MiWorkingSetTrimPage
+			end
+		end
+
+		4 wsleptr +=
+		1 wsli +=
+	end
+
+	0 wsli!
+	process@ PsProcess_MmHeader + @ MiProcessHeader_SIZEOF + wsleptr!
+
+	while (wsli@ maxi@ <=)
+		if (phdr@ MiProcessHeader_WorkingSetSize + @ ~~)
+			return
+		end
+
+		wsleptr@@ wsle!
+
+		if (wsle@ MMWORKINGSETENTRY_VALID &)
+			wsle@ PAGENUMBERMASK & wsle!
+
+			// found one, remove it
+
+			wsli@ // wsli
+			wsleptr@ // wsleptr
+			process@ // process
+			MiWorkingSetTrimPage
+		end
+
+		4 wsleptr +=
+		1 wsli +=
+	end
+end
+
+fn MiWorkingSetEntryInsert { vaddr wsleptr process -- }
+	// caller must create the associated PTE before calling this function.
+
+	// increments the working set size.
+
+	if (DEBUGCHECKS)
+		if (vaddr@ PAGEOFFSETMASK &)
+			"MiWorkingSetEntryUpdate: unaligned vaddr\n" KeCrash
+		end
+	end
+
+	auto wsle
+	vaddr@ MMWORKINGSETENTRY_VALID | wsle!
+
+	1 process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + +=
+
+	wsle@ wsleptr@!
+end
+
+fn MiWorkingSetEntryReserve { process -- wsli wsleptr ok }
+	// first we check to see if the working set can take a page:
+	//
+	//   1. if the working set size is below the minimum, it can.
+	//   2. if the size is between the minimum and the maximum, it can if the
+	//      system is not in a low memory condition.
+	//   3. if the process is at its working set quota, it can't.
+	//   4. if the size >= maximum, it can if it has had more than 100 page faults
+	//      since the last time it was trimmed, and the system has at least
+	//      MmSufficientAvailablePageCount free pages.
+	//
+	// if it can, we yoink the first free entry, mark it reserved, and return
+	// the index in wsli.
+	//
+	// if it can't, we try to replace another entry in the working set at
+	// random.
+
+	auto tried
+	0 tried!
+
+	auto room
+	0 room!
+
+	0 ok!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	auto wssize
+	phdr@ MiProcessHeader_WorkingSetSize + @ wssize!
+
+	auto minpages
+
+	if (wssize@ phdr@ MiProcessHeader_WorkingSetMinimum + @ <)
+		// below minimum, there's always room
+
+		0 minpages!
+	end elseif (wssize@ phdr@ MiProcessHeader_WorkingSetMaximum + @ <)
+		// between minimum and maximum
+
+		if (process@ PsProcess_PageFaultCount + @ phdr@ MiProcessHeader_WorkingSetTrimFaultCount + @ - 100 >)
+			MmLowAvailablePageCount@ minpages!
+		end else
+			MmSufficientAvailablePageCount@ minpages!
+		end
+	end elseif (wssize@ phdr@ MiProcessHeader_WorkingSetQuota + @ >=)
+		// above quota, there's never room
+
+		-1 minpages!
+	end else
+		// above maximum
+
+		if (process@ PsProcess_PageFaultCount + @ phdr@ MiProcessHeader_WorkingSetTrimFaultCount + @ - 200 >)
+			MmSufficientAvailablePageCount@ minpages!
+		end else
+			MmSufficientAvailablePageCount@ 20 + minpages!
+		end
+	end
+
+	MmAvailablePageCount@ minpages@ >= room!
+
+	1 process@ PsProcess_PageFaultCount + +=
+
+	while (1)
+		if (room@ ~~)
+			// no room, kick one out
+
+			process@ // process
+			MiWorkingSetEntryReplace ok! wsleptr! wsli!
+
+			if (ok@)
+				// failed to find one to replace...
+				// say there's room and repeat...
+				
+				if (tried@)
+					-1 ok!
+					return
+				end
+
+				1 tried!
+				1 room!
+
+				continue
+			end
+
+			wsleptr@ // wsleptr
+			process@ // process
+			MiWorkingSetEntryRemove
+		end else
+			phdr@ MiProcessHeader_WorkingSetFreeListHead + @ wsli!
+
+			if (wsli@ -1 ~=)
+				// yoink
+
+				wsli@ // wsli
+				process@ // process
+				MiWorkingSetEntryFindByIndex ok! wsleptr!
+
+				if (DEBUGCHECKS)
+					if (ok@)
+						"MiWorkingSetEntryReserve: failed to find by index\n" KeCrash
+					end
+				end
+
+				auto wsle
+				wsleptr@@ wsle!
+
+				if (DEBUGCHECKS)
+					if (wsle@ MMWORKINGSETENTRY_VALID &)
+						"MiWorkingSetEntryReserve: wsle was valid\n" KeCrash
+					end
+				end
+
+				if (wsle@ PAGENUMBERMASK ==)
+					-1 phdr@ MiProcessHeader_WorkingSetFreeListHead + !
+				end else
+					wsle@ PAGESHIFT >> phdr@ MiProcessHeader_WorkingSetFreeListHead + !
+				end
+			end else
+				// no free entries, we need to allocate a new working set
+				// array.
+
+				process@ MiWorkingSetArrayExpand ok! wsleptr! wsli!
+
+				if (ok@)
+					if (ok@ STATUS_NO_MEMORY ==)
+						// loop with room=0 if failed to allocate, in order to
+						// retry the reservation as a replacement.
+
+						if (tried@)
+							-1 ok!
+
+							return
+						end
+
+						1 tried!
+						0 room!
+
+						continue
+					end
+
+					return
+				end
+			end
+		end
+
+		0 wsleptr@!
+
+		return
+	end
+
+	if (DEBUGCHECKS)
+		"MiWorkingSetEntryReserve: unreachable\n" KeCrash
+	end
+end
+
+fn MiWorkingSetArrayExpand { process -- wsli wsleptr ok }
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	auto maxi
+	phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ maxi!
+
+	auto size
+	maxi@ 1 + size!
+
+	auto count
+	MMWORKINGSETEXTENDENTRIES count!
+
+	if (size@ MMWORKINGSETENTRIESPERTABLE >=)
+		STATUS_NO_MEMORY ok!
+
+		return
+	end
+
+	if (size@ count@ + MMWORKINGSETENTRIESPERTABLE >=)
+		MMWORKINGSETENTRIESPERTABLE size@ - count!
+	end
+
+	// extend the working set list.
+
+	auto entryptr
+	phdr@ MiProcessHeader_SIZEOF +
+	size@ 4 * +
+	count@ 4 * + entryptr!
+
+	auto last
+	-1 last!
+
+	auto ihandle
+	size@ count@ + ihandle!
+
+	// extend the free list
+
+	auto i
+	count@ 1 - i!
+
+	while (i@)
+		4 entryptr -=
+		1 ihandle -=
+
+		last@ PAGESHIFT << entryptr@!
+
+		ihandle@ last!
+		1 i -=
+	end
+
+	last@ phdr@ MiProcessHeader_WorkingSetFreeListHead + !
+	size@ count@ + 1 - phdr@ MiProcessHeader_WorkingSetMaximumIndex + !
+
+	entryptr@ 4 - wsleptr!
+	ihandle@ 1 - wsli!
+
+	0 ok!
+end
+
+fn MiWorkingSetEntryReplace { process -- wsli wsleptr ok }
+	// find a working set entry to replace.
+
+	0 ok!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	if (phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ -1 ==)
+		-1 ok!
+
+		return
+	end
+
+	auto hint
+	phdr@ MiProcessHeader_WorkingSetReplacementIndex + @ hint!
+
+	if (hint@ phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ >)
+		0 hint!
+	end
+
+	auto searchcount
+	0 searchcount!
+
+	// search from the replacement index to the end of the working set for a
+	// valid entry to replace, then from the start to the replacement index.
+
+	auto i
+	0 i!
+
+	while (i@ 2 <)
+		auto endindex
+
+		if (i@ 0 ==)
+			hint@ wsli!
+			phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ 1 + endindex!
+		end elseif (hint@)
+			0 wsli!
+			hint@ endindex!
+		end else
+			-1 ok!
+
+			return
+		end
+
+		phdr@ MiProcessHeader_SIZEOF + wsleptr!
+		wsli@ 2 << wsleptr +=
+
+		auto wsle
+
+		while (wsli@ endindex@ <)
+			wsleptr@@ wsle!
+
+			if (wsle@ MMWORKINGSETENTRY_VALID &)
+				auto useit
+				0 useit!
+
+				auto vaddr
+				wsle@ PAGENUMBERMASK & vaddr!
+
+				if (searchcount@ 16 >=)
+					1 useit!
+				end elseif (vaddr@ phdr@ MiProcessHeader_WorkingSetLastReplacedVirtual + @ ~=)
+					1 useit!
+				end
+
+				auto pfdbe
+
+				if (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+					vaddr@ MmVirtualToPFDBE pfdbe!
+
+					if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi 1 >)
+						// this page is a pinned page table. can't use it.
+
+						0 useit!
+					end
+				end elseif (process@ PsSystemProcess@ ==)
+					vaddr@ MmVirtualToPFDBE pfdbe!
+
+					if (pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE & ~~)
+						if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi 1 >)
+							// this page is a pinned viewcache page. can't use
+							// it.
+
+							0 useit!
+						end
+					end
+				end
+
+				if (useit@)
+					// found one
+
+					wsli@ 1 + phdr@ MiProcessHeader_WorkingSetReplacementIndex + !
+					vaddr@ phdr@ MiProcessHeader_WorkingSetLastReplacedVirtual + !
+
+					return
+				end
+			end
+
+			4 wsleptr +=
+			1 wsli +=
+			1 searchcount +=
+		end
+
+		1 i +=
+	end
+
+	-1 ok!
+end
+
+fn MiWorkingSetEntryForceOut { vaddr pfdbe -- }
+	// force out the specified virtual address from the process's working set.
+	// DOES NOT set the PTE.
+	//
+	// necessary in certain circumstances; for instance, removing a page table
+	// from the working set after it's last PTE has been deleted and before
+	// the page table is freed.
+
+	auto process
+	KeProcessCurrent process!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	if (phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ -1 ==)
+		return
+	end
+
+	auto endindex
+	auto wsli
+	auto wsleptr
+	auto wsle
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	0 wsli!
+	phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ 1 + endindex!
+	phdr@ MiProcessHeader_SIZEOF + wsleptr!
+
+	while (wsli@ endindex@ <)
+		wsleptr@@ wsle!
+
+		if (wsle@ MMWORKINGSETENTRY_VALID &)
+			if (vaddr@ wsle@ PAGENUMBERMASK & ==)
+				MMWORKINGSETENTRY_VALID ~ wsleptr@ &=
+
+				pfdbe@ MmEvictablePageDereference drop
+
+				auto oldcount
+				process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @ oldcount!
+
+				if (DEBUGCHECKS)
+					if (oldcount@ 0 ==)
+						"MiWorkingSetEntryForceOut: underflow\n" KeCrash
+					end
+				end
+
+				oldcount@ 1 - process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + !
+
+				// set PTE to zero
+
+				0 // phyaddr
+				0 // flags
+				pteaddr@ // pteaddr
+				MiPTEUpdate drop drop
+
+				return
+			end
+		end
+
+		4 wsleptr +=
+		1 wsli +=
+	end
+end
+
+fn MiWorkingSetEntryRemove { wsleptr process -- }
+	// remove the specified entry from the working set. deletes the PTE unless
+	// the page frame is private.
+	//
+	// unmap it from the process's pagemap, and decrement the page frame's
+	// refcount.
+	// if private, set the PTE to TRANSITION.
+	// if shared, set the PTE to zero and delete it.
+	//
+	// DOES clear the WSLE valid bit, but does NOT free the WSLE; caller must
+	// do that if he wants that to happen.
+	//
+	// decrements the working set size.
+
+	if (DEBUGCHECKS)
+		if (wsleptr@@ MMWORKINGSETENTRY_VALID & ~~)
+			"MiWorkingSetEntryRemove: not valid\n" KeCrash
+		end
+	end
+
+	auto vaddr
+	wsleptr@@ PAGENUMBERMASK & vaddr!
+
+	auto pteaddr
+	auto ok
+
+	if (process@ PsSystemProcess@ ==)
+		vaddr@ MmVirtualtoPTEAddress pteaddr!
+	end elseif (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+		vaddr@ MmVirtualtoPTEAddress pteaddr!
+	end else
+		vaddr@ MmVirtualtoPTEAddressUser pteaddr!
+	end
+
+	auto phyaddr
+	auto pfdbe
+	auto flags
+
+	pteaddr@ // pteaddr
+	MiPTEInterpret ok! flags! phyaddr!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			vaddr@
+			pteaddr@
+			pteaddr@@
+			"MiWorkingSetEntryRemove: invalid PTE %x (%x,%x)\n" KeCrash
+		end
+	end
+
+	// unmap
+
+	phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+	if (flags@ PTE_D &)
+		// page was dirty, reflect that in the pfdbe.
+		// this is necessary because the page might have gotten flushed
+		// manually while it was mapped. additionally, the hardware might
+		// enforce the dirty bit, in which case we have no way of knowing that
+		// it was modified until this moment anyway.
+
+		// charge the process for the modified pages now, since it won't have
+		// been done in the page fault handler.
+
+		pfdbe@ // pfdbe
+		process@ // process
+		MmEvictablePageModify
+	end
+
+	if (pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE &)
+		// private page. create transition PTE so we can soft-fault it back in
+		// later.
+
+		if (process@ PsSystemProcess@ ==)
+			phyaddr@ PTE_TRANSITION | PTE_TLBHACK | // pte
+			pteaddr@ // pteaddr
+			MiPTESet
+		end else
+			phyaddr@ PTE_TRANSITION | // pte
+			pteaddr@ // pteaddr
+			MiPTESet
+		end
+	end else
+		// shared page. set the PTE to zero and delete the PTE.
+
+		0 // phyaddr
+		0 // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		if (process@ PsSystemProcess@ ~=)
+			// system working set, don't delete the PTE since the page tables
+			// are eternal anyway.
+
+			1 // deref
+			pteaddr@ // pteaddr
+			MiPTEDelete
+		end else
+			// shared system pages are assumed to have been in the viewcache,
+			// so decrement the count of viewcache pages.
+
+			1 MmViewCachePageCount -=
+		end
+	end
+
+	MMWORKINGSETENTRY_VALID ~ wsleptr@ &=
+
+	pfdbe@ MmEvictablePageDereference drop
+
+	auto oldcount
+	process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"MiWorkingSetEntryRemove: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + !
+end
+
+fn MiWorkingSetEntryFindByIndex { wsli process -- wsleptr ok }
+	// look up a working set index in the working set and return the pointer.
+	// return -1 in ok if the index is beyond the end of valid indices.
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	if (phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ -1 ==)
+		-1 ok!
+
+		return
+	end
+
+	if (wsli@ phdr@ MiProcessHeader_WorkingSetMaximumIndex + @ >)
+		-1 ok!
+
+		return
+	end
+
+	0 ok!
+
+	phdr@ MiProcessHeader_SIZEOF +
+	wsli@ 2 << + wsleptr!
+end
+
+fn MiWorkingSetEntryFree { wsli wsleptr process -- }
+	// place a working set entry on the free list.
+
+	process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetFreeListHead + @ PAGESHIFT << wsleptr@!
+	wsli@ process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetFreeListHead + !
+end
+
+fn MmManageWorkingSets { -- }
+	// This function is called by the balance manager thread when available
+	// pages are running dry.
+
+	while (1)
+		auto pagecount
+		auto dire
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		if (MmAvailablePageCount@ MmSufficientAvailablePageCount@ >=)
+			MmLowMemoryEvent // event
+			KeEventReset drop
+
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		MmSufficientAvailablePageCount@ MmAvailablePageCount@ - pagecount!
+		MmAvailablePageCount@ MMDIREPAGES < dire!
+
+		ipl@ KeIPLLower
+
+		PsProcessListLockForTrim
+
+		auto process
+		PsProcessTrimListHead@ process!
+
+		auto count
+		PsActiveProcessCount@ count!
+
+		auto nprocess
+
+		auto totaltrimmed
+		0 totaltrimmed!
+
+		auto checkloop
+		0 checkloop!
+
+		while (process@ count@ &&)
+			if (process@ checkloop@ ==)
+				break
+			end
+			
+			process@ PsProcess_TrimListNext + @ nprocess!
+
+			auto ok
+			1 // try
+			process@ // process
+			KeProcessAttach ok! ipl!
+
+			if (ok@)
+				// The process is currently outswapped anyway. Skip it.
+
+				1 count -=
+				nprocess@ process!
+
+				continue
+			end
+
+			// We're now attached to the process, so go ahead and trim it.
+
+			auto ipl2
+			IPLDPC KeIPLRaise ipl2!
+
+			auto trimmed
+			dire@ // dire
+			pagecount@ // pages
+			process@ // process
+			MiWorkingSetTrim trimmed!
+
+			ipl2@ KeIPLLower
+
+			ipl@ KeProcessDetach
+
+			if (process@ PsProcessTrimListTail@ ~=)
+				if (checkloop@ ~~)
+					process@ checkloop!
+				end
+
+				// remove and re-insert the process so we don't trim
+				// it again for a while.
+
+				1 // locked
+				process@ // process
+				PsProcessRemoveForTrim
+				
+				1 // locked
+				process@ // process
+				PsProcessInsertForTrim
+			end
+
+			if (trimmed@ pagecount@ >=)
+				0 pagecount!
+
+				break
+			end
+
+			trimmed@ totaltrimmed +=
+			trimmed@ pagecount -=
+
+			1 count -=
+			nprocess@ process!
+		end
+
+		PsProcessListUnlockForTrim
+
+		if (pagecount@ ~~)
+			break
+		end
+
+		if (totaltrimmed@ ~~)
+			return
+		end
+	end
+end

@@ -1,0 +1,8 @@
+.section PAGE$text
+
+ExBuildDate:
+.global ExBuildDate
+	.ds$ __DATE
+	.db 0
+
+.align 4

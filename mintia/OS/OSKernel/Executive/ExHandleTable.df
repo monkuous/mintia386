@@ -1,0 +1,579 @@
+//
+// Implements the handletable data structure.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/HALDebug.h"
+
+#include "ExInternal.h"
+
+fn ExHandleTableCreate { context quotablock entrysizelog -- handletable ok }
+	fnsection "PAGE$text"
+
+	auto entrysize
+	4 entrysizelog@ << entrysize!
+
+	if (quotablock@)
+		ExiHandleTableHeader_SIZEOF MmChargeBytesGet // charge
+		quotablock@ // quotablock
+		MmQuotaBlockCharge ok!
+
+		if (ok@)
+			return
+		end
+
+		quotablock@ MmQuotaBlockReference
+	end
+
+	ExiHandleTableHeader_SIZEOF // bytes
+	'HnTb' // tag
+	CANBLOCK // flags
+	MmAllocWithTag ok! handletable!
+
+	if (ok@)
+		// allocation failed
+
+		if (quotablock@)
+			ExiHandleTableHeader_SIZEOF MmChargeBytesGet // charge
+			quotablock@ // quotablock
+			MmQuotaBlockUncharge
+
+			quotablock@ MmQuotaBlockDereference
+		end
+
+		return
+	end
+
+	"ExHandleTableRwLock" // name
+	handletable@ ExiHandleTableHeader_RwLock + // mutex
+	ExRwLockInitialize
+
+	entrysizelog@ handletable@ ExiHandleTableHeader_EntrySizeLog + !
+
+	quotablock@ handletable@ ExiHandleTableHeader_QuotaBlock + !
+
+	0 handletable@ ExiHandleTableHeader_Entries + !
+	0 handletable@ ExiHandleTableHeader_FreeEntries + !
+
+	context@ handletable@ ExiHandleTableHeader_Context + !
+
+	-1 handletable@ ExiHandleTableHeader_FreeListHead + !
+
+	0 handletable@ ExiHandleTableHeader_Table + !
+end
+
+fn ExHandleTableDelete { func handletable -- }
+	fnsection "PAGE$text"
+
+	auto ok
+
+	// handle table MUST be locked exclusively
+
+	auto i
+
+	auto entries
+
+	auto entryptr
+
+	if (func@)
+		// call a function for each handle
+
+		0 i!
+
+		handletable@ ExiHandleTableHeader_Entries + @ entries!
+
+		while (i@ entries@ <)
+			i@
+			handletable@
+			1 // locked
+			ExHandleLookup ok! entryptr!
+
+			if (ok@ ~~)
+				entryptr@ i@ handletable@ func@ ExHandleEnumFunction ok!
+
+				if (DEBUGCHECKS)
+					if (ok@)
+						ok@ func@ "ExHandleTableDelete: delete function at 0x%08x failed (%i)\n" KeCrash
+					end
+				end
+			end
+
+			1 i +=
+		end
+	end
+
+	// deallocate handle table structures
+
+	auto quotablock
+	handletable@ ExiHandleTableHeader_QuotaBlock + @ quotablock!
+
+	auto charge
+
+	auto tab
+	handletable@ ExiHandleTableHeader_Table + @ tab!
+
+	if (tab@)
+		tab@ MmBlockChargeGet charge!
+
+		tab@ MmFree
+
+		if (quotablock@)
+			charge@ // charge
+			quotablock@ // quotablock
+			MmQuotaBlockUnchargePaged
+		end
+	end
+
+	handletable@ MmBlockChargeGet charge!
+
+	handletable@ ExiHandleTableHeader_RwLock + ExRwLockUninitialize
+
+	handletable@ MmFree
+
+	if (quotablock@)
+		charge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUncharge
+
+		quotablock@ MmQuotaBlockDereference
+	end
+end
+
+fn ExHandleTableLock { alertable handletable -- ok }
+	fnsection "PAGE$text"
+
+	alertable@ // alertable
+	0 // nowait
+	handletable@ ExiHandleTableHeader_RwLock + // rwlock
+	ExRwLockAcquireExclusive ok!
+end
+
+fn ExHandleTableLockShared { alertable handletable -- ok }
+	fnsection "PAGE$text"
+
+	alertable@ // alertable
+	0 // nowait
+	0 // canstarve
+	handletable@ ExiHandleTableHeader_RwLock + // rwlock
+	ExRwLockAcquireShared ok!
+end
+
+fn ExHandleTableUnlock { handletable -- }
+	handletable@ ExiHandleTableHeader_RwLock + ExRwLockRelease
+end
+
+fn ExHandleDelete { handle handletable locked -- entryptr entryvalue ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (locked@ ~~)
+		1 // alertable
+		handletable@ // handletable
+		ExHandleTableLock ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	handle@ // handle
+	handletable@ // handletable
+	1 // locked
+	ExHandleLookup ok! entryptr!
+
+	if (ok@)
+		if (locked@ ~~)
+			handletable@ ExHandleTableUnlock
+		end
+
+		return
+	end
+
+	entryptr@@ entryvalue!
+
+	handletable@ ExiHandleTableHeader_FreeListHead + @ 1 << 1 | entryptr@!
+	handle@ handletable@ ExiHandleTableHeader_FreeListHead + !
+
+	1 handletable@ ExiHandleTableHeader_FreeEntries + +=
+
+	if (locked@ ~~)
+		handletable@ ExHandleTableUnlock
+	end
+end
+
+fn ExHandleCreate { entryvalue handletable locked -- handle entryptr ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (DEBUGCHECKS)
+		if (entryvalue@ 1 &)
+			"ExHandleCreate: entryvalue&1=1\n" KeCrash
+		end
+	end
+
+	if (locked@ ~~)
+		// lock handle table rwlock exclusively
+
+		1 // alertable
+		handletable@ // handletable
+		ExHandleTableLock ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto logsize
+	handletable@ ExiHandleTableHeader_EntrySizeLog + @ 2 + logsize!
+
+	handletable@ ExiHandleTableHeader_FreeListHead + @ handle!
+
+	if (handle@ -1 ~=)
+		// yoink free entry
+
+		// FreeListHead is a handle number
+		handletable@ ExiHandleTableHeader_Table + @ handle@ logsize@ << + entryptr!
+
+		// reuse logsize here
+		entryptr@@ logsize!
+
+		if (logsize@ -1 ==)
+			-1 handletable@ ExiHandleTableHeader_FreeListHead + !
+		end else
+			logsize@ 1 >> handletable@ ExiHandleTableHeader_FreeListHead + !
+		end
+
+		entryvalue@ entryptr@!
+
+		if (locked@ ~~)
+			handletable@ ExHandleTableUnlock
+		end
+
+		return
+	end
+
+	auto quotablock
+	handletable@ ExiHandleTableHeader_QuotaBlock + @ quotablock!
+
+	auto entries
+	handletable@ ExiHandleTableHeader_Entries + @ entries!
+
+	auto tab
+	handletable@ ExiHandleTableHeader_Table + @ tab!
+
+	auto tabsize
+
+	// no free entry, create or grow the table
+
+	if (tab@ ~~)
+		// create
+
+		0 handle!
+
+		EXTENDBYENTRIES logsize@ << tabsize!
+
+		if (quotablock@)
+			tabsize@ MmChargeBytesGet // charge
+			quotablock@ // quotablock
+			MmQuotaBlockChargePaged ok!
+
+			if (ok@)
+				// insufficient quota
+
+				if (locked@ ~~)
+					handletable@ ExHandleTableUnlock
+				end
+
+				return
+			end
+		end
+
+		tabsize@ // bytes
+		'HnTd' // tag
+		PAGED // flags
+		MmAllocWithTag ok! tab!
+
+		if (ok@)
+			// allocation failed
+
+			if (quotablock@)
+				tabsize@ MmChargeBytesGet // charge
+				quotablock@ // quotablock
+				MmQuotaBlockUnchargePaged
+			end
+
+			if (locked@ ~~)
+				handletable@ ExHandleTableUnlock
+			end
+
+			return
+		end
+
+		if (logsize@ 2 >)
+			// There are extra per-handle fields, like maybe a sequence
+			// number, so initialize the table to zeroes.
+
+			tab@ // ptr
+			tabsize@ // sz
+			0 // word
+			memset
+		end
+
+		tab@ handletable@ ExiHandleTableHeader_Table + !
+
+		EXTENDBYENTRIES entries!
+	end else
+		// grow
+
+		entries@ handle!
+
+		EXTENDBYENTRIES entries +=
+
+		entries@ logsize@ << tabsize!
+
+		auto nquota
+		tabsize@ MmChargeBytesGet tab@ MmBlockChargeGet - nquota!
+
+		if (DEBUGCHECKS)
+			if (nquota@ z<)
+				"ExHandleCreate: nquota < 0\n" KeCrash
+			end
+		end
+
+		if (quotablock@)
+			if (nquota@)
+				nquota@ // charge
+				quotablock@ // quotablock
+				MmQuotaBlockChargePaged ok!
+
+				if (ok@)
+					// insufficient quota
+
+					if (locked@ ~~)
+						handletable@ ExHandleTableUnlock
+					end
+
+					return
+				end
+			end
+		end
+
+		auto newtab
+		tabsize@ // bytes
+		'HnTd' // tag
+		PAGED // flags
+		MmAllocWithTag ok! newtab!
+
+		if (ok@)
+			// allocation failed
+
+			if (quotablock@)
+				// undo the shenanigans we just did with the quota charge
+
+				if (nquota@)
+					nquota@ // charge
+					quotablock@ // quotablock
+					MmQuotaBlockUnchargePaged
+				end
+			end
+
+			if (locked@ ~~)
+				handletable@ ExHandleTableUnlock
+			end
+
+			return
+		end
+
+		// Copy the contents of the old table into the new one.
+
+		newtab@ // dest
+		tab@ // src
+		handle@ logsize@ << // sz
+		memcpy
+
+		if (logsize@ 2 >)
+			// There are extra per-handle fields, like maybe a sequence
+			// number, so initialize the new area of the table to zeroes.
+
+			newtab@ handle@ logsize@ << + // ptr
+			EXTENDBYENTRIES logsize@ << // sz
+			0 // word
+			memset
+		end
+
+		tab@ MmFree
+
+		newtab@ tab!
+
+		tab@ handletable@ ExiHandleTableHeader_Table + !
+	end
+
+	EXTENDBYENTRIES 1 - handletable@ ExiHandleTableHeader_FreeEntries + !
+
+	entries@ handletable@ ExiHandleTableHeader_Entries + !
+
+	auto entrysize
+	1 logsize@ << entrysize!
+
+	handle@ EXTENDBYENTRIES + logsize@ << tab@ + entryptr!
+
+	auto last
+	-1 last!
+
+	auto ihandle
+	handle@ EXTENDBYENTRIES + ihandle!
+
+	auto count
+	EXTENDBYENTRIES 1 - count!
+
+	// initialize the free list for the new region of handle table, and also
+	// zero out any extra fields.
+
+	while (count@)
+		entrysize@ entryptr -=
+		1 ihandle -=
+
+		last@ 1 << 1 | entryptr@!
+
+		if (logsize@)
+			entryptr@ 4 + // ptr
+			1 logsize@ << 4 - // sz
+			0 // word
+			memset
+		end
+
+		ihandle@ last!
+		1 count -=
+	end
+
+	last@ handletable@ ExiHandleTableHeader_FreeListHead + !
+
+	// return first free handle
+
+	handle@ logsize@ << tab@ + entryptr!
+	entryvalue@ entryptr@!
+
+	if (locked@ ~~)
+		handletable@ ExHandleTableUnlock
+	end
+end
+
+fn ExHandleLookup { handle handletable locked -- entryptr ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (locked@ ~~)
+		1 // alertable
+		handletable@ // handletable
+		ExHandleTableLockShared ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto logsize
+	handletable@ ExiHandleTableHeader_EntrySizeLog + @ 2 + logsize!
+
+	auto entries
+	handletable@ ExiHandleTableHeader_Entries + @ entries!
+
+	if (handle@ entries@ >=)
+		if (locked@ ~~)
+			handletable@ ExHandleTableUnlock
+		end
+
+		STATUS_INVALID_HANDLE ok!
+
+		return
+	end
+
+	auto tab
+	handletable@ ExiHandleTableHeader_Table + @ tab!
+
+	if (DEBUGCHECKS)
+		if (tab@ ~~)
+			"ExHandleLookup: table is null\n" KeCrash
+		end
+	end
+
+	tab@ handle@ logsize@ << + entryptr!
+
+	if (entryptr@@ 1 &)
+		STATUS_INVALID_HANDLE ok!
+	end
+
+	if (locked@ ~~)
+		handletable@ ExHandleTableUnlock
+	end
+end
+
+fn ExHandleTableLookupAndReferenceObject { handle handletable locked -- object ok }
+	fnsection "PAGE$text"
+
+	// used in certain specific cases. assumes that if the object exists in
+	// the handle table, that it hasn't been fully deleted yet, and that its
+	// deletion routine must lock the handle table to fully free it.
+
+	0 ok!
+
+	if (locked@ ~~)
+		1 // alertable
+		handletable@ // handletable
+		ExHandleTableLockShared ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto entryptr
+	handle@ // handle
+	handletable@ // handletable
+	1 // locked
+	ExHandleLookup ok! entryptr!
+
+	if (ok@)
+		if (locked@ ~~)
+			handletable@ ExHandleTableUnlock
+		end
+
+		return
+	end
+
+	entryptr@@ object!
+
+	object@ ObConditionallyReferenceObject ok!
+
+	if (locked@ ~~)
+		handletable@ ExHandleTableUnlock
+	end
+end
+
+fn ExHandleTableGetContext { handletable -- context }
+	fnsection "PAGE$text"
+
+	handletable@ ExiHandleTableHeader_Context + @ context!
+end

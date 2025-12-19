@@ -1,0 +1,337 @@
+//
+// Implements the kernel timer object and timer expiration DPC.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "KeInternal.h"
+
+table KiTimerTable[(TIMERTABLESIZE 2 *)]
+public KiTimerTable
+
+var KiTimeZoneOffset 0
+public KiTimeZoneOffset
+
+buffer KiTimerExpirationDPC KeDPC_SIZEOF
+public KiTimerExpirationDPC
+
+fn KeRealTimeToLocalTime { desttime srctime -- }
+	fnsection "PAGE$text"
+
+	srctime@ KeTime_MsPart + @ desttime@ KeTime_MsPart + !
+	srctime@ KeTime_SecPart + @ KiTimeZoneOffset@ + desttime@ KeTime_SecPart + !
+end
+
+fn KeLocalTimeToRealTime { desttime srctime -- }
+	fnsection "PAGE$text"
+
+	srctime@ KeTime_MsPart + @ desttime@ KeTime_MsPart + !
+	srctime@ KeTime_SecPart + @ KiTimeZoneOffset@ - desttime@ KeTime_SecPart + !
+end
+
+fn KeTimeSet { time -- ok }
+	fnsection "PAGE$text"
+
+	if (HALRTCIsLocalTime@)
+		time@ // desttime
+		time@ // srctime
+		KeRealTimeToLocalTime
+	end
+
+	time@ HALRTCSet ok!
+end
+
+fn KeTimeZoneSet { offset -- oldoffset }
+	fnsection "PAGE$text"
+
+	KiTimeZoneOffset@ oldoffset!
+	offset@ KiTimeZoneOffset!
+end
+
+fn KeTimeZoneGet { -- offset }
+	fnsection "PAGE$text"
+
+	KiTimeZoneOffset@ offset!
+end
+
+fn KeTimeQuery { time -- }
+	fnsection "PAGE$text"
+
+	time@ HALRTCQuery
+
+	if (HALRTCIsLocalTime@)
+		time@ // desttime
+		time@ // srctime
+		KeLocalTimeToRealTime
+	end
+end
+
+fn KeTimerInitialize { name dpc timer -- }
+	name@ DISPATCHOBJECT_TIMER timer@ KiDispatchInitialize
+
+	0 timer@ KeTimer_Next + !
+	0 timer@ KeTimer_Prev + !
+
+	0 timer@ KeTimer_Enqueued + !
+
+	dpc@ timer@ KeTimer_DPC + !
+end
+
+fn KeTimerDequeue { timer -- ok }
+	0 ok!
+
+	// this is a very speedy operation so just disable interrupts and avoid
+	// the overhead of raising IPL.
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (timer@ KeTimer_Enqueued + @ ~~)
+		rs@ HALCPUInterruptRestore
+
+		STATUS_NOT_ENQUEUED ok!
+
+		return
+	end
+
+	0 timer@ KeTimer_Enqueued + !
+
+	auto n
+	timer@ KeTimer_Next + @ n!
+
+	if (n@)
+		timer@ KeTimer_Prev + @ n@ KeTimer_Prev + !
+	end
+
+	auto p
+	timer@ KeTimer_Prev + @ p!
+
+	if (p@)
+		timer@ KeTimer_Next + @ p@ KeTimer_Next + !
+	end else // no prev means we were the head
+		auto lh
+		[timer@ KeTimer_ExpiryTicks + @ TIMERTABLESIZE 1 - & 1 <<]KiTimerTable lh!
+
+		timer@ KeTimer_Next + @ p!
+
+		p@ lh@!
+
+		if (p@)
+			p@ KeTimer_ExpiryTicks + @ lh@ 4 + !
+		end else
+			-1 lh@ 4 + !
+		end
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeTimerEnqueue { context1 context2 interval timer -- ok }
+	if (DEBUGCHECKS)
+		if (interval@ 0 ==)
+			"KeTimerEnqueue: attempt to queue a timer with 0ms interval\n" KeCrash
+		end
+	end
+
+	// calculate the tick count at which this timer will expire.
+	// this is rounded up to the next interval.
+
+	auto expiryticks
+	interval@ HALRTCInterval@ 1 - + HALRTCInterval@ / KiClockTicks@ + expiryticks!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (timer@ KeTimer_Enqueued + @)
+		ipl@ KeIPLLower
+
+		STATUS_ALREADY_ENQUEUED ok!
+
+		return
+	end
+
+	expiryticks@ timer@ KeTimer_ExpiryTicks + !
+
+	1 timer@ KeTimer_Enqueued + !
+
+	0 timer@ KeTimer_Next + !
+	0 timer@ KeTimer_Prev + !
+
+	auto lh
+	[expiryticks@ TIMERTABLESIZE 1 - & 1 <<]KiTimerTable lh!
+
+	auto t
+	lh@@ t!
+
+	if (t@ ~~)
+		timer@ lh@!
+		expiryticks@ lh@ 4 + !
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	auto p
+	0 p!
+
+	while (t@)
+		if (t@ KeTimer_ExpiryTicks + @ expiryticks@ >)
+			// this timer expires later than we do, therefore we will insert
+			// ourselves before it on the list
+			
+			if (p@)
+				timer@ p@ KeTimer_Next + !
+			end else
+				timer@ lh@!
+				expiryticks@ lh@ 4 + !
+			end
+
+			p@ timer@ KeTimer_Prev + !
+
+			t@ timer@ KeTimer_Next + !
+			timer@ t@ KeTimer_Prev + !
+
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		t@ p!
+		t@ KeTimer_Next + @ t!
+	end
+
+	// there were no timers on the list that expired later than us, so we go
+	// at the tail
+
+	p@ timer@ KeTimer_Prev + !
+	timer@ p@ KeTimer_Next + !
+
+	ipl@ KeIPLLower
+end
+
+fn KeTimerReset { timer -- signaled }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	timer@ KeDispatchHeader_Signaled + @ signaled!
+	0 timer@ KeDispatchHeader_Signaled + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn (KeDPCFunction) KiTimerExpiration { context1 context2 dpc -- }
+	auto ticksatexpiry
+	KiClockTicks@ ticksatexpiry!
+
+	auto dpclisthead
+	0 dpclisthead!
+
+	auto diff
+	ticksatexpiry@ context1@ - 1 + diff!
+
+	if (diff@ TIMERTABLESIZE >)
+		TIMERTABLESIZE diff!
+	end
+
+	// scan the entries in the timer table between the earliest expiration
+	// tick and now. process any timer in the entry queue which has expired.
+
+	auto i
+	context1@ TIMERTABLESIZE 1 - & i!
+
+	while (diff@)
+		auto lh
+		[i@ TIMERTABLESIZE 1 - & 1 <<]KiTimerTable lh!
+
+		if (lh@ 4 + @ ticksatexpiry@ <=)
+			auto timer
+			lh@@ timer!
+
+			while (1)
+				if (DEBUGCHECKS)
+					if (timer@ KeTimer_Enqueued + @ ~~)
+						timer@ KeTimer_DispatchHeader + KeDispatchHeader_Name + @
+						"KiTimerExpiration: timer '%s' not enqueued\n" KeCrash
+					end
+				end
+
+				0 timer@ KeTimer_Enqueued + !
+
+				STATUS_WAIT_TIMEOUT // waitstatus
+				0 // priboost
+				timer@ // object
+				KiDispatchSatisfyAll
+
+				if (timer@ KeTimer_DPC + @)
+					dpclisthead@ timer@ KeTimer_DPC + @ KeDPC_Next + !
+					timer@ KeTimer_DPC + @ dpclisthead!
+				end
+
+				timer@ KeTimer_Next + @ timer!
+
+				if (timer@ ~~)
+					break
+				end
+
+				timer@ KeTimer_ExpiryTicks + @ context1!
+
+				if (context1@ ticksatexpiry@ >)
+					break
+				end
+			end
+
+			timer@ lh@!
+
+			if (timer@)
+				0 timer@ KeTimer_Prev + !
+				timer@ KeTimer_ExpiryTicks + @ lh@ 4 + !
+			end else
+				-1 lh@ 4 + !
+			end
+		end
+
+		1 diff -=
+		1 i +=
+	end
+
+	// do all of the accumulated timer DPC routines.
+
+	while (dpclisthead@)
+		// not actually a timer, just reusing the variable.
+
+		dpclisthead@ timer!
+		dpclisthead@ KeDPC_Next + @ dpclisthead!
+
+		timer@ KeDPC_Context1 + @ // context1
+		timer@ KeDPC_Context2 + @ // context2
+		timer@ // dpc
+		timer@ KeDPC_Function + @ KeDPCFunction
+	end
+end
+
+fn KiTimerInit { -- }
+	fnsection "INIT$text"
+
+	auto i
+	0 i!
+
+	while (i@ TIMERTABLESIZE <)
+		-1 [i@ 1 << 1 +]KiTimerTable!
+
+		1 i +=
+	end
+
+	pointerof KiTimerExpiration // function
+	KiTimerExpirationDPC // dpc
+	KeDPCInitialize
+end

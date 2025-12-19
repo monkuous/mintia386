@@ -1,0 +1,31 @@
+plugins {
+    id 'java'
+}
+
+group = 'dev.monkuous'
+version = '0.0'
+
+sourceSets {
+    elfconvert {
+    }
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'Main'
+    }
+}
+
+tasks.register('elfconvertJar', Jar) {
+    from sourceSets.elfconvert.output
+    group = 'build'
+    archiveClassifier = 'elfconvert'
+
+    manifest {
+        attributes 'Main-Class': 'object.ElfConvert'
+    }
+}
+
+build {
+    dependsOn elfconvertJar
+}

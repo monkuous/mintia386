@@ -1,0 +1,569 @@
+//
+// Implements page table entry (PTE) management for the xr17032 architecture.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "../MmInternal.h"
+
+extern HALXr17032TLBFlush { vpn asid -- }
+extern HALXr17032TLBFill { pte vpn asid -- }
+
+fn MiPTECreate { vaddr -- pteaddr ok }
+	// create an empty PTE for the vaddr in the current process.
+	// if the page table exists, it is referenced. otherwise it is created and
+	// initialized with a refcount of 1.
+	// assumes VAD list mutex is held.
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	0 ok!
+
+	auto process
+	KeProcessCurrent process!
+
+	auto pagemap
+	process@ KeProcess_PageDirectory + @ 5 >> 12 << pagemap!
+
+	auto ptecount
+	auto pfdbe
+	auto ptr
+
+	auto pdeaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pdeaddr!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto pde
+	pdeaddr@@ pde!
+
+	if (pde@ ~~)
+		// need to allocate this page table.
+
+		ipl@ KeIPLLower
+
+		0 // pri
+		vaddr@ // vaddr
+		process@ // process
+		MiProcessPTECountGet ok! ptecount!
+
+		if (ok@)
+			return
+		end
+
+		// private page prototype PTEs are physical addresses.
+
+		pagemap@ vaddr@ 22 >> 2 << + // pte
+		ZEROMUST // priority
+		MiAnonymousPageAlloc pfdbe!
+
+		1 ptecount@ si
+		ptecount@ pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + !
+		0 pfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE |
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + sb
+
+		// create a transition PTE so we can fault this new page table in.
+
+		pfdbe@ MmPFDBEToPhysicalAddress PTE_TRANSITION | pdeaddr@!
+
+		pagemap@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ +
+		MmEvictablePageReference drop
+
+		// put the PTE in the process's working set by probing it.
+
+		auto probe
+		pteaddr@@ probe!
+
+		if (DEBUGCHECKS)
+			if (pteaddr@ MmVirtualAddressIsValid ~~)
+				probe@ pteaddr@ "MiPTECreate: invalid pteaddr %x %x\n" KeCrash
+			end
+
+			if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi 2 ~=)
+				pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi "MiPTECreate: wrong refcount %d\n" KeCrash
+			end
+		end
+	end else
+		if (DEBUGCHECKS)
+			if (pde@ PTE_V & ~~)
+				"MiPTECreate: PDE not valid\n" KeCrash
+			end
+		end
+
+		pde@ 5 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+		if (DEBUGCHECKS)
+			if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi ~~)
+				"MiPTECreate: page table had no references\n" KeCrash
+			end
+		end
+
+		pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ gi 1 +
+		pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ si
+
+		pfdbe@ MmEvictablePageReference drop
+
+		ipl@ KeIPLLower
+	end
+
+	if (pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED & ~~)
+		pfdbe@ // pfdbe
+		0 // process
+		MmEvictablePageModify
+	end
+end
+
+fn MiPTEDelete { deref pteaddr -- }
+	// delete a PTE and dereference the page table.
+	// free the page table if its PTE count hits 0.
+	// assume the page table is pinned.
+
+	auto vaddr
+	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
+
+	auto ptpfdbe
+	pteaddr@ MmVirtualToPFDBE ptpfdbe!
+
+	auto ptecount
+	ptpfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ ptecount!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto oldcount
+	ptecount@ gi oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ ~~)
+			"MiPTEDelete: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - ptecount@ si
+
+	if (oldcount@ 1 ==)
+		// last PTE. free the page table.
+
+		if (ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + @ ~~)
+			auto pagemap
+			ptpfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + @ pagemap!
+
+			auto pdpfdbe
+			pagemap@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pdpfdbe!
+
+			// force the page table out from the process working set.
+
+			vaddr@ 22 >> PAGESHIFT << PAGETABLE + // vaddr
+			ptpfdbe@ // pfdbe
+			MiWorkingSetEntryForceOut
+
+			// it's okay to delete here without a biased refcount because we
+			// already assume the caller has the page table pinned at least
+			// once, so the delete flag will get checked when it unpins it.
+
+			ptpfdbe@ MiAnonymousPageDelete
+
+			ipl@ KeIPLLower
+
+			pdpfdbe@ MmEvictablePageDereference drop
+		end else
+			ipl@ KeIPLLower
+		end
+	end else
+		ipl@ KeIPLLower
+	end
+
+	if (deref@)
+		ptpfdbe@ MmEvictablePageDereference drop
+	end
+end
+
+fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
+	// pin the page table containing the PTE for the given virtual address,
+	// and return the PTE address.
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	if (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+		pteaddr@ MmVirtualToPFDBE ptpfdbe!
+
+		return
+	end
+
+	auto ptecount
+	auto pfdbe
+	auto ptr
+
+	auto pdeaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pdeaddr!
+
+	while (1)
+		// loop until the page table is valid.
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		auto pde
+		pdeaddr@@ pde!
+
+		if (pde@ ~~)
+			// no such page table.
+
+			ipl@ KeIPLLower
+
+			0 ptpfdbe!
+
+			return
+		end elseif (pde@ PTE_V &)
+			// the page table is valid. pin it and return it.
+
+			pde@ 5 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + ptpfdbe!
+
+			ptpfdbe@ MmEvictablePageReference drop
+			1 ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + +=
+
+			ipl@ KeIPLLower
+
+			return
+		end else
+			ipl@ KeIPLLower
+
+			// the page table is invalid. touch it to cause it to be demand-
+			// -paged in.
+
+			auto probe
+			pteaddr@@ probe!
+		end
+	end
+end
+
+fn MiPTEUnpin { vaddr ptpfdbe -- }
+	if (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+		return
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto oldcount
+	ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ ~~)
+			"MiPTEUnpin: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+
+	if (oldcount@ 1 ==)
+		auto ptecount
+		ptpfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ ptecount!
+
+		if (ptecount@ gi ~~)
+			// perform deferred deletion of page table
+
+			auto pagemap
+			ptpfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + @ pagemap!
+
+			auto pdpfdbe
+			pagemap@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pdpfdbe!
+
+			// force the page table out from the process working set.
+
+			vaddr@ 22 >> PAGESHIFT << PAGETABLE + // vaddr
+			ptpfdbe@ // pfdbe
+			MiWorkingSetEntryForceOut
+
+			ptpfdbe@ MiAnonymousPageDelete
+
+			pdpfdbe@ MmEvictablePageDereference drop
+		end
+	end
+
+	ipl@ KeIPLLower
+
+	ptpfdbe@ MmEvictablePageDereference drop
+end
+
+fn MmVirtualToPhysical { vaddr -- phyaddr }
+	auto pte
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + @ pte!
+
+	if (DEBUGCHECKS)
+		if (pte@ PTE_V & ~~)
+			"MmVirtualToPhysical: invalid PTE\n" KeCrash
+		end
+	end
+
+	pte@ 5 >> PAGESHIFT << phyaddr!
+
+	vaddr@ PAGEOFFSETMASK & phyaddr +=
+end
+
+fn MmVirtualToPFDBE { vaddr -- pfdbe }
+	auto pte
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + @ pte!
+
+	if (DEBUGCHECKS)
+		if (pte@ PTE_V & ~~)
+			"MmVirtualToPFDBE: invalid PTE\n" KeCrash
+		end
+	end
+
+	pte@ 5 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+end
+
+fn MmVirtualtoPTEAddressWithFail { vaddr -- pteaddr ok }
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pteaddr!
+
+	if (pteaddr@@ PTE_V & ~~)
+		-1 ok!
+		return
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	0 ok!
+end
+
+fn MmVirtualtoPTEAddressUser { vaddr -- pteaddr }
+	if (DEBUGCHECKS)
+		if (vaddr@ MMHIGHESTUSERADDRESS >)
+			vaddr@ "MmVirtualtoPTEAddressUser: used on system address 0x%08x\n" KeCrash
+		end
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+end
+
+fn MmVirtualtoPTEAddress { vaddr -- pteaddr }
+	// get the address of a PTE based on a vaddr.
+
+	if (DEBUGCHECKS)
+		if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+			vaddr@ "MmVirtualtoPTEAddress: used on user address 0x%08x\n" KeCrash
+		end
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+end
+
+fn MmVirtualAddressIsValid { vaddr -- isvalid }
+	auto pteaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pteaddr!
+
+	if (pteaddr@@ PTE_V & ~~)
+		0 isvalid!
+
+		return
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	pteaddr@@ PTE_V & isvalid!
+end
+
+fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
+	// interpret arch-specific PTE contents into physical address and generic
+	// flags. returns -1 if the PTE is not valid.
+
+	0 ok!
+
+	auto pte
+	pteaddr@@ pte!
+
+	if (pte@ PTE_V & ~~)
+		0 flags!
+		-1 ok!
+		return
+	end
+
+	// xr17032 PTEs JUST SO HAPPEN to line up with the generic PTE flags, so
+	// just mask those off and return them directly.
+	pte@ 31 & flags!
+	pte@ 5 >> PAGESHIFT << phyaddr!
+end
+
+fn MiPTEUpdateByVirtual { phyaddr flags vaddr -- oldphyaddr oldflags }
+	auto pteaddr
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	phyaddr@ // phyaddr
+	flags@ // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate oldflags! oldphyaddr!
+end
+
+fn MiPTEIsZero { pte -- iszero }
+	if (pte@ ~~)
+		1 iszero!
+	end elseif (pte@ PTE_KERNEL_ZERO ==)
+		1 iszero!
+	end else
+		0 iszero!
+	end
+end
+
+fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
+	// update a PTE based on a physical address and generic flags. this could
+	// do a number of things:
+
+	auto pte
+	pteaddr@@ pte!
+
+	pte@ 31 & oldflags!
+	pte@ 5 >> PAGESHIFT << oldphyaddr!
+
+	if (pteaddr@ PAGETABLE < pteaddr@ PAGETABLETOP >= ||)
+		phyaddr@ PAGESHIFT >> 5 << flags@ 31 & | pteaddr@!
+		return
+	end
+
+	auto vaddr
+	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
+
+	auto process
+	KeProcessCurrent process!
+
+	auto asid
+
+	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+		// this is a user page.
+		process@ KeProcess_ASID + @ asid!
+	end else
+		// this is a system page.
+		if (flags@ PTE_V &)
+			PTE_K flags |=
+		end
+
+		if (vaddr@ PAGETABLE <)
+			// this is below the user page tables.
+			0 asid!
+		end elseif (vaddr@ SYSPAGETABLE <)
+			// this is part of the user page tables.
+			process@ KeProcess_ASID + @ asid!
+		end elseif (vaddr@ PAGEDIRECTORY <)
+			// this is part of the system page tables.
+			0 asid!
+		end elseif (vaddr@ PDETOP <)
+			// this is part of the page directory.
+			process@ KeProcess_ASID + @ asid!
+		end else
+			// this is above the page directory.
+			0 asid!
+		end
+	end
+
+	if (asid@ ~~)
+		PTE_G flags |=
+	end
+
+	phyaddr@ PAGESHIFT >> 5 << flags@ 31 & | pte!
+
+	pte@ pteaddr@!
+
+	pte@ // pte
+	vaddr@ PAGESHIFT >> // vpn
+	asid@ // asid
+	HALXr17032TLBFill
+end
+
+fn MiPTESet { pte pteaddr -- }
+	if (pteaddr@ PAGETABLE < pteaddr@ PAGETABLETOP >= ||)
+		pte@ pteaddr@!
+		return
+	end
+
+	auto vaddr
+	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
+
+	auto process
+	KeProcessCurrent process!
+
+	auto asid
+
+	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+		// this is a user page.
+		process@ KeProcess_ASID + @ asid!
+	end else
+		// this is a system page.
+		if (pte@ PTE_V &)
+			PTE_K pte |=
+		end
+
+		if (vaddr@ PAGETABLE <)
+			// this is below the user page tables.
+			0 asid!
+		end elseif (vaddr@ SYSPAGETABLE <)
+			// this is part of the user page tables.
+			process@ KeProcess_ASID + @ asid!
+		end elseif (vaddr@ PAGEDIRECTORY <)
+			// this is part of the system page tables.
+			0 asid!
+		end elseif (vaddr@ PDETOP <)
+			// this is part of the page directory.
+			process@ KeProcess_ASID + @ asid!
+		end else
+			// this is above the page directory.
+			0 asid!
+		end
+	end
+
+	if (asid@ ~~)
+		PTE_G pte |=
+	end
+
+	pte@ pteaddr@!
+
+	pte@ // pte
+	vaddr@ PAGESHIFT >> // vpn
+	asid@ // asid
+	HALXr17032TLBFill
+end
+
+fn MiPTEInitializePageTable { vaddr pfdbe process -- }
+	auto ptecount
+
+	auto ok
+
+	0 // pri
+	vaddr@ PAGETABLE - PAGESHIFT >> 22 << // vaddr
+	process@ // process
+	MiProcessPTECountGet ok! ptecount!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			"MiPTEInitializePageTable\n" KeCrash
+		end
+	end
+
+	ptecount@ pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + !
+	0 pfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+end
+
+fn MiPTESetDirty { pteaddr -- }
+	pteaddr@@ PTE_D | // pte
+	pteaddr@ // pteaddr
+	MiPTESet
+end

@@ -1,0 +1,882 @@
+//
+// Implements the modified page writer thread which is responsible for
+// cleaning dirty file and anonymous pages to disk.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Transfer.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+struct IOAnonTransferTable
+	KeEvent_SIZEOF Event
+	(IOPAGEFILEMAXPRI 4 *) FreeListHeads
+endstruct
+
+struct IOFileTransferTable
+	KeEvent_SIZEOF Event
+	4 FreeListHead
+	(IOTransfer_SIZEOF MPWFILETRANSFERS *) Transfers
+endstruct
+
+buffer MiFilePageWriterEvent KeEvent_SIZEOF
+
+var MmAnonTransfersAvailable 0 // counts both on the freelist and in-flight
+public MmAnonTransfersAvailable
+
+var MmLowSpaceTransferListHead 0
+public MmLowSpaceTransferListHead
+
+var MmFPWTransferListHead 0
+
+buffer MmMPWFileTransfers IOFileTransferTable_SIZEOF
+buffer MmMPWAnonTransfers IOAnonTransferTable_SIZEOF
+
+fn IOTransferComplete { transfer -- }
+	// complete a transfer by putting it on the free list and signaling its
+	// event.
+
+	auto rs
+
+	if (transfer@ IOTransfer_PageFile + @)
+		// anon transfer, place on priority list
+
+		auto pri
+
+		if (transfer@ IOTransfer_PageFile + @ IOPageFileGetFree IOPAGEFILEFREELOW <)
+			// place on low space list
+
+			HALCPUInterruptDisable rs!
+
+			IOTRANSFER_INACTIVE transfer@ IOTransfer_State + !
+
+			1 MmAnonTransfersAvailable -=
+
+			auto h
+			MmLowSpaceTransferListHead@ h!
+
+			0 transfer@ IOTransfer_Prev + !
+			h@ transfer@ IOTransfer_Next + !
+
+			if (h@)
+				transfer@ h@ IOTransfer_Prev + !
+			end
+
+			transfer@ MmLowSpaceTransferListHead!
+
+			rs@ HALCPUInterruptRestore
+
+			if (MmAnonTransfersAvailable@)
+				return
+			end
+
+			// there aren't any more transfers so try to grab off the list
+			// each transfer whose pagefile has at least one page free.
+
+			auto acquired
+			0 acquired!
+
+			auto ipl
+			IPLDPC KeIPLRaise ipl!
+
+			MmLowSpaceTransferListHead@ transfer!
+
+			while (transfer@)
+				auto n
+				transfer@ IOTransfer_Next + @ n!
+
+				if (transfer@ IOTransfer_PageFile + @ IOPageFileGetFree)
+					// found one
+
+					IOTRANSFER_ACTIVE transfer@ IOTransfer_State + !
+
+					1 acquired +=
+					1 MmAnonTransfersAvailable +=
+
+					// remove from low space list
+
+					if (n@)
+						transfer@ IOTransfer_Prev + @ n@ IOTransfer_Prev + !
+					end
+
+					transfer@ IOTransfer_Prev + @ h!
+
+					if (h@)
+						transfer@ IOTransfer_Next + @ h@ IOTransfer_Next + !
+					end else // no prev means we were the head
+						transfer@ IOTransfer_Next + @ MmLowSpaceTransferListHead!
+					end
+
+					// insert in priority list
+
+					transfer@ IOTransfer_PageFile + @ IOPageFileGetPriority pri!
+
+					MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + @ transfer@ IOTransfer_Next + !
+					transfer@ MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + !
+				end
+
+				n@ transfer!
+			end
+
+			ipl@ KeIPLLower
+
+			if (acquired@)
+				// we got at least one so signal the event.
+
+				0 // priboost
+				MmMPWAnonTransfers IOAnonTransferTable_Event + // event
+				KeEventSignal
+			end
+
+			return
+		end
+
+		transfer@ IOTransfer_PageFile + @ IOPageFileGetPriority pri!
+
+		HALCPUInterruptDisable rs!
+
+		MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + @ transfer@ IOTransfer_Next + !
+		transfer@ MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + !
+
+		rs@ HALCPUInterruptRestore
+
+		0 // priboost
+		MmMPWAnonTransfers IOAnonTransferTable_Event + // event
+		KeEventSignal
+	end else
+		// file transfer, place on free list
+
+		HALCPUInterruptDisable rs!
+		MmMPWFileTransfers IOFileTransferTable_FreeListHead + @ transfer@ IOTransfer_Next + !
+		transfer@ MmMPWFileTransfers IOFileTransferTable_FreeListHead + !
+		rs@ HALCPUInterruptRestore
+
+		0 // priboost
+		MmMPWFileTransfers IOFileTransferTable_Event + // event
+		KeEventSignal
+	end
+end
+
+fn MmMPWAnonTransferInitialize { pagefile transfer -- }
+	pagefile@ transfer@ IOTransfer_PageFile + !
+	0 transfer@ IOTransfer_Prev + !
+	0 transfer@ IOTransfer_Next + !
+	IOTRANSFER_ACTIVE transfer@ IOTransfer_State + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	1 MmAnonTransfersAvailable +=
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn MiMPWGetAnonTransfer { wait ipl -- transfer }
+	auto h
+	MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + h!
+
+	auto p
+	0 p!
+
+	0 transfer!
+
+	while (p@ IOPAGEFILEMAXPRI <)
+		if (h@@)
+			h@@ transfer!
+			transfer@ IOTransfer_Next + @ h@!
+			return
+		end
+
+		1 p +=
+		4 h +=
+	end
+
+	if (wait@)
+		ipl@ KeIPLLower
+
+		KERNELMODE // waitmode
+		0 // alertable
+		100 // timeout
+		MmMPWAnonTransfers IOAnonTransferTable_Event + // object
+		KeThreadWaitForObject drop
+	end
+end
+
+fn MiMPWGetFileTransfer { wait ipl -- transfer }
+	MmMPWFileTransfers IOFileTransferTable_FreeListHead + @ transfer!
+
+	if (transfer@)
+		transfer@ IOTransfer_Next + @ MmMPWFileTransfers IOFileTransferTable_FreeListHead + !
+		return
+	end
+
+	if (wait@)
+		ipl@ KeIPLLower
+
+		KERNELMODE // waitmode
+		0 // alertable
+		100 // timeout
+		MmMPWFileTransfers IOFileTransferTable_Event + // object
+		KeThreadWaitForObject drop
+	end
+end
+
+fn MmMPWAssessTransfers { transfersize transfer1 -- }
+	// assess a pagefile's transfer structures and see if they should be moved
+	// to the priority queue.
+
+	auto pagefile
+	transfer1@ IOTransfer_PageFile + @ pagefile!
+
+	auto free
+	pagefile@ IOPageFileGetFree free!
+
+	if (free@ ~~)
+		return
+	end
+
+	auto move
+	0 move!
+
+	if (MmAnonTransfersAvailable@ ~~)
+		1 move!
+	end elseif (free@ IOPAGEFILEFREELOW >=)
+		1 move!
+	end
+
+	if (move@ ~~)
+		return
+	end
+
+	auto pri
+	pagefile@ IOPageFileGetPriority pri!
+
+	auto count
+	2 count!
+
+	while (count@)
+		if (transfer1@ IOTransfer_State + @ IOTRANSFER_INACTIVE ==)
+			IOTRANSFER_ACTIVE transfer1@ IOTransfer_State + !
+
+			1 MmAnonTransfersAvailable +=
+
+			// remove from low space list
+
+			auto n
+			transfer1@ IOTransfer_Next + @ n!
+
+			if (n@)
+				transfer1@ IOTransfer_Prev + @ n@ IOTransfer_Prev + !
+			end
+
+			auto p
+			transfer1@ IOTransfer_Prev + @ p!
+
+			if (p@)
+				transfer1@ IOTransfer_Next + @ p@ IOTransfer_Next + !
+			end else // no prev means we were the head
+				transfer1@ IOTransfer_Next + @ MmLowSpaceTransferListHead!
+			end
+
+			// insert in priority queue
+
+			transfer1@ IOTransfer_PageFile + @ IOPageFileGetPriority pri!
+
+			MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + @ transfer1@ IOTransfer_Next + !
+			transfer1@ MmMPWAnonTransfers IOAnonTransferTable_FreeListHeads + pri@ 2 << + !
+		end
+
+		transfersize@ transfer1 +=
+		1 count -=
+	end
+end
+
+fn MiModifiedPageWriter { context1 context2 -- }
+	PRIORITY_LOWREALTIME 1 + // priority
+	KeThreadCurrent@ // thread
+	KeThreadPrioritySet
+
+	1 KeThreadCurrent@ PsThread_MemoryPrivilegedCount + !
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"MiFilePageWriterEvent" // name
+	MiFilePageWriterEvent // event
+	KeEventInitialize
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"IOAnonTransferAvailableEvent" // name
+	MmMPWAnonTransfers IOAnonTransferTable_Event + // event
+	KeEventInitialize
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"IOFileTransferAvailableEvent" // name
+	MmMPWFileTransfers IOFileTransferTable_Event + // event
+	KeEventInitialize
+
+	auto i
+	0 i!
+
+	auto transfer
+	MmMPWFileTransfers IOFileTransferTable_Transfers + transfer!
+
+	while (i@ MPWFILETRANSFERS <)
+		0 transfer@ IOTransfer_PageFile + !
+
+		MmMPWFileTransfers IOFileTransferTable_FreeListHead + @ transfer@ IOTransfer_Next + !
+		transfer@ MmMPWFileTransfers IOFileTransferTable_FreeListHead + !
+
+		IOTRANSFER_ACTIVE transfer@ IOTransfer_State + !
+
+		IOTransfer_SIZEOF transfer +=
+		1 i +=
+	end
+
+	0 transfer!
+
+	auto ok
+	0 // context1
+	0 // context2
+	pointerof MiFilePageWriter // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"FilePageWriter" // name
+	PsSystemProcess@ // processobject
+	PsThreadCreateObject ok! drop
+
+	if (ok@)
+		ok@ "MiModifiedPageWriter: couldn't create 'FilePageWriter' thread (%i)\n" KeCrash
+	end
+
+	// the page writer thread. writes out modified pages and slaps them on the
+	// evictable list. does this when memory is low or there are too many
+	// modified pages.
+
+	while (1)
+		auto waitok
+
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		MmModifiedPageEvent // object
+		KeThreadWaitForObject waitok!
+
+		if (DEBUGCHECKS)
+			if (waitok@ z<)
+				if (waitok@ STATUS_WAIT_TIMEOUT ~=)
+					waitok@ "MiModifiedPageWriter: failed to wait on low memory event (%i)\n" KeCrash
+				end
+			end
+		end
+
+		while (MmModifiedPageCount@)
+			auto ipl
+			IPLDPC KeIPLRaise ipl!
+
+			auto pfdbe
+			MiModifiedPageListHead@ pfdbe!
+
+			if (pfdbe@ ~~)
+				// no modified pages to write.
+
+				ipl@ KeIPLLower
+
+				break
+			end
+
+			// if this is an anonymous page, try to get an anon transfer.
+			// if there are none, seek to the next file page, and try to get
+			// a file transfer. if there are none, wait for an anon transfer
+			// to become available and then loop.
+			// if its a file page, do the opposite of the above.
+			//
+			// in this way, we try to make page-out as efficient as possible
+			// by saturating output with one or the other type.
+
+			if (pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb MMEVICTTYPE_ANON ==)
+				0 // wait
+				ipl@ // ipl
+				MiMPWGetAnonTransfer transfer!
+
+				if (transfer@ ~~)
+					if (MmModifiedFilePageCount@) // there must be a file page to find
+						0 // wait
+						ipl@ // ipl
+						MiMPWGetFileTransfer transfer!
+
+						if (transfer@)
+							while (pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb MMEVICTTYPE_FILE ~=)
+								pfdbe@ MiPageFrameEntryEvictable_Next + @ pfdbe!
+							end
+						end
+					end
+				end
+			end else
+				0 // wait
+				ipl@ // ipl
+				MiMPWGetFileTransfer transfer!
+
+				if (transfer@ ~~)
+					if (MmModifiedPageCount@ MmModifiedFilePageCount@ -) // there must be an anon page to find
+						0 // wait
+						ipl@ // ipl
+						MiMPWGetAnonTransfer transfer!
+
+						if (transfer@)
+							while (pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb MMEVICTTYPE_ANON ~=)
+								pfdbe@ MiPageFrameEntryEvictable_Next + @ pfdbe!
+							end
+						end
+					end
+				end
+			end
+
+			if (pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb MMEVICTTYPE_ANON ==)
+				if (transfer@ ~~)
+					1 // wait
+					ipl@ // ipl
+					MiMPWGetAnonTransfer transfer!
+
+					if (transfer@ ~~)
+						// no transfer, meaning it dropped IPL and waited.
+						// redo the loop.
+
+						continue
+					end
+				end
+
+				transfer@ // transfer
+				pfdbe@ // pfdbe
+				MiMPWClusterAnonymousPages
+			end else
+				if (transfer@ ~~)
+					1 // wait
+					ipl@ // ipl
+					MiMPWGetFileTransfer transfer!
+
+					if (transfer@ ~~)
+						// no transfer, meaning it dropped IPL and waited.
+						// redo the loop.
+
+						continue
+					end
+				end
+
+				transfer@ // transfer
+				pfdbe@ // pfdbe
+				MiMPWClusterFilePages
+			end
+
+			ipl@ KeIPLLower
+		end
+	end
+end
+
+fn MiMPWClusterAnonymousPages { transfer pfdbe -- }
+	// try to allocate a contiguous cluster from the pagefile.
+
+	auto clustermax
+	IOCLUSTERMAX PAGESHIFT >> clustermax!
+
+	auto extend
+	0 extend!
+
+	auto offset
+
+	auto ok
+
+	while (clustermax@)
+		clustermax@ // pagesneeded
+		transfer@ IOTransfer_PageFile + @ // pagefile
+		IOPageFileReserve ok! offset!
+
+		if (ok@ ~~)
+			break
+		end
+
+		1 extend +=
+
+		1 clustermax >>=
+	end
+
+	if (clustermax@ ~~)
+		// there are no pages free in the pagefile so put this transfer on the
+		// bad boy list and return.
+
+		transfer@ IOTransferComplete
+
+		0 // fragmented
+		IOPageFileFullOrFragmented
+
+		return
+	end
+
+	auto pagecount
+	0 pagecount!
+
+	auto mdlpos
+	transfer@ MmMDLHeader_SIZEOF + mdlpos!
+
+	while (pagecount@ clustermax@ <)
+		// capture next link before referencing the page since this will
+		// destroy the list links.
+
+		auto n
+		pfdbe@ MiPageFrameEntryEvictable_Next + @ n!
+		pfdbe@ MmEvictablePageReference drop
+
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED ~ &
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + sb
+
+		// store current pfdbe in transfer MDL
+
+		pfdbe@ mdlpos@!
+		4 mdlpos +=
+		-1 mdlpos@!
+
+		1 pagecount +=
+
+		if (MmModifiedPageCount@ MmModifiedFilePageCount@ - ~~)
+			// no more modified anonymous pages to cluster.
+
+			break
+		end
+
+		// seek to next one
+
+		n@ pfdbe!
+
+		while (pfdbe@)
+			if (pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb MMEVICTTYPE_ANON ==)
+				break
+			end
+
+			pfdbe@ MiPageFrameEntryEvictable_Next + @ pfdbe!
+		end
+
+		if (pfdbe@ ~~)
+			break
+		end
+	end
+
+	// free excess space if we didn't use the entire cluster
+
+	if (clustermax@ pagecount@ ~=)
+		clustermax@ pagecount@ - // pages
+		offset@ pagecount@ + // offset
+		transfer@ IOTransfer_PageFile + @ // pagefile
+		IOPageFileRelease
+	end
+
+	// dispatch write to pagefile
+
+	IPLLOW KeIPLLower
+
+	pagecount@ // pagecount
+	offset@ // offset
+	transfer@ // mdl
+	IOPageFileWriteMDL drop
+
+	IPLDPC KeIPLRaise drop
+
+	if (extend@)
+		1 // fragmented
+		IOPageFileFullOrFragmented
+	end
+end
+
+fn MiMPWClusterFilePages { transfer pfdbe -- }
+	// ask page cache to cluster file pages into this MDL.
+	// it will not perform the write because we specify a transfer mdl.
+
+	transfer@ // transfer
+	IOKFLAG_SWAPOUT // kflags
+	pfdbe@ // pfdbe
+	IOCachePageWrite drop
+
+	// enqueue the transfer to the file page writer thread.
+
+	MmFPWTransferListHead@ transfer@ IOTransfer_Next + !
+	transfer@ MmFPWTransferListHead!
+
+	// signal the file page writer.
+
+	0 // priboost
+	MiFilePageWriterEvent // event
+	KeEventSignal
+end
+
+fn MiFilePageWriter { context1 context2 -- }
+	PRIORITY_LOWREALTIME 1 + // priority
+	KeThreadCurrent@ // thread
+	KeThreadPrioritySet
+
+	1 KeThreadCurrent@ PsThread_MemoryPrivilegedCount + !
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	while (1)
+		auto ok
+		auto waitok
+
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		MiFilePageWriterEvent // object
+		KeThreadWaitForObject waitok!
+
+		if (DEBUGCHECKS)
+			if (waitok@ z<)
+				if (waitok@ STATUS_WAIT_TIMEOUT ~=)
+					waitok@ "MiFilePageWriter: failed to wait on event (%i)\n" KeCrash
+				end
+			end
+		end
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		while (1)
+			// pop a transfer off the list
+
+			auto transfer
+			MmFPWTransferListHead@ transfer!
+
+			if (transfer@ ~~)
+				break
+			end
+
+			transfer@ IOTransfer_Next + @ MmFPWTransferListHead!
+
+			rs@ HALCPUInterruptRestore
+
+			transfer@ IOFilePageWriterDispatch
+
+			HALCPUInterruptDisable rs!
+		end
+
+		rs@ HALCPUInterruptRestore
+	end
+end
+
+fn (KeAPCFunctionSpecial) MmAnonPageWriterAPCRoutine { normalfunc context1 context2 apc -- }
+	// runs as an APC in the context of the modified page writer.
+
+	auto iop
+	context1@@ iop!
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	auto status
+	iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ status!
+
+	auto pagecount
+	mdl@ MmMDLHeader_Length + @ PAGESHIFT >> pagecount!
+
+	auto pagefile
+	mdl@ IOTransfer_PageFile + @ pagefile!
+
+	auto offset
+	mdl@ IOTransfer_Prev + @ offset!
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto number
+	pagefile@ IOPageFileGetNumber number!
+
+	auto rs
+
+	while (pagecount@)
+		auto pfdbe
+		mdlpos@@ pfdbe!
+
+		if (status@)
+			// IO error, don't save the swap page
+
+			offset@ pagefile@ IOSwapPageFree
+
+			pfdbe@ // pfdbe
+			0 // process
+			MmEvictablePageModify
+		end else
+			HALCPUInterruptDisable rs!
+
+			if (pfdbe@ MiPageFrameEntryAnonymous_EvictionFlagsB + gb
+				MMEVICTFLAG_MODIFIED MMEVICTFLAG_DELETED | &)
+				// modified or deleted, free the swap page :(
+
+				rs@ HALCPUInterruptRestore
+
+				offset@ pagefile@ IOSwapPageFree
+			end else
+				auto swappte
+				pfdbe@ MiPageFrameEntryAnonymous_SwapPTE + @ swappte!
+
+				offset@ PTE_SWAPPAGE_SHIFT << number@ PTE_PAGEFILE_SHIFT << | PTE_INSWAP |
+				swappte@ PTE_TLBHACK & |
+#ifdef DEBUGCHECKS
+				swappte@ PTE_KERNELSTACK & |
+#endif
+				pfdbe@ MiPageFrameEntryAnonymous_SwapPTE + !
+
+				rs@ HALCPUInterruptRestore
+			end
+		end
+
+		pfdbe@ MmEvictablePageDereference drop
+
+		1 offset +=
+		1 pagecount -=
+		4 mdlpos +=
+	end
+
+	if (status@)
+		// TODO pop-up window or something
+		status@ "I/O error while writing data to pagefile (%i)\n" Printf
+	end
+
+	// don't free the IOP, since it was allocated inline with the transfer.
+
+	iop@ IOPacketFinishEitherContext
+
+	// this requires no synchronization as the transfer structures are
+	// only accessed by the modified page writer, which is currently
+	// executing this routine
+
+	mdl@ IOTransferComplete
+end
+
+fn MmGatewayFileDirtying { bytes -- throttled }
+	fnsection "PAGE$text"
+
+	// Forms a gateway for threads that wish to dirty a file so that memory
+	// doesn't become full of dirty file pages.
+
+	if (KeThreadCurrent@ PsThread_MemoryPrivilegedCount + @)
+		// Thread is memory-privileged, don't throttle it.
+
+		return
+	end
+
+	0 throttled!
+
+	auto pages
+	bytes@ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	if (pages@ ~~)
+		// We are throttling for no pages, so just return.
+
+		return
+	end
+
+	auto throttle
+	auto wakelazywriter
+	auto throttlemax
+
+	10 throttlemax!
+
+	// Throttle for 100ms until one of:
+	//  o  We've exhausted the maximum number of throttles, which means we
+	//     should probably just escape.
+	//  o  The throttle conditions are alleviated.
+
+	while (throttlemax@)
+		0 throttle!
+		0 wakelazywriter!
+
+		// Calculate the number of modified anonymous pages on the list.
+
+		auto modanon
+		MmModifiedPageCount@ MmModifiedFilePageCount@ - modanon!
+
+		// Check the throttle conditions.
+
+		if (IOModifiedFilePageCountTotal@ pages@ + IODIRTYFILEPAGEMAX >=)
+			// The number of modified file pages would become greater than our
+			// preferred maximum. Kick the lazy writer awake and throttle.
+
+			1 throttle!
+			1 wakelazywriter!
+		end elseif (MmAvailablePageCount@ pages@ MmLowAvailablePageCount@ + <)
+			// The number of available pages would become less than the low
+			// count of pages, meaning the modified page writer is probably
+			// hard at work. Throttle.
+
+			1 throttle!
+		end elseif (MmAvailablePageCount@ pages@ MMNORMALTHRESH + 1 + <)
+			// The number of available pages would drop to the bare minimum.
+			// Definitely throttle.
+
+			1 throttle!
+
+			if (MmAvailablePageCount@ MMNORMALTHRESH 10 + <)
+				// The number of available pages is actually already at the
+				// bare minimum. Not only should we throttle, but we should do
+				// another round of throttling to avoid draining memory
+				// completely.
+
+				5 throttlemax!
+			end
+		end elseif (MmModifiedFilePageCount@ pages@ + 100 >)
+			// There are already quite a lot of file pages on the modified
+			// page list. Throttle.
+
+			1 throttle!
+		end
+
+		if (throttle@ ~~)
+			// We decided not to throttle (again), so return.
+
+			return
+		end
+
+		if (wakelazywriter@)
+			// We decided to kick the lazy writer awake.
+
+			IOTriggerWritebehind
+		end
+
+		1 throttled!
+
+		100 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+
+		if (KeThreadCurrent@ PsThread_MemoryPrivilegedCount + @)
+			// We became memory privileged, so break out of the throttle loop.
+
+			return
+		end
+
+		1 throttlemax -=
+	end
+end

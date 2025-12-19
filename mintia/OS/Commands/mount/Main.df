@@ -1,0 +1,207 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+fn private Usage { -- }
+	"usage: mount [[-iru] device [fstype]]\n" OSGetStdErr FPrintf
+end
+
+fn Main { ... -- ret }
+	0 ret!
+
+	if (argc@ 1 ==)
+		MountListPrint
+		return
+	end
+
+	auto i
+	1 i!
+
+	auto chk
+	2 chk!
+
+	auto flags
+	0 flags!
+
+	auto update
+	0 update!
+
+	auto sw
+	[1]argv@ sw!
+
+	if (sw@ gb '-' ==)
+		2 i!
+		3 chk!
+
+		1 sw +=
+
+		while (sw@ gb)
+			if (sw@ gb 'r' ==)
+				OSMOUNT_READONLY flags |=
+			end elseif (sw@ gb 'i' ==)
+				OSMOUNT_NOUID flags |=
+			end elseif (sw@ gb 'u' ==)
+				1 update!
+			end elseif (sw@ gb 'o' ==)
+				OSMOUNT_MATCHUID flags |=
+			end else
+				Usage
+				-1 OSExit
+			end
+
+			1 sw +=
+		end
+	end
+
+	if (argc@ chk@ <)
+		Usage
+		1 ret!
+		return
+	end
+
+	if (argc@ chk@ 1 + >)
+		Usage
+		1 ret!
+		return
+	end
+
+	auto fst
+	0 fst!
+
+	if (argc@ chk@ 1 + ==)
+		[i@ 1 +]argv@ fst!
+	end
+
+	auto dev
+	[i@]argv@ dev!
+
+	auto access
+	ACCESS_EXEC access!
+
+	if (flags@ OSMOUNT_READONLY & ~~)
+		ACCESS_WRITE access |=
+	end
+
+	auto devhandle
+	OSFILETYPE_ANY_STREAM // filetype
+	0 // flags
+	access@ // access
+	dev@ // path
+	OSFileOpen ret! devhandle!
+
+	if (ret@)
+		ret@ OSStatusGetName dev@ "mount: %s: %s\n" OSError
+	end
+
+	if (update@ ~~)
+		flags@ // flags
+		devhandle@ // handle
+		fst@ // fsname
+		OSFilesystemMount ret!
+	end else
+		flags@ // newflags
+		devhandle@ // handle
+		OSMountUpdateFlags ret!
+	end
+
+	devhandle@ OSClose drop
+
+	if (ret@)
+		ret@ OSStatusGetName dev@ "mount: %s: %s\n" OSError
+	end
+end
+
+fn MountListPrint { -- }
+	auto ok
+
+	auto count
+	OSMountCountQuery ok! count!
+
+	if (ok@)
+		ok@ OSStatusGetName "mount: couldn't query mount count: %s\n" OSError
+	end
+
+	auto querybuffer
+	count@ OSMountInformation_SIZEOF * OSHeapAllocate ok! querybuffer!
+
+	if (ok@)
+		ok@ OSStatusGetName "mount: couldn't allocate buffer: %s\n" OSError
+	end
+
+	querybuffer@ // buffer
+	count@ // maxquery
+	OSMountQueryAll ok! count!
+
+	if (ok@)
+		querybuffer@ OSHeapFree
+
+		ok@ OSStatusGetName "mount: couldn't query mount list: %s\n" OSError
+	end
+
+	"USAGE"
+	"LABEL"
+	"FILESYS"
+	"OPTIONS"
+	"DEVICE"
+
+	"%8s %8s %9s %8s %s\n" Printf
+
+	auto record
+	querybuffer@ record!
+
+	while (count@)
+		auto flags
+		record@ OSMountInformation_Flags + @ flags!
+
+		auto didone
+		0 didone!
+
+		auto options
+		32 alloc options!
+
+		if (flags@ ~~)
+			options@ "none" strcpy
+		end else
+			0 options@ sb
+
+			if (flags@ OSMOUNT_READONLY &)
+				options@ options@ strlen + "ro" strcpy
+
+				1 didone!
+			end
+
+			if (flags@ OSMOUNT_NOUID &)
+				if (didone@)
+					options@ options@ strlen + "," strcpy
+				end
+
+				options@ options@ strlen + "nouid" strcpy
+
+				1 didone!
+			end
+
+			if (flags@ OSMOUNT_MATCHUID &)
+				if (didone@)
+					options@ options@ strlen + "," strcpy
+				end
+
+				options@ options@ strlen + "muid" strcpy
+
+				1 didone!
+			end
+		end
+
+		record@ OSMountInformation_VolumeCapacity + @ 1024 /
+		record@ OSMountInformation_VolumeUsed + @ 1024 /
+		record@ OSMountInformation_VolumeLabel +
+		record@ OSMountInformation_FilesystemName +
+		options@
+		record@ OSMountInformation_VolumeName +
+		"%8s %8s %9s %8s %dKB/%dKB\n" Printf
+
+		1 count -=
+		OSMountInformation_SIZEOF record +=
+	end
+
+	querybuffer@ OSHeapFree
+end

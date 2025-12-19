@@ -1,0 +1,100 @@
+//
+// Implements IPC completion message management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+fn IPCCompletionMessageFree { msg -- }
+	fnsection "PAGE$text"
+
+	auto port
+	msg@ IPCiKernelMessage_OriginatingPort + @ port!
+
+	auto ipl
+	0 IPCiGlobalLock drop ipl!
+
+	msg@ IPCiMessageFree
+
+	ipl@ IPCiGlobalUnlock
+
+	port@ ObObjectDereferenceByPointer drop
+end
+
+fn IPCPortSendCompletionMessage { bytes status msg -- }
+	fnsection "PAGE$text"
+
+	bytes@ msg@ IPCiKernelMessage_Header + OSMessageHeaderIOCompletion_BytesTransferred + !
+	status@ msg@ IPCiKernelMessage_Header + OSMessageHeaderIOCompletion_Status + !
+
+	auto port
+	msg@ IPCiKernelMessage_OriginatingPort + @ port!
+
+	auto ipl
+	0 IPCiGlobalLock drop ipl!
+
+	msg@ // msg
+	port@ // portobject
+	IPCiPortSendMessage drop
+
+	ipl@ IPCiGlobalUnlock
+
+	port@ ObObjectDereferenceByPointer drop
+end
+
+fn IPCPortAllocateCompletionMessage { context portobject -- msg ok }
+	fnsection "PAGE$text"
+
+	OSMessageHeaderIOCompletion_SIZEOF alloc msg!
+
+	0 msg@ OSMessageHeader_LengthI + si
+	OSNONE msg@ OSMessageHeader_Handle + !
+
+	auto ipl
+	0 IPCiGlobalLock drop ipl!
+
+	0 // allowhandle
+	msg@ // umsg
+	KERNELMODE // mode
+	OSPORT_CONID_IOCOMPLETE // conid
+	portobject@ // portobject
+	IPCiMessageAllocate ok! msg! drop
+
+	ipl@ IPCiGlobalUnlock
+
+	if (ok@)
+		return
+	end
+
+	// initialize completion message.
+
+	OSPORT_MESSAGE_IOCOMPLETE msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+
+	0 msg@ IPCiKernelMessage_Header + OSMessageHeaderIOCompletion_BytesTransferred + !
+	context@ msg@ IPCiKernelMessage_Header + OSMessageHeaderIOCompletion_Context + !
+	0 msg@ IPCiKernelMessage_Header + OSMessageHeaderIOCompletion_Status + !
+end

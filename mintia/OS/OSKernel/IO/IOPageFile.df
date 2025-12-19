@@ -1,0 +1,1380 @@
+//
+// Implements pagefile management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Transfer.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+#include "../../Common/Common.h"
+
+extern MmMPWAssessTransfers { transfersize transfer1 -- }
+
+var IOSwapPagesUsed 0
+public IOSwapPagesUsed
+
+var IOSwapPagesCount 0
+public IOSwapPagesCount
+
+var IOSwapPagesUsedPeak 0
+public IOSwapPagesUsedPeak
+
+var IOSwapPagesWritten 0
+public IOSwapPagesWritten
+
+var IOSwapPagesRead 0
+public IOSwapPagesRead
+
+struct IOiPageFile
+	4 MinimumSize
+	4 MaximumSize
+	4 FileObject
+	4 CapturedFCB
+	ComBitmapHeader_SIZEOF BitmapHeader
+	4 Hint
+	4 CurrentSize
+	4 UsedCount
+	4 Priority
+	4 Number
+	4 Next
+	4 TransferSize
+	4 Path
+endstruct
+
+buffer IOiPageFileCreationMutex KeMutex_SIZEOF
+
+buffer IOPageFileExtendEvent KeEvent_SIZEOF
+public IOPageFileExtendEvent
+
+table IOPageFiles[IOPAGEFILEMAX]
+
+table IOPageFilePriorityListHeads[IOPAGEFILEMAXPRI]
+table IOPageFilePriorityListTails[IOPAGEFILEMAXPRI]
+table IOPageFilePriorityExtensionSpace[IOPAGEFILEMAXPRI]
+table IOPageFilePriorityCount[IOPAGEFILEMAXPRI]
+
+var IOPageFileCount 0
+public IOPageFileCount
+
+fn IOPageFileGetPriority { pagefile -- pri }
+	pagefile@ IOiPageFile_Priority + @ pri!
+end
+
+fn IOPageFileGetFree { pagefile -- free }
+	pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_UsedCount + @ - free!
+end
+
+fn IOPageFileGetNumber { pagefile -- number }
+	pagefile@ IOiPageFile_Number + @ number!
+end
+
+fn IOiPageFileInit { -- }
+	fnsection "INIT$text"
+
+	"IOiPageFileCreationMutex" // name
+	KERNELMODE // mode
+	IOiPageFileCreationMutex // mutex
+	KeMutexInitialize
+end
+
+fn IOiPageFileCreateLock { -- }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	0 // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	IOiPageFileCreationMutex // object
+	KeThreadWaitForObject drop
+end
+
+fn IOiPageFileCreateUnlock { -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	IOiPageFileCreationMutex // mutex
+	KeMutexRelease drop
+end
+
+fn IOPageFileCreate { minpages maxpages pri initialobjecthandle path -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	if (pri@ IOPAGEFILEMAXPRI >=)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	if (maxpages@ minpages@ <)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	IOiPageFileCreateLock
+
+	if (IOPageFileCount@ IOPAGEFILEMAX >=)
+		IOiPageFileCreateUnlock
+
+		STATUS_TOO_MANY_PAGEFILES ok!
+
+		return
+	end
+
+	416 KeThreadCurrent@ PsThread_FileCreationPermissions + !
+
+	auto handle
+	OSFILETYPE_ANY // filetype
+	OSTYPE_FILE // objecttype
+	OSFILEFLAG_CREATE OSFILEFLAG_PAGEFILE | // flags
+	ACCESS_READ ACCESS_WRITE | // access
+	initialobjecthandle@ // initialobjecthandle
+	path@ // path
+	ObObjectOpenByPath ok! handle!
+
+	if (ok@)
+		IOiPageFileCreateUnlock
+
+		return
+	end
+
+	auto fileobject
+	auto access
+	IOFileTypeObject@ // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! fileobject! access!
+
+	handle@ ObObjectClose drop
+
+	if (ok@)
+		IOiPageFileCreateUnlock
+
+		return
+	end
+
+	access@ ACCESS_WRITE ACCESS_READ | SeCheckAccess ok!
+
+	if (ok@)
+		IOiPageFileCreateUnlock
+
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	if (fcbp@ IOFileControlBlockPaged_Flags + @ IOFCBFLAG_SYSTEMFILE &)
+		IOiPageFileCreateUnlock
+
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_DEVICE_BUSY ok!
+
+		return
+	end
+
+	if (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_BLOCKDEVICE ==)
+		// disk or otherwise, can't resize.
+
+		fcb@ IOFileControlBlock_SizeInBytes + @ PAGESHIFT >> dup minpages! maxpages!
+	end elseif (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_FILE ==)
+		// file, truncate to minpages.
+
+		minpages@ PAGESHIFT << // newsize
+		0 // growing
+		0 // keeplocked
+		0 // zero
+		OSFILEFLAG_NOCACHE // flags
+		fcb@ // fcb
+		IOFileControlBlockTruncate ok! drop
+
+		if (ok@)
+			IOiPageFileCreateUnlock
+
+			fileobject@ ObObjectDereferenceByPointer drop
+
+			return
+		end
+	end else
+		// bad
+
+		IOiPageFileCreateUnlock
+
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_NOT_CORRECT_FILETYPE ok!
+
+		return
+	end
+
+	if (minpages@ 128 <)
+		// needs to be at least 128 pages (512KB with 4KB pages)
+
+		IOiPageFileCreateUnlock
+
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_SWAP_TOO_SMALL ok!
+
+		return
+	end
+
+	auto pathbuf
+	path@ strlen pathbuf!
+
+	pathbuf@ 1 + // bytes
+	'SwFp' // tag
+	PAGED // flags
+	MmAllocWithTag ok! pathbuf!
+
+	if (ok@)
+		0 pathbuf!
+		0 ok!
+	end
+
+	pathbuf@ // dest
+	path@ // src
+	strcpy
+
+	auto stacksize
+	fcb@ IOFileControlBlock_StackDepth + @ stacksize!
+
+	auto transfersize
+	IOTransfer_SIZEOF IOPacketHeaderPagingIO_SIZEOF + stacksize@ IOPacketLocation_SIZEOF * + transfersize!
+
+	// Do an inline allocation of the pagefile structure, two transfer
+	// structures (including an inline IOP), and the pagefile bitmap.
+
+	auto pagefile
+	IOiPageFile_SIZEOF
+	transfersize@ 2 * +
+	maxpages@ 7 + 3 >> + // bytes
+	'SwFi' // tag
+	CANBLOCK // flags
+	MmAllocWithTag ok! pagefile!
+
+	if (ok@)
+		IOiPageFileCreateUnlock
+
+		fileobject@ ObObjectDereferenceByPointer drop
+
+		if (pathbuf@)
+			pathbuf@ MmFree
+		end
+
+		return
+	end
+
+	pathbuf@ pagefile@ IOiPageFile_Path + !
+
+	transfersize@ pagefile@ IOiPageFile_TransferSize + !
+
+	auto transfer1
+	pagefile@ IOiPageFile_SIZEOF + transfer1!
+
+	pagefile@ // pagefile
+	transfer1@ // transfer
+	MmMPWAnonTransferInitialize
+
+	auto transfer2
+	transfer1@ transfersize@ + transfer2!
+
+	pagefile@ // pagefile
+	transfer2@ // transfer
+	MmMPWAnonTransferInitialize
+
+	auto bitmap
+	transfer2@ transfersize@ + bitmap!
+
+	// initialize the bitmap
+
+	maxpages@ // sizeinbits
+	bitmap@ // data
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapInitialize
+
+	// clear the minimum size
+
+	minpages@ // runlength
+	0 // index
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapClearBits
+
+	// set beyond the minimum size
+
+	maxpages@ minpages@ - // runlength
+	minpages@ // index
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapSetBits
+
+	// initialize pagefile structures
+
+	minpages@ pagefile@ IOiPageFile_MinimumSize + !
+	maxpages@ pagefile@ IOiPageFile_MaximumSize + !
+	fileobject@ pagefile@ IOiPageFile_FileObject + !
+	fileobject@ IOFile_FileControlBlock + @ pagefile@ IOiPageFile_CapturedFCB + !
+	0 pagefile@ IOiPageFile_Hint + !
+	minpages@ pagefile@ IOiPageFile_CurrentSize + !
+	0 pagefile@ IOiPageFile_UsedCount + !
+	pri@ pagefile@ IOiPageFile_Priority + !
+	IOPageFileCount@ pagefile@ IOiPageFile_Number + !
+
+	// set the systemfile flag
+
+	IOFCBFLAG_SYSTEMFILE fcbp@ IOFileControlBlockPaged_Flags + |=
+
+	// insert into pagefile table
+
+	pagefile@ [IOPageFileCount@]IOPageFiles!
+
+	// increment count of total pagefile pages
+
+	minpages@ IOSwapPagesCount +=
+
+	// increment the commit limit
+
+	minpages@ // min
+	maxpages@ // max
+	MmIncrementCommitLimit
+
+	1 IOPageFileCount +=
+
+	// insert the pagefile into the extension priority structures
+
+	[pri@]IOPageFilePriorityListHeads@ pagefile@ IOiPageFile_Next + !
+
+	pagefile@ [pri@]IOPageFilePriorityListHeads!
+
+	if ([pri@]IOPageFilePriorityListTails@ ~~)
+		pagefile@ [pri@]IOPageFilePriorityListTails!
+	end
+
+	1 [pri@]IOPageFilePriorityCount +=
+
+	maxpages@ minpages@ - [pri@]IOPageFilePriorityExtensionSpace +=
+
+	IOiPageFileCreateUnlock
+
+	// complete the transfers and allow the pagefile to be used
+
+	transfer1@ IOTransferComplete
+	transfer2@ IOTransferComplete
+
+	// leave fileobject refcount biased
+
+	0 ok!
+end
+
+fn IOPageFileQuery { query id -- ok }
+	fnsection "PAGE$text"
+
+	if (id@ IOPageFileCount@ >=)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	0 ok!
+
+	auto pagefile
+	[id@]IOPageFiles@ pagefile!
+
+	if (pagefile@ IOiPageFile_Path + @)
+		query@ OSPageFileInformation_Name + // dest
+		pagefile@ IOiPageFile_Path + @ // src
+		strcpy
+	end else
+		query@ OSPageFileInformation_Name + // dest
+		"unknown" // src
+		strcpy
+	end
+
+	pagefile@ IOiPageFile_MinimumSize + @ query@ OSPageFileInformation_MinimumSize + !
+	pagefile@ IOiPageFile_MaximumSize + @ query@ OSPageFileInformation_MaximumSize + !
+	pagefile@ IOiPageFile_CurrentSize + @ query@ OSPageFileInformation_CurrentSize + !
+	pagefile@ IOiPageFile_UsedCount + @ query@ OSPageFileInformation_UsedCount + !
+	pagefile@ IOiPageFile_Priority + @ query@ OSPageFileInformation_Priority + !
+end
+
+fn IOPageFileReserve { pagesneeded pagefile -- offset ok }
+	auto bmpheader
+	pagefile@ IOiPageFile_BitmapHeader + bmpheader!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_UsedCount + @ - pagesneeded@ <)
+		ipl@ KeIPLLower
+
+		STATUS_NO_SWAP ok!
+
+		return
+	end
+
+	pagefile@ IOiPageFile_Hint + @ // hint
+	pagesneeded@ // runlength
+	bmpheader@ // header
+	ComBitmapFindRun ok! offset!
+
+	if (ok@)
+		ipl@ KeIPLLower
+
+		STATUS_NO_SWAP ok!
+
+		return
+	end
+
+	pagesneeded@ IOSwapPagesUsed +=
+
+	if (IOSwapPagesUsed@ IOSwapPagesUsedPeak@ >)
+		IOSwapPagesUsed@ IOSwapPagesUsedPeak!
+	end
+
+	pagesneeded@ pagefile@ IOiPageFile_UsedCount + +=
+
+	pagesneeded@ // runlength
+	offset@ // index
+	bmpheader@ // header
+	ComBitmapSetBits
+
+	ipl@ KeIPLLower
+
+	offset@ pagefile@ IOiPageFile_Hint + !
+end
+
+fn IOPageFileRelease { pages offset pagefile -- }
+	if (pages@ ~~)
+		return
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	pages@ IOSwapPagesUsed -=
+	pages@ pagefile@ IOiPageFile_UsedCount + -=
+
+	pages@ // runlength
+	offset@ // index
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapClearBits
+
+	if (MmAnonTransfersAvailable@ ~~
+		pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_UsedCount + @ - IOPAGEFILEFREELOW >= ||)
+		pagefile@ IOiPageFile_TransferSize + @ // transfersize
+		pagefile@ IOiPageFile_SIZEOF + // transfer1
+		MmMPWAssessTransfers
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOSwapPageFree { pno pagefile -- }
+	// frees a page in swap
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	1 // runlength
+	pno@ // index
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapClearBits
+
+	1 IOSwapPagesUsed -=
+	1 pagefile@ IOiPageFile_UsedCount + -=
+
+	if (DEBUGCHECKS)
+		if (IOSwapPagesUsed@ z<)
+			"IOSwapPageFree: underflow\n" KeCrash
+		end
+	end
+
+	if (MmAnonTransfersAvailable@ ~~
+		pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_UsedCount + @ - IOPAGEFILEFREELOW >= ||)
+
+		pagefile@ IOiPageFile_TransferSize + @ // transfersize
+		pagefile@ IOiPageFile_SIZEOF + // transfer1
+		MmMPWAssessTransfers
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOSwapPageFreePTE { pte -- }
+	if (DEBUGCHECKS)
+		if (pte@ PTE_INSWAP & ~~)
+			"IOSwapPageFreePTE: not an INSWAP pte\n" KeCrash
+		end
+	end
+
+	pte@ PTE_SWAPPAGE_SHIFT >> PTE_SWAPPAGE_MASK & // pno
+	[pte@ PTE_PAGEFILE_SHIFT >> PTE_PAGEFILE_MASK &]IOPageFiles@ // pagefile
+	IOSwapPageFree
+end
+
+fn IOSwapPageReadPTE { kflags pfdbe pte -- ok }
+	// reads swap page at pno into pageframe
+
+	if (DEBUGCHECKS)
+		if (pte@ PTE_INSWAP & ~~)
+			"IOSwapPageReadPTE: not an INSWAP pte\n" KeCrash
+		end
+	end
+
+	auto pagefile
+	[pte@ PTE_PAGEFILE_SHIFT >> PTE_PAGEFILE_MASK &]IOPageFiles@ pagefile!
+
+	auto fcb
+	pagefile@ IOiPageFile_CapturedFCB + @ fcb!
+
+	// perform the read operation
+
+	auto mdl
+	MmMDLHeader_SIZEOF 4 2 * + alloc mdl!
+
+	pfdbe@ mdl@ MmMDLHeader_SIZEOF + !
+	-1 mdl@ MmMDLHeader_SIZEOF + 4 + !
+
+	PAGESIZE // length
+	0 // vaddr
+	kflags@ // kflags
+	mdl@ // mdl
+	MmMDLInitialize
+
+	MMMDL_PINNED MMMDL_DONTUNPIN | mdl@ MmMDLHeader_Flags + |=
+
+	0 // iop
+	0 // completionroutine
+	IODISPATCH_READ // functioncode
+	0 // flags
+	kflags@ IOKFLAG_PAGEFILE | // kflags
+	mdl@ // mdl
+	pte@ PTE_SWAPPAGE_SHIFT >> PTE_SWAPPAGE_MASK & PAGESHIFT << // offset
+	fcb@ // fcb
+	IOMDLTransfer ok! drop
+
+	if (ok@)
+		return
+	end
+
+	// XXX No synchronization here, since these are just for statistics.
+	// This means it may drop a few counts sometimes, but that's fine.
+
+	1 IOSwapPagesRead +=
+	1 MmPageInCount +=
+end
+
+fn IOPageFileWriteMDL { pagecount offset mdl -- ok }
+	pagecount@ PAGESHIFT << // length
+	0 // vaddr
+	IOKFLAG_SWAPOUT // kflags
+	mdl@ // mdl
+	MmMDLInitialize
+
+	MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+	offset@ mdl@ IOTransfer_Prev + !
+
+	auto pagefile
+	mdl@ IOTransfer_PageFile + @ pagefile!
+
+	auto fcb
+	pagefile@ IOiPageFile_CapturedFCB + @ fcb!
+
+	mdl@ IOTransfer_SIZEOF + // iop
+	pointerof MmAnonPageWriterAPCRoutine // completionroutine
+	IODISPATCH_WRITE // functioncode
+	0 // flags
+	IOKFLAG_SWAPOUT IOKFLAG_PAGEFILE | // kflags
+	mdl@ // mdl
+	offset@ PAGESHIFT << // offset
+	fcb@ // fcb
+	IOMDLTransfer ok! drop
+
+	if (ok@)
+		return
+	end
+
+	pagecount@ IOSwapPagesWritten +=
+end
+
+var IOiPageFileExtensionListHead 0
+var IOiPageFileExtensionListTail 0
+
+struct IOPageFileExtension
+	4 Next
+	4 Pages
+	KeEvent_SIZEOF Event
+	4 Success
+	4 InProgress
+endstruct
+
+buffer IOPageFileCantWaitExtension IOPageFileExtension_SIZEOF
+
+fn IOPageFileRequestExpansion { ipl pri pages -- ok }
+	// entered and left at IPLDPC.
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOPageFileRequestExpansion: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	0 ok!
+
+	if (pages@ ~~)
+		return
+	end
+
+	if (pages@ z>)
+		// quick check to make sure this can feasibly work before we go to the
+		// trouble of queuing a request and waking the worker thread.
+
+		auto i
+		0 i!
+
+		auto avail
+		0 avail!
+
+		while (i@ IOPageFileCount@ <)
+			auto pagefile
+			[i@]IOPageFiles@ pagefile!
+
+			pagefile@ IOiPageFile_MaximumSize + @ pagefile@ IOiPageFile_CurrentSize + @ - avail +=
+
+			if (avail@ pages@ >=)
+				break
+			end
+
+			1 i +=
+		end
+
+		if (avail@ pages@ MmCommitUsage@ + MmCommitLimit@ - <)
+			// not enough potential expansion left to satisfy this
+
+			STATUS_COMMIT_EXCEEDED ok!
+
+			return
+		end
+	end
+
+	auto extension
+
+	if (pri@ CANBLOCK & ~~)
+		IOPageFileCantWaitExtension extension!
+
+		if (extension@ IOPageFileExtension_InProgress + @)
+			// the cant-wait extension is already in progress
+
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		1 extension@ IOPageFileExtension_InProgress + !
+
+		ipl@ KeIPLLower
+	end else
+		ipl@ KeIPLLower
+
+		IOPageFileExtension_SIZEOF alloc extension!
+
+		0 // signaled
+		OSEVENT_SYNCH // type
+		"IOPageFileRequestExpansionEvent" // name
+		extension@ IOPageFileExtension_Event + // event
+		KeEventInitialize
+	end
+
+	0 extension@ IOPageFileExtension_Next + !
+	pages@ extension@ IOPageFileExtension_Pages + !
+	-1 extension@ IOPageFileExtension_Success + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto t
+	IOiPageFileExtensionListTail@ t!
+
+	if (t@ ~~)
+		extension@ IOiPageFileExtensionListHead!
+	end else
+		extension@ t@ IOPageFileExtension_Next + !
+	end
+
+	extension@ IOiPageFileExtensionListTail!
+
+	rs@ HALCPUInterruptRestore
+
+	0 // priboost
+	IOPageFileExtendEvent // event
+	KeEventSignal
+
+	if (pri@ CANBLOCK &)
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		extension@ IOPageFileExtension_Event + // object
+		KeThreadWaitForObject drop
+
+		extension@ IOPageFileExtension_Success + @ ok!
+	end
+
+	IPLDPC KeIPLRaise ipl!
+end
+
+fn IOiPageFileExtend { -- }
+	// called by worker thread.
+	// pops extension requests off the listhead and tries to satisfy them.
+	// satisfying a request is done by extending the pagefile & signaling the
+	// event to wake up the waiting thread.
+
+	1 KeThreadCurrent@ PsThread_MemoryPrivilegedCount + +=
+
+	while (IOiPageFileExtensionListHead@)
+		auto extension
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		IOiPageFileExtensionListHead@ extension!
+		extension@ IOPageFileExtension_Next + @ IOiPageFileExtensionListHead!
+
+		if (IOiPageFileExtensionListHead@ ~~)
+			0 IOiPageFileExtensionListTail!
+		end
+
+		rs@ HALCPUInterruptRestore
+
+		extension@ IOiPageFileSatisfyExtension
+	end
+
+	1 KeThreadCurrent@ PsThread_MemoryPrivilegedCount + -=
+end
+
+fn IOiPageFileWakeExtension { ok extension -- }
+	0 extension@ IOPageFileExtension_InProgress + !
+
+	if (extension@ IOPageFileCantWaitExtension ~=)
+		ok@ extension@ IOPageFileExtension_Success + !
+
+		0 // priboost
+		extension@ IOPageFileExtension_Event + // event
+		KeEventSignal
+	end
+end
+
+fn IOiPageFileSatisfyExtension { extension -- }
+	auto i
+	0 i!
+
+	auto avail
+	0 avail!
+
+	auto pages
+	extension@ IOPageFileExtension_Pages + @ pages!
+
+	if (pages@ z<)
+		// Absolute pagefile extension request from system; the pagefiles are
+		// low on space but there are a lot of modified anonymous pages, so it
+		// wants to grow the pagefiles in an absolute fashion rather than
+		// relative to the current commit usage.
+		// If we did the latter, this routine would go "oh, there's plenty of
+		// commit" and immediately succeed the request without extending any
+		// pagefiles.
+
+		pages@ abs requiredextension!
+	end else
+		// This is an extension request originating from commit charge.
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		if (pages@ MmCommitUsage@ + MmCommitLimit@ <=)
+			// Immediately succeed the request.
+
+			ipl@ KeIPLLower
+
+			0 // ok
+			extension@ // extension
+			IOiPageFileWakeExtension
+
+			return
+		end
+
+		while (i@ IOPageFileCount@ <)
+			auto pagefile
+			[i@]IOPageFiles@ pagefile!
+
+			pagefile@ IOiPageFile_MaximumSize + @ pagefile@ IOiPageFile_CurrentSize + @ - avail +=
+
+			if (avail@ pages@ >=)
+				break
+			end
+
+			1 i +=
+		end
+
+		auto requiredextension
+		pages@ MmCommitUsage@ + MmCommitLimit@ - requiredextension!
+
+		if (avail@ requiredextension@ <)
+			// Immediately fail the request.
+
+			ipl@ KeIPLLower
+
+			STATUS_COMMIT_EXCEEDED // ok
+			extension@ // extension
+			IOiPageFileWakeExtension
+
+			return
+		end
+
+		ipl@ KeIPLLower
+	end
+
+	auto ok
+	requiredextension@ IOiPageFileTryExtendAll ok!
+	
+	ok@ // ok
+	extension@ // extension
+	IOiPageFileWakeExtension
+end
+
+const IOPAGEFILEMINIMUMEXTENSION 128
+
+fn IOiPageFileTryExtendAll { extension -- ok }
+	fnsection "PAGE$text"
+
+	STATUS_COMMIT_EXCEEDED ok!
+
+	IOiPageFileCreateLock
+
+	auto pri
+	0 pri!
+
+	while (pri@ IOPAGEFILEMAXPRI <)
+		auto tries
+		0 tries!
+
+		while ([pri@]IOPageFilePriorityExtensionSpace@ IOPAGEFILEMINIMUMEXTENSION >=)
+			auto onesuccess
+			0 onesuccess!
+
+			auto pagefile
+			[pri@]IOPageFilePriorityListHeads@ pagefile!
+
+			auto count
+			[pri@]IOPageFilePriorityCount@ count!
+
+			// Try to evenly distribute the extension throughout the priority
+			// level.
+
+			auto extensionpart
+
+			if (tries@ 1 <)
+				// Try to evenly distribute.
+
+				extension@ count@ 1 - + count@ / extensionpart!
+			end else
+				// We tried too many times, try the entire extension now.
+
+				extension@ extensionpart!
+			end
+
+			while (count@)
+				auto realextension
+				extensionpart@ // extension
+				pagefile@ // pagefile
+				IOiPageFileTryExtend realextension!
+
+				if (realextension@)
+					1 onesuccess!
+				end
+
+				// Move the pagefile to the tail of the priority list so that
+				// we don't try to extend it again for a while.
+
+				pagefile@ IOiPageFile_Next + @ [pri@]IOPageFilePriorityListHeads!
+
+				if ([pri@]IOPageFilePriorityListTails@ pagefile@ ~=)
+					pagefile@ [pri@]IOPageFilePriorityListTails@ IOiPageFile_Next + !
+				end
+
+				pagefile@ [pri@]IOPageFilePriorityListTails!
+
+				if ([pri@]IOPageFilePriorityListHeads@ ~~)
+					pagefile@ [pri@]IOPageFilePriorityListHeads!
+				end
+
+				0 pagefile@ IOiPageFile_Next + !
+
+				[pri@]IOPageFilePriorityListHeads@ pagefile!
+
+				// Figure out if that extension was good enough.
+
+				if (realextension@ extension@ >)
+					0 extension!
+				end else
+					realextension@ extension -=
+				end
+
+				if (extension@ ~~)
+					0 ok!
+
+					break
+				end
+
+				1 count -=
+			end
+
+			if (extension@ ~~)
+				break
+			end
+
+			if (onesuccess@ ~~)
+				// Not even one success on this priority level, move on.
+
+				break
+			end
+
+			1 tries +=
+		end
+
+		if (extension@ ~~)
+			break
+		end
+
+		1 pri +=
+	end
+
+	IOiPageFileCreateUnlock
+end
+
+fn IOiPageFileTryExtend { extension pagefile -- realextension }
+	auto maxextend
+	pagefile@ IOiPageFile_MaximumSize + @ pagefile@ IOiPageFile_CurrentSize + @ - maxextend!
+
+	auto i
+	0 i!
+
+	auto tryextension
+	extension@ tryextension!
+
+	if (tryextension@ IOPAGEFILEMINIMUMEXTENSION <)
+		IOPAGEFILEMINIMUMEXTENSION tryextension!
+	end
+
+	if (maxextend@ tryextension@ <)
+		maxextend@ tryextension!
+	end
+
+	if (extension@ tryextension@ ==)
+		1 i!
+	end
+
+	while (i@ 2 <)
+		auto ok
+		pagefile@ IOiPageFile_CurrentSize + @ tryextension@ + PAGESHIFT << // newsize
+		1 // growing
+		0 // keeplocked
+		0 // zero
+		OSFILEFLAG_NOCACHE // flags
+		pagefile@ IOiPageFile_CapturedFCB + @ // fcb
+		IOFileControlBlockTruncate ok! drop
+
+		if (ok@ ~~)
+			break
+		end else
+			if (ok@ STATUS_END_OF_DISK ~=)
+				0 realextension!
+				return
+			end
+
+			if (i@ 1 ==)
+				0 realextension!
+				return
+			end
+
+			extension@ tryextension!
+		end
+
+		1 i +=
+	end
+
+	tryextension@ realextension!
+
+	// Growing the pagefile succeeded. Update the structures.
+
+	realextension@ [pagefile@ IOiPageFile_Priority + @]IOPageFilePriorityExtensionSpace -=
+
+	// IPL synch is needed here to synchronize against the activity of the
+	// modified page writer.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	realextension@ // runlength
+	pagefile@ IOiPageFile_CurrentSize + @ // index
+	pagefile@ IOiPageFile_BitmapHeader + // header
+	ComBitmapClearBits
+
+	realextension@ pagefile@ IOiPageFile_CurrentSize + +=
+	realextension@ IOSwapPagesCount +=
+	realextension@ MmCommitLimit +=
+
+	0 pagefile@ IOiPageFile_Hint + !
+
+	pagefile@ IOiPageFile_TransferSize + @ // transfersize
+	pagefile@ IOiPageFile_SIZEOF + // transfer1
+	MmMPWAssessTransfers
+
+	ipl@ KeIPLLower
+end
+
+fn IOiPageFileContract { -- }
+	fnsection "PAGE$text"
+
+	// Called by a worker thread every 5 seconds to scan the pagefiles and
+	// determine if any of them should be shrunk.
+
+	if (MmAvailablePageCount@ MmSufficientAvailablePageCount@ <)
+		// Don't shrink pagefiles while pages are being dumped to disk.
+
+		return
+	end
+
+	auto potentialcontraction
+	MmCommitLimit@ MmCommitUsage@ - potentialcontraction!
+
+	if (potentialcontraction@ IOPAGEFILEMINIMUMEXTENSION <)
+		// If commit usage is within 512KB of the commit limit, then it
+		// probably isn't worth it to bother scanning the pagefiles.
+
+		return
+	end
+
+	auto i
+	0 i!
+
+	0 potentialcontraction!
+
+	while (i@ IOPageFileCount@ <)
+		auto pagefile
+		[i@]IOPageFiles@ pagefile!
+
+		auto free
+		pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_UsedCount + @ - free!
+
+		auto excess
+		pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_MinimumSize + @ - excess!
+
+		if (excess@ IOPAGEFILEMINIMUMEXTENSION >=)
+			if (free@ IOPAGEFILEMINIMUMEXTENSION >=)
+				excess@ free@ min potentialcontraction +=
+			end
+		end
+
+		1 i +=
+	end
+
+	if (potentialcontraction@ IOPAGEFILEMINIMUMEXTENSION <)
+		return
+	end
+
+	potentialcontraction@ IOiPageFileTryContractAll
+end
+
+fn IOiPageFileTryContractAll { contraction -- }
+	fnsection "PAGE$text"
+
+	// Try to contract from the lowest priority level to the highest.
+
+	IOiPageFileCreateLock
+
+	auto pri
+	IOPAGEFILEMAXPRI pri!
+
+	while (pri@)
+		1 pri -=
+
+		auto tries
+		0 tries!
+
+		while (1)
+			auto onesuccess
+			0 onesuccess!
+
+			auto pagefile
+			[pri@]IOPageFilePriorityListHeads@ pagefile!
+
+			auto count
+			[pri@]IOPageFilePriorityCount@ count!
+
+			if (count@ ~~)
+				break
+			end
+
+			// Try to evenly distribute the contraction thoughout the priority
+			// level.
+
+			auto contractionpart
+
+			if (tries@ 1 <)
+				// Try to evenly distribute.
+
+				contraction@ count@ 1 - + count@ / contractionpart!
+			end else
+				// We tried too many times, try all now.
+
+				contraction@ contractionpart!
+			end
+
+			while (count@)
+				auto realcontraction
+				contractionpart@ // contraction
+				pagefile@ // pagefile
+				IOiPageFileTryContract realcontraction!
+
+				if (realcontraction@)
+					1 onesuccess!
+				end
+
+				// Move the pagefile to the tail of the priority list so that
+				// we don't try to contract it again for a while.
+
+				pagefile@ IOiPageFile_Next + @ [pri@]IOPageFilePriorityListHeads!
+
+				if ([pri@]IOPageFilePriorityListTails@ pagefile@ ~=)
+					pagefile@ [pri@]IOPageFilePriorityListTails@ IOiPageFile_Next + !
+				end
+
+				pagefile@ [pri@]IOPageFilePriorityListTails!
+
+				if ([pri@]IOPageFilePriorityListHeads@ ~~)
+					pagefile@ [pri@]IOPageFilePriorityListHeads!
+				end
+
+				0 pagefile@ IOiPageFile_Next + !
+
+				[pri@]IOPageFilePriorityListHeads@ pagefile!
+
+				// Figure out if that contraction was good enough.
+
+				if (realcontraction@ contraction@ >)
+					0 contraction!
+				end else
+					realcontraction@ contraction -=
+				end
+
+				if (contraction@ ~~)
+					break
+				end
+
+				1 count -=
+			end
+
+			if (contraction@ ~~)
+				break
+			end
+
+			if (onesuccess@ ~~)
+				// Not even one success on this priority level, move on.
+
+				break
+			end
+
+			1 tries +=
+		end
+
+		if (contraction@ ~~)
+			break
+		end
+	end
+
+	IOiPageFileCreateUnlock
+end
+
+fn IOiPageFileTryContract { contraction pagefile -- contractedby }
+	0 contractedby!
+
+	if (contraction@ IOPAGEFILEMINIMUMEXTENSION <)
+		IOPAGEFILEMINIMUMEXTENSION contraction!
+	end
+
+	if (contraction@ pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_MinimumSize + @ - >)
+		pagefile@ IOiPageFile_CurrentSize + @ pagefile@ IOiPageFile_MinimumSize + @ - contraction!
+	end
+
+	if (contraction@ IOPAGEFILEMINIMUMEXTENSION <)
+		return
+	end
+
+	if (contraction@ MmCommitLimit@ >)
+		// This check is fine since the currently executing thread is the only
+		// one that is allowed to shrink the commit limit. Others can grow it,
+		// but it can only be shrunk by this one worker thread.
+
+		return
+	end
+
+	while (contraction@ IOPAGEFILEMINIMUMEXTENSION >=)
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		// Only contract if the new commit limit would leave a margin of >=64
+		// pages from the current commit usage. This attempts to avoid
+		// excessive expansion and contraction cycles.
+
+		if (MmCommitLimit@ contraction@ - MmCommitUsage@ 64 + >=)
+			auto clear
+			contraction@ // runlength
+			pagefile@ IOiPageFile_CurrentSize + @ contraction@ - // index
+			pagefile@ IOiPageFile_BitmapHeader + // header
+			ComBitmapCheckClearBits clear!
+
+			if (clear@)
+				// Chop!
+
+				contraction@ // runlength
+				pagefile@ IOiPageFile_CurrentSize + @ contraction@ - // index
+				pagefile@ IOiPageFile_BitmapHeader + // header
+				ComBitmapSetBits
+
+				contraction@ pagefile@ IOiPageFile_CurrentSize + -=
+				contraction@ IOSwapPagesCount -=
+				contraction@ MmCommitLimit -=
+
+				0 pagefile@ IOiPageFile_Hint + !
+
+				ipl@ KeIPLLower
+
+				pagefile@ IOiPageFile_CurrentSize + @ PAGESHIFT << // newsize
+				0 // growing
+				0 // keeplocked
+				0 // zero
+				OSFILEFLAG_NOCACHE // flags
+				pagefile@ IOiPageFile_CapturedFCB + @ // fcb
+				IOFileControlBlockTruncate drop drop
+
+				contraction@ contractedby!
+
+				contraction@ [pagefile@ IOiPageFile_Priority + @]IOPageFilePriorityExtensionSpace +=
+
+				return
+			end
+		end
+
+		ipl@ KeIPLLower
+
+		1 contraction >>=
+	end
+end
+
+fn IOPageFileFullOrFragmented { fragmented -- }
+	// Called at IPLDPC when the modified page writer discovers that a
+	// pagefile is full. This is a problem since it makes us unable to clean
+	// any more modified anonymous pages. First, check to see whether there's
+	// really an issue (i.e. the pagefiles are really super full), and then
+	// issue an expansion request if needed.
+
+	auto oughttohave
+
+	if (fragmented@)
+		// Too fragmented, always extend by one minimum extension unit.
+		// If we were to check the pagefiles, we would likely decide they
+		// have enough space already and return, which we don't want.
+
+		IOPAGEFILEMINIMUMEXTENSION oughttohave!
+	end else
+		// Not enough space to clean the modified page list.
+		// Figure out what the situation is and how we can resolve it.
+
+		auto i
+		0 i!
+
+		auto modanon
+		MmModifiedPageCount@ MmModifiedFilePageCount@ - modanon!
+
+		auto pagefile
+
+		auto total
+		0 total!
+
+		auto used
+		0 used!
+
+		// No synchronization is required since IOPageFileCount isn't
+		// incremented until a pagefile has been completely initialized.
+
+		while (i@ IOPageFileCount@ <)
+			[i@]IOPageFiles@ pagefile!
+
+			pagefile@ IOiPageFile_CurrentSize + @ total +=
+			pagefile@ IOiPageFile_UsedCount + @ used +=
+
+			1 i +=
+		end
+
+		used@ modanon@ + 10 + oughttohave!
+
+		if (oughttohave@ total@ <=)
+			return
+		end
+
+		// Yes, there is a problem, we ought to extend the pagefiles.
+
+		total@ oughttohave -=
+
+		if (oughttohave@ 30 <)
+			30 oughttohave!
+		end
+
+		if (oughttohave@ IOPAGEFILEMINIMUMEXTENSION >)
+			IOPAGEFILEMINIMUMEXTENSION oughttohave!
+		end
+	end
+
+	// Negative pages indicates an absolute extension request.
+	// Positive means relative to current commit usage, which we don't
+	// want here.
+
+	IPLDPC // ipl
+	MUSTSUCCEED // pri
+	0 oughttohave@ - // pages
+	IOPageFileRequestExpansion drop
+end

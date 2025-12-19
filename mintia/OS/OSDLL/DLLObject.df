@@ -1,0 +1,362 @@
+//
+// Implements userspace object management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSEnvironment.h"
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "OSDLL.h"
+
+fn OSGetCWD { cwd bufsize -- ok }
+	cwd@ // env
+	"PWD" // name
+	bufsize@ // bufsize
+	OSGetEnvironmentVariable ok!
+end
+
+buffer OSChangeCWDBuffer OSFILEPATHMAX
+
+fn OSChangeCWD { path -- ok }
+	// XXX not re-entrant but that should be fine since you're doing something
+	// wrong if you try to change a process-global property in a multithreaded
+	// way without your own mutex anyway.
+
+	auto dirh
+	OSPEB OSPEBs_CurrentDirectory + @ dirh!
+
+	auto newh
+	OSFILETYPE_DIRECTORY // filetype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	path@ // path
+	OSFileOpen ok! newh!
+
+	if (ok@)
+		return
+	end
+
+	newh@ OSPEB OSPEBs_CurrentDirectory + !
+
+	path@ // path
+	OSChangeCWDBuffer // canon
+	OSFILEPATHMAX // bufsize
+	OSRealPath ok!
+
+	if (ok@)
+		return
+	end
+
+	if (dirh@ -1 ~=)
+		dirh@ OSClose ok!
+
+		if (DEBUGCHECKS)
+			if (ok@)
+				"OSChangeCWD 1\n" OSAbort
+			end
+		end
+	end
+
+	OSChangeCWDBuffer // env
+	"PWD" // name
+	OSSetEnvironmentVariable ok!
+end
+
+fn OSLastComponent { path -- lcomp }
+	// get pointer to last component of path
+
+	path@ lcomp!
+
+	auto ins
+	0 ins!
+
+	while (path@ gb)
+		if (path@ gb '/' ==)
+			1 ins!
+		end elseif (ins@ 1 ==)
+			0 ins!
+			path@ lcomp!
+		end
+
+		1 path +=
+	end
+end
+
+fn OSDirectoryName { path dirname bufsize -- ok }
+	// get parent directory of path in dirname
+
+	0 ok!
+
+	auto dirp
+	path@ OSLastComponent dirp!
+
+	if (dirp@ gb '/' ==)
+		'/' dirname@ sb
+		0 dirname@ 1 + sb
+	end elseif (dirp@ gb ':' ==)
+		1 bufsize -=
+		while (dirp@ gb bufsize@ &&)
+			dirp@ gb dirname@ sb
+
+			1 dirp +=
+			1 dirname +=
+			1 bufsize -=
+		end
+
+		0 dirname@ sb
+	end else
+		path@ dirp -=
+		bufsize@ 1 - dirp@ min dirp!
+
+		dirname@ // dest
+		path@ // src
+		dirp@ // max
+		strncpy
+
+		if (dirname@ gb ~~)
+			'.' dirname@ sb
+			'/' dirname@ 1 + sb
+			0 dirname@ 2 + sb
+		end
+	end
+end
+
+fn OSRealPath { path canon bufsize -- ok }
+	// get canonized version of path in canon.
+	// this is a horrible horrible function.
+
+	if (bufsize@ 16 <)
+		-1 ok!
+
+		return
+	end
+
+	canon@ // ptr
+	bufsize@ // size
+	0 // word
+	memset
+
+	auto pcomp
+	OSFILEPATHMAX alloc pcomp!
+
+	0 ok!
+
+	auto off
+
+	if (path@ gb '/' ==)
+		1 off!
+		'/' canon@ sb
+	end elseif (path@ gb ':' ==)
+		0 off!
+
+		while (path@ gb)
+			if (path@ gb '/' ==)
+				break
+			end
+
+			path@ gb canon@ off@ + sb
+
+			1 path +=
+			1 off +=
+		end
+
+		if (path@ gb '/' ==)
+			'/' canon@ off@ + sb
+			1 off +=
+		end
+	end else
+		canon@ bufsize@ OSGetCWD ok!
+		
+		if (ok@)
+			return
+		end
+
+		if (canon@ gb ':' ==)
+			1 off!
+
+			while (canon@ off@ + gb)
+				if (canon@ off@ + gb '/' ==)
+					break
+				end
+
+				1 off +=
+			end
+
+			1 off +=
+		end else
+			1 off!
+		end
+	end
+
+	auto ci
+	canon@ strlen ci!
+
+	auto lenleft
+	bufsize@ ci@ - lenleft!
+
+	while (1)
+		if (lenleft@ ~~)
+			-1 ok!
+			return
+		end
+
+		while (path@ gb '/' ==)
+			1 path +=
+		end
+
+		if (path@ gb 0 ==)
+			break
+		end
+
+		auto pr
+		0 pr!
+
+		while (1)
+			if (path@ gb '/' ==)
+				break
+			end
+
+			if (path@ gb 0 ==)
+				break
+			end
+
+			if (pr@ OSFILEPATHMAX 1 - <)
+				path@ gb pcomp@ pr@ + sb
+				1 pr +=
+			end
+
+			1 path +=
+		end
+
+		0 pcomp@ pr@ + sb
+
+		if (pcomp@ "." strcmp)
+			continue
+		end
+
+		if (pcomp@ ".." strcmp)
+			while (canon@ ci@ + gb '/' ~=)
+				if (ci@ 0 ==)
+					-1 ok!
+					return
+				end
+
+				1 ci -=
+				1 lenleft +=
+			end
+
+			if (ci@ off@ 1 - ==)
+				'/' canon@ ci@ + sb
+				off@ ci!
+			end
+
+			canon@ ci@ + strzero
+
+			continue
+		end
+
+		if (ci@ off@ >)
+			'/' canon@ ci@ + sb
+			1 ci +=
+			1 lenleft -=
+		end
+
+		pcomp@ strlen pr!
+
+		if (pr@ lenleft@ >=)
+			-1 ok!
+			return
+		end
+
+		canon@ ci@ + // dest
+		pcomp@ // src
+		lenleft@ 1 - // max
+		strncpy
+
+		pr@ ci +=
+		pr@ lenleft -=
+	end
+end
+
+fn DLLPathToHandleAndRelativePath { path -- handle rpath ok }
+	path@ rpath!
+	0 ok!
+
+	if (path@ gb '/' ==)
+		if (path@ "//~/" 4 strncmp)
+			OSPEB OSPEBs_UserObjectDirectory + @ handle!
+			4 rpath +=
+		end else
+			OSNONE handle!
+		end
+	end elseif (path@ gb ':' ==)
+		OSNONE handle!
+	end else
+		if (path@ gb ~~)
+			STATUS_NOT_FOUND ok!
+
+			return
+		end
+
+		OSPEB OSPEBs_CurrentDirectory + @ handle!
+	end
+end
+
+// these calls have wrapper functions because they depend on things like the
+// user object directory and current directory which are userspace constructs.
+
+fn OSOpen { filetype objecttype flags access path -- handle ok }
+	auto dirh
+	path@ DLLPathToHandleAndRelativePath ok! path! dirh!
+
+	if (ok@)
+		return
+	end
+
+	filetype@ // filetype
+	objecttype@ // objecttype
+	flags@ // flags
+	access@ // access
+	dirh@ // initialobjecthandle
+	path@ // path
+	OSOpenRelative ok! handle!
+end
+
+fn OSPortConnect { rxmsg txmsg timeout path -- porthandle ok }
+	auto dirh
+	path@ DLLPathToHandleAndRelativePath ok! path! dirh!
+
+	if (ok@)
+		return
+	end
+
+	rxmsg@ // rxmsg
+	txmsg@ // txmsg
+	timeout@ // timeout
+	dirh@ // initialobjecthandle
+	path@ // path
+	OSPortConnectRelative ok! porthandle!
+end
+
+fn OSPageFileCreate { minpages maxpages pri path -- ok }
+	auto dirh
+	path@ DLLPathToHandleAndRelativePath ok! path! dirh!
+
+	if (ok@)
+		return
+	end
+
+	minpages@ // minpages
+	maxpages@ // maxpages
+	pri@ // pri
+	dirh@ // initialobjecthandle
+	path@ // path
+	OSPageFileCreateRelative ok!
+end

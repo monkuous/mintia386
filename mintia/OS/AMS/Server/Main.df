@@ -1,0 +1,625 @@
+//
+// Initialization for the MINTIA Authority Management Server.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSCrypt.h"
+
+#include "<inc>/AmsAPI.h"
+
+#include "AmsServer.h"
+
+buffer AmsMemoryInformation OSMemoryInformation_SIZEOF
+public AmsMemoryInformation
+
+var AmsApiPort 0
+public AmsApiPort
+
+var AmsUsersDirectory 0
+public AmsUsersDirectory
+
+fn Main { ... -- ret }
+	AmsInit ret!
+
+	ret@ OSCURRENTTHREAD OSThreadTerminate drop
+end
+
+fn AmsInit { -- ok }
+	AmsMemoryInformation OSMemoryQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	AmsDbOpen ok!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to open db: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	auto dirh
+	0 // filetype
+	OSTYPE_DIRECTORY // objecttype
+	0 // flags
+	ACCESS_EXEC ACCESS_WRITE | // access
+	"//:/" // path
+	OSOpen ok! dirh!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to open object root: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	0 // filetype
+	OSTYPE_DIRECTORY // objecttype
+	0 // flags
+	ACCESS_ALL // access
+	"//:/Users" // path
+	OSOpen ok! AmsUsersDirectory!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to open Users directory object: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	0 // flags
+	AmsMessage_SIZEOF OSMessageHeader_SIZEOF - // maxlen
+	ACCESS_OWNER_ALL ACCESS_GROUP_EXEC | ACCESS_WORLD_EXEC | // permissions
+	"AmsApiPort" // name
+	OSPortCreate ok! AmsApiPort!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to create AmsApiPort: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	AmsApiPort@ // objecthandle
+	dirh@ // directoryhandle
+	OSObjectDirectoryInsert ok!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to insert //:/AmsApiPort: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	auto thandle
+	0 // context
+	pointerof AmsApiThread // startfunc
+	0 // creationflags
+	ACCESS_OWNER_ALL // permissions
+	"API" // name
+	OSCURRENTPROCESS // processhandle
+	OSThreadCreate ok! thandle!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		"\namssrv: failed to create API thread: %s\n" OSGetStdErr FPrintf
+		return
+	end
+
+	thandle@ OSClose drop
+	dirh@ OSClose drop
+end
+
+fn AmsApiThread { context -- ret }
+	AmsApiLoop ret!
+end
+
+fn AmsApiLoop { -- ok }
+	auto rxmsg
+	AmsMessage_SIZEOF alloc rxmsg!
+
+	auto replymsg
+	0 replymsg!
+
+	while (1)
+		rxmsg@ // rxmsg
+		replymsg@ // txmsg
+		OSWAIT_TIMEOUTINFINITE // timeout
+		AmsApiPort@ // porthandle
+		OSPortSendAndWaitReceive ok!
+
+		0 replymsg!
+
+		if (ok@)
+			continue
+		end
+
+		if (rxmsg@ OSMessageHeader_TypeB + gb OSPORT_MESSAGE_CONNECTION ==)
+			rxmsg@ AmsHandleConnection
+		end elseif (rxmsg@ OSMessageHeader_TypeB + gb OSPORT_MESSAGE_DISCONNECT ==)
+			rxmsg@ AmsHandleDisconnection
+		end elseif (rxmsg@ OSMessageHeader_TypeB + gb OSPORT_MESSAGE_REQUEST ==)
+			auto rt
+			rxmsg@ OSMessageHeader_SubtypeB + gb rt!
+
+			if (rt@ AMSAPI_COMPLETE_CONNECTION ~=)
+				if (rxmsg@ OSMessageHeader_Context + @ AmsClient_SectionBase + @ ~~)
+					// connection not completed yet
+					STATUS_INVALID_ARGUMENT ok!
+				end elseif (rxmsg@ OSMessageHeader_Handle + @ OSNONE ~=)
+					// connection completed, but a handle was inexplicably sent
+					STATUS_INVALID_ARGUMENT ok!
+				end
+			end elseif (rxmsg@ OSMessageHeader_Context + @ AmsClient_SectionBase + @)
+				// this is a connection completion, but that already happened
+				STATUS_INVALID_ARGUMENT ok!
+			end
+
+			if (ok@ ~~)
+				if (rt@ AMSAPICOUNT >=)
+					// fail the request
+					STATUS_INVALID_ARGUMENT ok!
+				end else
+					// process request
+					rxmsg@ // msg
+					rxmsg@ OSMessageHeader_Context + @ // client
+					[rt@]AmsApiDispatchTable@ AmsDispatchFunction ok!
+				end
+			end
+
+			// make sure to close any handles we were passed
+			if (rxmsg@ OSMessageHeader_Handle + @ OSNONE ~=)
+				rxmsg@ OSMessageHeader_Handle + @ OSClose drop
+			end
+
+			ok@ rxmsg@ AmsMessage_Status + !
+			OSNONE rxmsg@ OSMessageHeader_Handle + !
+			AMSBODYLENGTH rxmsg@ OSMessageHeader_LengthI + si
+			OSPORT_MESSAGE_REPLY rxmsg@ OSMessageHeader_TypeB + sb
+			rxmsg@ replymsg!
+		end else
+			// unknown, ignore
+			continue
+		end
+	end
+end
+
+fn AmsHandleConnection { msg -- }
+	auto ok
+
+	auto client
+	msg@ OSMessageHeader_ClientID + @ // cid
+	AmsClientCreate ok! client!
+
+	if (ok@)
+		// reject the connection
+
+		0 // context
+		msg@ // txmsg
+		1 // reject
+		AmsApiPort@ // porthandle
+		OSPortAccept drop
+
+		return
+	end
+
+	client@ // context
+	msg@ // txmsg
+	0 // reject
+	AmsApiPort@ // porthandle
+	OSPortAccept ok!
+
+	if (ok@)
+		// client disappeared while we were processing its connection request
+
+		client@ AmsClientDelete
+
+		return
+	end
+end
+
+fn AmsHandleDisconnection { msg -- }
+	msg@ OSMessageHeader_Context + @ AmsClientDelete
+end
+
+table AmsApiDispatchTable
+	pointerof AmsApiQueryByUID         // AMSAPI_QUERY_BY_UID
+	pointerof AmsApiQueryUIDByName     // AMSAPI_QUERY_UID_BY_NAME
+	pointerof AmsApiQueryGIDByName     // AMSAPI_QUERY_GID_BY_NAME
+	pointerof AmsApiQueryByGID         // AMSAPI_QUERY_BY_GID
+	pointerof AmsApiCompleteConnection // AMSAPI_COMPLETE_CONNECTION
+	pointerof AmsApiLogon              // AMSAPI_LOGON
+	pointerof AmsApiChangePassword     // AMSAPI_CHANGE_PASSWORD
+	pointerof AmsApiEnumerateUsers     // AMSAPI_ENUMERATE_USERS
+	pointerof AmsApiEnumerateGroups    // AMSAPI_ENUMERATE_GROUPS
+	pointerof AmsApiCreateUser         // AMSAPI_CREATE_USER
+	pointerof AmsApiCreateGroup        // AMSAPI_CREATE_GROUP
+	pointerof AmsApiEditUser           // AMSAPI_EDIT_USER
+	pointerof AmsApiEditGroup          // AMSAPI_EDIT_GROUP
+	pointerof AmsApiEndUserSessions    // AMSAPI_END_USER_SESSIONS
+endtable
+
+const AMSAPICOUNT 14
+
+fn (AmsDispatchFunction) AmsApiEndUserSessions { msg client -- ok }
+	client@ AmsClient_SectionBase + @@ // uid
+	client@ AmsClient_ProcessHandle + @ // processhandle
+	AmsInternalEndUserSessions ok!
+end
+
+fn (AmsDispatchFunction) AmsApiQueryUIDByName { msg client -- ok }
+	auto name
+	AMSNAMEMAX alloc name!
+
+	name@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageQueryUIDByName_UserName + // src
+	AMSNAMEMAX 1 - // max
+	strncpy
+
+	auto uid
+	name@ AmsQueryUIDByName ok! uid!
+
+	if (ok@)
+		return
+	end
+
+	// store the uid where the username was
+	uid@ client@ AmsClient_SectionBase + @ AmsMessageQueryUIDByName_UserName + !
+end
+
+fn (AmsDispatchFunction) AmsApiQueryGIDByName { msg client -- ok }
+	auto name
+	AMSNAMEMAX alloc name!
+
+	name@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageQueryGIDByName_GroupName + // src
+	AMSNAMEMAX 1 - // max
+	strncpy
+
+	auto gid
+	name@ AmsQueryGIDByName ok! gid!
+
+	if (ok@)
+		return
+	end
+
+	// store the gid where the groupname was
+	gid@ client@ AmsClient_SectionBase + @ AmsMessageQueryGIDByName_GroupName + !
+end
+
+fn (AmsDispatchFunction) AmsApiQueryByUID { msg client -- ok }
+	client@ AmsClient_SectionBase + @ // info
+	client@ AmsClient_SectionBase + @@ // uid
+	AmsQueryByUID ok!
+end
+
+fn (AmsDispatchFunction) AmsApiQueryByGID { msg client -- ok }
+	client@ AmsClient_SectionBase + @ // info
+	client@ AmsClient_SectionBase + @@ // gid
+	AmsQueryByGID ok!
+end
+
+fn (AmsDispatchFunction) AmsApiCompleteConnection { msg client -- ok }
+	if (msg@ OSMessageHeader_Handle + @ OSNONE ==)
+		STATUS_INVALID_ARGUMENT ok!
+		return
+	end
+
+	auto realva
+	AMSSECTIONSIZE OSPAGEOFFSETMASK + OSPAGENUMBERMASK & // length
+	HEAPSTART // startva
+	0 // sectionoffset
+	msg@ OSMessageHeader_Handle + @ // mappedhandle
+	OSCURRENTPROCESS // processhandle
+	PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+	0 // flags
+	OSMapView ok! realva!
+
+	if (ok@)
+		return
+	end
+
+	realva@ client@ AmsClient_SectionBase + !
+end
+
+fn (AmsDispatchFunction) AmsApiLogon { msg client -- ok }
+	auto password
+	AMSPASSWORDMAX alloc password!
+
+	password@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageLogon_Password + // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	auto flags
+	client@ AmsClient_SectionBase + @ AmsMessageLogon_Flags + @ flags!
+
+	auto uid
+	client@ AmsClient_SectionBase + @ AmsMessageLogon_UID + @ uid!
+
+	auto obdirhandle
+	flags@ // flags
+	password@ // password
+	uid@ // uid
+	client@ AmsClient_ProcessHandle + @ // processhandle
+	AmsInternalLogon ok! obdirhandle!
+
+	if (ok@)
+		return
+	end
+
+	auto desthandle
+	obdirhandle@ // handle
+	-1 // access
+	OSCURRENTPROCESS // srcprocesshandle
+	client@ AmsClient_ProcessHandle + @ // destprocesshandle
+	OSHandleDuplicate ok! desthandle!
+
+	obdirhandle@ OSClose drop
+
+	if (ok@)
+		return
+	end
+
+	uid@ client@ AmsClient_LoggedOnAsUID + !
+
+	desthandle@ client@ AmsClient_SectionBase + @ AmsMessageLogon_UserObDirHandle + !
+end
+
+fn (AmsDispatchFunction) AmsApiChangePassword { msg client -- ok }
+	auto oldpassword
+	AMSPASSWORDMAX alloc oldpassword!
+
+	auto newpassword
+	AMSPASSWORDMAX alloc newpassword!
+
+	oldpassword@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageChangePassword_OldPassword + // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	newpassword@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageChangePassword_NewPassword + // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	client@ AmsClient_SectionBase + @ AmsMessageChangePassword_Flags + @ // flags
+	oldpassword@ // oldpassword
+	newpassword@ // newpassword
+	client@ AmsClient_SectionBase + @ AmsMessageChangePassword_UID + @ // uid
+	client@ AmsClient_ProcessHandle + @ // processhandle
+	AmsInternalChangePassword ok!
+end
+
+fn (AmsDispatchFunction) AmsApiEnumerateUsers { msg client -- ok }
+	auto count
+	auto context
+
+	client@ AmsClient_SectionBase + @ AmsMessageEnumerate_Context + @ // context
+	ENUMUSERMAX // max
+	client@ AmsClient_SectionBase + @ AmsMessageEnumerate_SIZEOF + // buf
+	AmsInternalEmumerateUsers ok! count! context!
+
+	if (ok@)
+		return
+	end
+
+	count@ client@ AmsClient_SectionBase + @ AmsMessageEnumerate_ReturnedIDs + !
+	context@ client@ AmsClient_SectionBase + @ AmsMessageEnumerate_Context + !
+
+	0 ok!
+end
+
+fn (AmsDispatchFunction) AmsApiEnumerateGroups { msg client -- ok }
+	auto count
+	auto context
+
+	client@ AmsClient_SectionBase + @ AmsMessageEnumerate_Context + @ // context
+	ENUMGROUPMAX // max
+	client@ AmsClient_SectionBase + @ AmsMessageEnumerate_SIZEOF + // buf
+	AmsInternalEmumerateGroups ok! count! context!
+
+	if (ok@)
+		return
+	end
+
+	count@ client@ AmsClient_SectionBase + @ AmsMessageEnumerate_ReturnedIDs + !
+	context@ client@ AmsClient_SectionBase + @ AmsMessageEnumerate_Context + !
+
+	0 ok!
+end
+
+fn (AmsDispatchFunction) AmsApiCreateUser { msg client -- ok }
+	auto kinfo
+	AmsUserInformation_SIZEOF alloc kinfo!
+
+	auto kpassword
+	AMSPASSWORDMAX alloc kpassword!
+
+	kpassword@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageCreateUser_Password + // src
+	AMSPASSWORDMAX 1 - // max
+	strncpy
+
+	kinfo@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageCreateUser_Info + // src
+	AmsUserInformation_SIZEOF // sz
+	memcpy
+
+	0 // allowempty
+	kinfo@ // info
+	AmsUserInfoFix ok!
+
+	if (ok@)
+		return
+	end
+
+	auto uid
+	kpassword@ // password
+	kinfo@ // info
+	client@ AmsClient_ProcessHandle + @ // processhandle
+	AmsUserCreate ok! uid!
+
+	if (ok@ ~~)
+		uid@ client@ AmsClient_SectionBase + @ AmsMessageCreateUser_UID + !
+	end
+end
+
+fn (AmsDispatchFunction) AmsApiCreateGroup { msg client -- ok }
+	auto kinfo
+	AmsGroupInformation_SIZEOF alloc kinfo!
+
+	kinfo@ // dest
+	client@ AmsClient_SectionBase + @ AmsMessageCreateGroup_Info + // src
+	AmsGroupInformation_SIZEOF // sz
+	memcpy
+
+	0 // allowempty
+	kinfo@ // info
+	AmsGroupInfoFix ok!
+
+	if (ok@)
+		return
+	end
+
+	auto gid
+	kinfo@ // info
+	client@ AmsClient_ProcessHandle + @ // processhandle
+	AmsGroupCreate ok! gid!
+
+	if (ok@ ~~)
+		gid@ client@ AmsClient_SectionBase + @ AmsMessageCreateGroup_GID + !
+	end
+end
+
+fn (AmsDispatchFunction) AmsApiEditUser { msg client -- ok }
+	auto uid
+	client@ AmsClient_SectionBase + @ AmsMessageEditUser_UID + @ uid!
+
+	auto delete
+	client@ AmsClient_SectionBase + @ AmsMessageEditUser_Delete + @ delete!
+
+	if (delete@)
+		uid@ // uid
+		client@ AmsClient_ProcessHandle + @ // processhandle
+		AmsUserDelete ok!
+	end else
+		auto kinfo
+		AmsUserInformation_SIZEOF alloc kinfo!
+
+		kinfo@ // dest
+		client@ AmsClient_SectionBase + @ AmsMessageEditUser_Info + // src
+		AmsUserInformation_SIZEOF // sz
+		memcpy
+
+		1 // allowempty
+		kinfo@ // info
+		AmsUserInfoFix ok!
+
+		if (ok@)
+			return
+		end
+	
+		kinfo@ // info
+		uid@ // uid
+		client@ AmsClient_ProcessHandle + @ // processhandle
+		AmsUserEdit ok!
+	end
+end
+
+fn (AmsDispatchFunction) AmsApiEditGroup { msg client -- ok }
+	auto gid
+	client@ AmsClient_SectionBase + @ AmsMessageEditGroup_GID + @ gid!
+
+	auto delete
+	client@ AmsClient_SectionBase + @ AmsMessageEditGroup_Delete + @ delete!
+
+	if (delete@)
+		gid@ // gid
+		client@ AmsClient_ProcessHandle + @ // processhandle
+		AmsGroupDelete ok!
+	end else
+		auto kinfo
+		AmsGroupInformation_SIZEOF alloc kinfo!
+
+		kinfo@ // dest
+		client@ AmsClient_SectionBase + @ AmsMessageEditGroup_Info + // src
+		AmsGroupInformation_SIZEOF // sz
+		memcpy
+
+		1 // allowempty
+		kinfo@ // info
+		AmsGroupInfoFix ok!
+
+		if (ok@)
+			return
+		end
+
+		kinfo@ // info
+		gid@ // gid
+		client@ AmsClient_ProcessHandle + @ // processhandle
+		AmsGroupEdit ok!
+	end
+end
+
+fn AmsUserInfoFix { allowempty info -- ok }
+	0 ok!
+
+	// make sure the info fields aren't nasty before we pass them on.
+	
+	// ensure the string fields are null terminated at their maximum length.
+
+	0 info@ AmsUserInformation_UserName + AMSNAMEMAX + 1 - sb
+
+	0 info@ AmsUserInformation_Home + OSFILEPATHMAX + 1 - sb
+	0 info@ AmsUserInformation_Shell + OSFILEPATHMAX + 1 - sb
+
+	// ensure the string fields are alphanumeric.
+
+	if (allowempty@ ~~)
+		if (info@ AmsUserInformation_UserName + "" strcmp)
+			STATUS_INVALID_USERNAME ok!
+
+			return
+		end
+	end
+
+	auto isalpha
+
+	info@ AmsUserInformation_UserName + OSStringIsAlphanumeric isalpha!
+
+	if (isalpha@ ~~)
+		STATUS_INVALID_USERNAME ok!
+
+		return
+	end
+end
+
+fn AmsGroupInfoFix { allowempty info -- ok }
+	0 ok!
+
+	// make sure the info fields aren't nasty before we pass them on.
+
+	// ensure the string fields are null terminated at their maximum length.
+
+	0 info@ AmsGroupInformation_GroupName + AMSNAMEMAX + 1 - sb
+
+	// ensure the string fields are alphanumeric.
+
+	if (allowempty@ ~~)
+		if (info@ AmsGroupInformation_GroupName + "" strcmp)
+			STATUS_INVALID_GROUPNAME ok!
+
+			return
+		end
+	end
+
+	auto isalpha
+
+	info@ AmsGroupInformation_GroupName + OSStringIsAlphanumeric isalpha!
+
+	if (isalpha@ ~~)
+		STATUS_INVALID_GROUPNAME ok!
+
+		return
+	end
+end

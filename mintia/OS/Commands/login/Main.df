@@ -1,0 +1,536 @@
+//
+// This source module implements the TTY session controller (login.exe).
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/AMS/Ams.h"
+
+#include "<ll>/OSDLL/OSConsoleControl.h"
+
+fn Main { ... -- ret }
+	// do what launchtty.exe used to do.
+	// make sure that the stdio handles are all replaced so that the shell
+	// doesn't inadvertently get handles to the system console.
+
+	0 ret!
+
+	if (argc@ 2 <)
+		return
+	end
+
+	auto tty
+	[1]argv@ tty!
+
+	auto stdin
+	OSFILETYPE_CHARDEVICE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	tty@ // path
+	OSFileOpen ret! stdin!
+
+	if (ret@)
+		return
+	end
+
+	stdin@ OSSetStdIn
+
+	auto handle
+	OSFILETYPE_CHARDEVICE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_WRITE | // access
+	tty@ // path
+	OSFileOpen ret! handle!
+
+	if (ret@)
+		return
+	end
+
+	handle@ OSSetStdOut
+
+	OSFILETYPE_CHARDEVICE // filetype
+	0 // flags
+	ACCESS_WRITE // access
+	tty@ // path
+	OSFileOpen ret! handle!
+
+	if (ret@)
+		return
+	end
+
+	handle@ OSSetStdErr
+
+	0 // arg2
+	OSCONSOLEIOCONTROL_RESETMODE // arg1
+	OSGetStdIn // filehandle
+	OSIOControl ret! drop
+
+	if (ret@)
+		return
+	end
+
+	UID_SYSTEM // uid
+	GID_SYSTEM // gid
+	ACCESS_OWNER_READ ACCESS_OWNER_WRITE | ACCESS_OWNER_EXEC | // permissions
+	handle@ // handle
+	OSSetSecurity ret!
+
+	if (ret@)
+		return
+	end
+
+	// make it so OSSIGNAL_TERM will only be delivered when we next wait.
+
+	OSSIGNAL_TERM // signal
+	OSCURRENTTHREAD // threadhandle
+	OSThreadDeliverOnWaitSignal drop
+
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_INT // signum
+	OSSignalSetAction drop
+
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_QUIT // signum
+	OSSignalSetAction drop
+
+	pointerof SignalTerm // action
+	OSSIGNAL_TERM // signum
+	OSSignalSetAction drop
+
+	LoginMain ret!
+end
+
+fn (OSSignalHandler) SignalTerm { context signum -- }
+	// we receive this signal from amssrv when it decides to murder our
+	// session, and also from the kernel when it is shutting down.
+
+	// re-mark this signal as deliver-on-wait since that gets cleared when it
+	// is delivered.
+
+	OSSIGNAL_TERM // signal
+	OSCURRENTTHREAD // threadhandle
+	OSThreadDeliverOnWaitSignal drop
+end
+
+fn PortDisconnected { -- }
+	"Port disconnected -- try again.\n" Printf
+
+	AmsFree
+
+	0 AmsInited!
+end
+
+var AmsInited 0
+
+buffer Quota OSQuota_SIZEOF
+buffer MemoryInformation OSMemoryInformation_SIZEOF
+
+buffer UsernameBuffer 128
+buffer PasswordBuffer 128
+
+fn Login { -- obdirhandle user loggedin }
+	0 loggedin!
+
+	"username: " Printf
+
+	// obliterate my own working set since I will be sleeping indefinitely
+	OSWorkingSetPurge drop
+
+	if (UsernameBuffer 127 OSReadline)
+		'\n' Putc
+		return
+	end
+
+	auto buf
+	UsernameBuffer buf!
+
+	while (buf@ gb ' ' ==)
+		1 buf +=
+	end
+
+	if (buf@ strlen 0 ==)
+		return
+	end
+
+	OSCONSOLEMODE_NOECHO // arg2
+	OSCONSOLEIOCONTROL_SETMODE // arg1
+	OSGetStdIn // filehandle
+	OSIOControl drop drop
+
+	"password: " Printf
+	PasswordBuffer 127 Gets
+
+	0 // arg2
+	OSCONSOLEIOCONTROL_RESETMODE // arg1
+	OSGetStdIn // filehandle
+	OSIOControl drop drop
+
+	'\n' Putc
+
+	if (AmsInited@ ~~)
+		AmsInit ok!
+
+		if (ok@)
+			ok@ OSStatusGetName "login: couldn't connect to AMS: %s\n" OSGetStdErr FPrintf
+			return
+		end
+
+		1 AmsInited!
+	end
+
+	auto ok
+	UsernameBuffer // username
+	AmsQueryUIDByName ok! user!
+
+	if (ok@)
+		if (ok@ STATUS_NO_SUCH_USER ==)
+			"Incorrect login\n" Printf
+
+			return
+		end
+
+		if (ok@ STATUS_PORT_DISCONNECTED ==)
+			PortDisconnected
+
+			return
+		end
+		
+		ok@ OSStatusGetName "login: %s\n" OSGetStdErr FPrintf
+
+		return
+	end
+
+	0 // flags
+	PasswordBuffer // password
+	user@ // uid
+	AmsLogon ok! obdirhandle!
+
+	if (ok@)
+		if (ok@ STATUS_INCORRECT_PASSWORD ==)
+			"Incorrect login\n" Printf
+
+			return
+		end
+
+		if (ok@ STATUS_PORT_DISCONNECTED ==)
+			PortDisconnected
+
+			return
+		end
+
+		ok@ OSStatusGetName "login: %s\n" OSGetStdErr FPrintf
+		
+		return
+	end
+
+	1 loggedin!
+
+	UsernameBuffer // env
+	"USER" // name
+	OSSetEnvironmentVariable drop
+end
+
+buffer FileBuf 128
+
+fn PrintFile { path -- ok }
+	auto handle
+	OSFILETYPE_FILE // filetype
+	0 // flags
+	ACCESS_READ // access
+	path@ // path
+	OSFileOpen ok! handle!
+
+	if (ok@)
+		0 ok!
+		return
+	end
+
+	auto bytes
+
+	OSWAIT_TIMEOUTINFINITE // timeout
+	0 // flags
+	128 // length
+	FileBuf // buffer
+	handle@ // handle
+	OSFileRead ok! bytes!
+
+	if (ok@)
+		return
+	end
+
+	auto r
+
+	while (bytes@)
+		0 // flags
+		bytes@ // length
+		FileBuf // buffer
+		OSGetStdOut // filehandle
+		OSFileWrite drop drop
+
+		OSWAIT_TIMEOUTINFINITE // timeout
+		0 // flags
+		128 // length
+		FileBuf // buffer
+		handle@ // filehandle
+		OSFileRead ok! bytes!
+
+		if (ok@)
+			return
+		end
+	end
+end
+
+fn LoginMain { -- ret }
+	0 ret!
+
+	"\n" Printf
+
+	auto info
+	AmsUserInformation_SIZEOF alloc info!
+
+	auto uid
+	auto gid
+
+	auto home
+	auto shell
+
+	auto obdirhandle
+
+	while (1)
+		auto loggedin
+		auto user
+		Login loggedin! user! obdirhandle!
+
+		if (loggedin@)
+			info@ // info
+			user@ // uid
+			AmsQueryByUID ret!
+
+			if (ret@)
+				obdirhandle@ OSClose drop
+
+				"no uid -- contact your system administrator\n" Printf
+
+				continue
+			end
+
+			user@ uid!
+
+			info@ AmsUserInformation_GID + @ gid!
+			info@ AmsUserInformation_Home + home!
+			info@ AmsUserInformation_Shell + shell!
+			info@ AmsUserInformation_PoolQuota + @ Quota OSQuota_Pool + !
+			info@ AmsUserInformation_VirtualMemoryQuota + @ Quota OSQuota_VirtualMemory + !
+			info@ AmsUserInformation_PagedPoolQuota + @ Quota OSQuota_PagedPool + !
+			info@ AmsUserInformation_WorkingSetQuota + @ Quota OSQuota_WorkingSet + !
+
+			break
+		end
+	end
+
+	"/mintia/motd.txt" PrintFile ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "couldn't read motd: %s\n" Printf
+	end
+
+	MemoryInformation OSMemoryQuery ret!
+	
+	if (ret@ ~~)
+		MemoryInformation OSMemoryInformationDump
+	end
+
+	'\n' Putc
+
+	// give the console to the new user
+
+	uid@ // uid
+	gid@ // gid
+	-1 // permissions
+	OSGetStdIn // handle
+	OSSetSecurity drop
+
+	home@ // env
+	"HOME" // name
+	OSSetEnvironmentVariable drop
+
+	// change to the users home directory
+
+	home@ OSChangeCWD ret!
+
+	if (ret@)
+		ret@ OSStatusGetName home@ "couldn't cd %s: %s\n" Printf
+	end
+
+	obdirhandle@ // obdirhandle
+	uid@ // uid
+	gid@ // gid
+	shell@ // shell
+	SpawnShell ret!
+
+	if (ret@)
+		ret@ OSStatusGetName shell@ "couldn't spawn %s: %s\n" Printf
+
+		if (shell@ OSLastComponent "cmd.exe" strcmp ~~)
+			"trying cmd.exe\n" Printf
+
+			obdirhandle@ // obdirhandle
+			uid@ // uid
+			gid@ // gid
+			"/mintia/bin/cmd.exe" // shell
+			SpawnShell ret!
+
+			if (ret@)
+				ret@ OSStatusGetName "couldn't spawn cmd.exe: %s\n" Printf
+			end
+		end
+
+		0 ret!
+	end
+end
+
+fn SpawnShell { obdirhandle uid gid shell -- ok }
+	// create a new job object to contain the session tree.
+	// indicate that if our handle to the job object closes, we want the
+	// system to atomically kill the entire job tree. this is the nuclear
+	// option for if login.exe dies somehow.
+
+	auto jhandle
+	OSNONE // parentjobhandle
+	OSSIGNAL_KILL // signalonclose
+	0 // flags
+	ACCESS_OWNER_ALL // permissions
+	0 // name
+	OSJobCreate ok! jhandle!
+
+	if (ok@)
+		return
+	end
+
+	auto phandle
+	auto thandle
+
+	auto creationparams
+	OSCreationParams_SIZEOF alloc creationparams!
+
+	creationparams@ OSCreationBlockInitialize
+
+	uid@ creationparams@ OSCreationParams_QuotaUID + !
+	obdirhandle@ creationparams@ OSCreationParams_UserObjectDirectory + !
+
+	shell@ // path
+	OSPROCESS_SUSPENDED OSPROCESS_NEWSESSION | // creationflags
+	creationparams@ // creationparams
+	ACCESS_OWNER_ALL // permissions
+	0 // name
+	OSSpawn ok! phandle! thandle!
+
+	if (ok@)
+		jhandle@ OSClose drop
+
+		return
+	end
+
+	phandle@ // processhandle
+	jhandle@ // jobhandle
+	OSJobAddProcess ok!
+
+	if (ok@)
+		jhandle@ OSClose drop
+
+		phandle@ OSClose drop
+		thandle@ OSClose drop
+
+		return
+	end
+
+	if (gid@ GID_SYSTEM ==)
+		SYSTEMPERMISSION_ADMIN // permission
+		phandle@ // processhandle
+		OSGrantPermission drop
+	end
+
+	OSGetStdIn // filehandle
+	phandle@ // processhandle
+	OSProcessSetConsoleGroup drop
+
+	uid@ // uid
+	gid@ // gid
+	-1 // permissions
+	phandle@ // handle
+	OSSetSecurity drop
+
+	Quota // quota
+	phandle@ // processhandle
+	OSSetQuota drop
+
+	thandle@ OSThreadResume drop
+
+	thandle@ OSClose drop
+
+	auto actok
+	10000 // timeout
+	phandle@ // processhandle
+	OSProcessWaitForActivation actok! ok!
+
+	if (ok@ ~~)
+		actok@ ok!
+	end
+
+	if (ok@)
+		phandle@ OSClose drop
+
+		jhandle@ OSClose drop
+
+		return
+	end
+
+	// obliterate my own working set since I will be sleeping indefinitely.
+
+	OSWorkingSetPurge drop
+
+	1 // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	phandle@ // objecthandle
+	OSWaitForObject drop
+
+	phandle@ OSClose drop
+
+	// try to kill the session job in a friendly way.
+
+	1 // propagate
+	OSSIGNAL_TERM // signal
+	jhandle@ // jobhandle
+	OSJobSignal drop
+
+	// give it one second to clean up.
+
+	0 // alertable
+	1000 // timeout
+	jhandle@ // objecthandle
+	OSWaitForObject ok!
+
+	if (ok@)
+		// the wait failed, presumably due to a wait timeout.
+		// no more mister nice guy, time to pull out the big guns.
+		// this will atomically kill the job in a way that prevents the
+		// session from being able to create any more processes. thus the
+		// session's final termination is inevitable and we can wait
+		// infinitely and unalertably for that to happen.
+
+		1 // propagate
+		OSSIGNAL_KILL // signal
+		jhandle@ // jobhandle
+		OSJobSignal drop
+
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		jhandle@ // objecthandle
+		OSWaitForObject drop
+
+		0 ok!
+	end
+
+	jhandle@ OSClose drop
+end

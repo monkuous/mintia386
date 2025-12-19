@@ -1,0 +1,118 @@
+//
+// Implements module management and userspace dynamic linking.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSModule.h"
+#include "<ll>/OSDLL/OSAlloc.h"
+#include "<ll>/OSDLL/OSWait.h"
+#include "<ll>/OSDLL/OSFastMutex.h"
+
+#include "OSDLL.h"
+#include "../Common/Common.h"
+
+buffer DLLModuleMutex OSFastMutex_SIZEOF
+public DLLModuleMutex
+
+fn DLLModuleInit { -- }
+	"DLLModuleMutex" // name
+	DLLModuleMutex // fastmutex
+	OSFastMutexInitialize
+end
+
+// try to open module file by name.
+// search order is system directory, parent directory of executable, and then
+// user libraries directory.
+
+fn ComDLLOpenFile { name -- handle ok }
+	if (name@ gb '/' == name@ gb ':' == ||)
+		// it's a straight absolute path, just use it.
+
+		OSFILETYPE_FILE // filetype
+		0 // flags
+		ACCESS_READ ACCESS_EXEC | // access
+		name@ // path
+		OSFileOpen ok! handle!
+
+		return
+	end
+
+	auto fullpath
+	OSFILEPATHMAX alloc fullpath!
+
+	fullpath@ // dest
+	"/mintia/" // src
+	strcpy
+
+	fullpath@ 8 + // dest
+	name@ // src
+	strcpy
+
+	OSFILETYPE_FILE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	fullpath@ // path
+	OSFileOpen ok! handle!
+
+	if (ok@ STATUS_NOT_FOUND ~=)
+		// found it or other error occurred
+		return
+	end
+
+	// didn't find it, try executable parent directory
+
+	// this gets our executable path. it's basically OsPeb.Parameters[0]
+
+	OSPEB OSPEBs_Parameters + @ // path
+	fullpath@ // dirname
+	OSFILEPATHMAX // bufsize
+	OSDirectoryName ok!
+
+	if (ok@)
+		return
+	end
+
+	auto flen
+	fullpath@ strlen flen!
+
+	fullpath@ flen@ + // dest
+	name@ // src
+	strcpy
+
+	OSFILETYPE_FILE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	fullpath@ // path
+	OSFileOpen ok! handle!
+
+	if (ok@ STATUS_NOT_FOUND ~=)
+		// found it or other error occurred
+		return
+	end
+
+	// didn't find it, try user libraries directory
+
+	fullpath@ // dest
+	"/mintia/Libraries/" // src
+	strcpy
+
+	fullpath@ 18 + // dest
+	name@ // src
+	strcpy
+
+	OSFILETYPE_FILE // filetype
+	0 // flags
+	ACCESS_READ ACCESS_EXEC | // access
+	fullpath@ // path
+	OSFileOpen ok! handle!
+end
+
+#include "../Common/ComDLLLoad.df"

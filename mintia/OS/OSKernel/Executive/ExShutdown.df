@@ -1,0 +1,211 @@
+//
+// Implements system shutdown.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALExit.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ExInternal.h"
+
+var ExShuttingDown 0
+public ExShuttingDown
+
+var ExFinishShutdown 0
+public ExFinishShutdown
+
+fn ExShutdownSystem { mode -- }
+	fnsection "PAGE$text"
+
+	1 ExShuttingDown!
+
+	// Request the worker thread to finish shutdown.
+
+	mode@ ExFinishShutdown!
+
+	// The balance manager is currently the worker thread responsible for
+	// finishing system shutdown, and may wish to initiate shutdown itself, so
+	// don't block the thread if we are the balance manager.
+
+	if (KeThreadCurrent@ ExiBalanceManagerThread@ ~=)
+		while (1)
+			auto ok
+			10000 // ms
+			KERNELMODE // waitmode
+			1 // alertable
+			KeThreadSleep ok!
+
+			if (ok@)
+				return
+			end
+		end
+	end
+end
+
+fn ExShutdownSystemFinish { -- }
+	fnsection "PAGE$text"
+
+	// this part of system shutdown takes place in the context of a system
+	// worker thread. it's done this way so that the user thread who initiated
+	// shutdown can exit and its parent process's handles can all be closed,
+	// allowing us to unmount the filesystems.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	"\n" Printf
+
+	auto mode
+	ExFinishShutdown@ mode!
+
+	if (mode@ OSSHUTDOWN_HALT ==)
+		"MINTIA -- SHUTTING DOWN\n" Printf
+	end else
+		"MINTIA -- REBOOTING\n" Printf
+	end
+
+	"Killing all processes...\n" Printf
+
+	// dereference the SystemInit process object.
+
+	PsSystemInitProcess@ ObObjectDereferenceByPointer drop
+
+	// send OSSIGNAL_TERM to SystemInit and to all session controllers.
+
+	1 // onlysystem
+	OSSIGNAL_TERM // signal
+	PsSignalAllProcesses
+
+	if (PsActiveProcessCount@ 1 >)
+		// give all the processes 2.5 seconds to get their affairs in order.
+
+		2500 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+
+		auto tries
+		50 tries!
+
+		while (PsActiveProcessCount@ 1 >)
+			if (tries@ ~~)
+				"WARNING: Some processes failed to terminate within 5 seconds.\nContinuing anyway.\n" Printf
+
+				break
+			end
+
+			// send OSSIGNAL_KILL to all processes
+
+			0 // onlysystem
+			OSSIGNAL_KILL // signal
+			PsSignalAllProcesses
+
+			// give all the processes 500ms to die.
+
+			100 // ms
+			KERNELMODE // waitmode
+			0 // alertable
+			KeThreadSleep drop
+
+			1 tries -=
+		end
+	end
+
+	"Flushing dirty pages to disk...\n" Printf
+
+	while (1)
+		// the pagefile extending thread will flush the filesystems when it
+		// wakes up.
+
+		0 // priboost
+		IOPageFileExtendEvent // event
+		KeEventSignal
+
+		if (ExShuttingDown@ 2 ==)
+			break
+		end
+
+		500 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+	end
+
+	0 // priboost
+	MmModifiedPageEvent // event
+	KeEventSignal
+
+	IOTriggerWritebehind
+
+	while (1)
+		if (IOCacheInfoBlockDirtyCount@ MmModifiedPageCount@ + ~~)
+			// complete flush
+
+			break
+		end elseif (IOCacheInfoBlockDirtyCount@ ~~ IOPageFileCount@ ~~ &&)
+			// complete file flush and there are no pagefiles, leave the loop
+			// now or we will be here forever...
+
+			break
+		end
+
+		0 // priboost
+		MmModifiedPageEvent // event
+		KeEventSignal
+
+		IOTriggerWritebehind
+
+		500 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+	end
+
+	// "Exiting.\n" Printf
+
+	0 // ret
+	mode@ // mode
+	HALExit
+
+	// HALExit returned which means this platform doesn't support shutdown.
+
+	"\[[0m\[[1;1H\[[2J" Printf
+
+	auto i
+	14 i!
+
+	while (i@)
+		'\n' Putc
+		1 i -=
+	end
+
+	"                   It is now safe to shut down your computer.\n" Printf
+
+	while (1)
+		10000 // ms
+		KERNELMODE // waitmode
+		0 // alertable
+		KeThreadSleep drop
+	end
+end

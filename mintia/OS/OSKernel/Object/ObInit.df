@@ -1,0 +1,201 @@
+//
+// Initialization of the MINTIA object manager.
+//
+
+#include "<df>/dragonfruit.h"
+#include "<inc>/HALLog.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ObInternal.h"
+
+var ObFullyNonpagedObjects 1
+public ObFullyNonpagedObjects
+
+var ObTypeObjectType 0
+public ObTypeObjectType
+
+var ObTypeDirectoryType 0
+public ObTypeDirectoryType
+
+var ObRootDirectoryObject 0
+public ObRootDirectoryObject
+
+var ObObjectTypesDirectoryObject 0
+public ObObjectTypesDirectoryObject
+
+var ObReaperListHead 0
+public ObReaperListHead
+
+buffer ObRootRwLock ExRwLock_SIZEOF
+public ObRootRwLock
+
+rosection "INIT$text"
+
+fn ObInitPhase0 { -- }
+	fnsection "INIT$text"
+
+	auto ok
+
+	auto idleproc
+	KeProcessCurrent idleproc!
+
+	// give the idle process (us) a handle table
+
+	auto handletable
+
+	idleproc@ // context
+	idleproc@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	OBHANDLEENTRYSIZELOG // entrysizelog
+	ExHandleTableCreate ok! handletable!
+
+	if (ok@)
+		"ObInitPhase0: couldn't allocate idle process handletable\n" KeCrash
+	end
+
+	handletable@ idleproc@ PsProcess_PagedArea + @ PsProcessPaged_HandleTable + !
+
+	auto type
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	// create Type type
+
+	"Type" typeinit@ ObTypeInitializer_Name + !
+	'ObTy' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_TYPE typeinit@ ObTypeInitializer_TypeIdentifier + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "ObInitPhase0: couldn't create Type type (%i)\n" KeCrash
+	end
+
+	if (ObTypeObjectType@ ~~)
+		"ObInitPhase0: couldn't create Type type\n" KeCrash
+	end
+
+	// create Directory type
+
+	"Directory" typeinit@ ObTypeInitializer_Name + !
+	'ObDr' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_DIRECTORY typeinit@ ObTypeInitializer_TypeIdentifier + !
+	1 typeinit@ ObTypeInitializer_Paged + !
+	pointerof ObiDirectoryObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "ObInitPhase0: couldn't create Directory type (%i)\n" KeCrash
+	end
+
+	type@ ObTypeDirectoryType!
+
+rosection "text"
+
+	"ObRootRwLock" // name
+	ObRootRwLock // rwlock
+	ExRwLockInitialize
+
+rosection "INIT$text"
+end
+
+fn ObInitPhase1 { -- }
+	fnsection "INIT$text"
+
+	auto handle
+	auto ok
+
+	// create root directory object
+
+	ACCESS_OWNER_ALL ACCESS_GROUP_ALL | ACCESS_WORLD_READ | ACCESS_WORLD_EXEC | // permissions
+	"OSRoot" // name
+	OBFLAGS_PERMANENT // flags
+	ObDirectoryCreateObject ok! ObRootDirectoryObject!
+
+	if (ok@)
+		ok@ "ObInitPhase1: couldn't create root directory object (%i)\n" KeCrash
+	end
+
+	ObRootDirectoryObject@ ObRootDirectoryObject@ ObObjectPagedHeader ObiPagedHeader_DirectoryObject + !
+
+	// create type directory object
+
+	ACCESS_OWNER_ALL ACCESS_GROUP_ALL | ACCESS_WORLD_READ | ACCESS_WORLD_EXEC | // permissions
+	"ObjectTypes" // name
+	OBFLAGS_PERMANENT // flags
+	ObDirectoryCreateObject ok! ObObjectTypesDirectoryObject!
+
+	if (ok@)
+		ok@ "ObInitPhase1: couldn't create /ObjectTypes directory object (%i)\n" KeCrash
+	end
+
+	ObObjectTypesDirectoryObject@ // object
+	ObRootDirectoryObject@ // directory
+	ObDirectoryInsertByPointers ok!
+
+	if (ok@)
+		ok@ "ObInitPhase1: couldn't insert /ObjectTypes directory object into root directory (%i)\n" KeCrash
+	end
+
+	auto typeobj
+	ObTypeObjectType@ ObiType_ObjectListHead + @ typeobj!
+
+	while (typeobj@)
+		typeobj@ // object
+		ObObjectTypesDirectoryObject@ // directory
+		ObDirectoryInsertByPointers ok!
+
+		if (ok@)
+			ok@ typeobj@ ObObjectName "ObInitPhase1: couldn't insert type '%s' into /ObjectTypes (%i)\n" KeCrash
+		end
+
+		typeobj@ ObObjectPagedHeader ObiPagedHeader_TypeListNext + @ typeobj!
+	end
+
+	// create users directory object
+
+	auto dirobj
+	ACCESS_OWNER_ALL ACCESS_GROUP_ALL | ACCESS_WORLD_READ | ACCESS_WORLD_EXEC | // permissions
+	"Users" // name
+	OBFLAGS_PERMANENT // flags
+	ObDirectoryCreateObject ok! dirobj!
+
+	if (ok@)
+		ok@ "ObInitPhase1: couldn't create /Users directory object (%i)\n" KeCrash
+	end
+
+	dirobj@ // object
+	ObRootDirectoryObject@ // directory
+	ObDirectoryInsertByPointers ok!
+
+	if (ok@)
+		ok@ "ObInitPhase1: couldn't insert /Users directory object into root directory (%i)\n" KeCrash
+	end
+end
+
+fn (ExHandleEnumFunction) ObHandleDestroyFunction { entryptr handle handletable -- ok }
+	fnsection "PAGE$text"
+
+	auto process
+	handletable@ ExHandleTableGetContext process!
+
+	handle@ OSHANDLEBITS << process@ ObObjectCloseProcess ok!
+end

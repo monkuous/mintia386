@@ -1,0 +1,142 @@
+//
+// Implements usermode entry.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "PsInternal.h"
+
+fn PsThreadUserEntry { context1 context2 -- }
+	fnsection "PAGE$text"
+
+	// This is the start function for every usermode thread.
+
+	auto thread
+	KeThreadCurrent@ thread!
+
+	// Build the TEB.
+
+	auto kteb
+	OSThreadEnvironmentBlock_SIZEOF alloc kteb!
+
+	kteb@ // ptr
+	OSThreadEnvironmentBlock_SIZEOF // sz
+	0 // word
+	memset
+
+	thread@ PsThread_StackHasGuardPage + @ kteb@ OSThreadEnvironmentBlock_StackHasGuardPage + !
+	thread@ PsThread_StackTop + @ kteb@ OSThreadEnvironmentBlock_StackTop + !
+	thread@ PsThread_StackBottom + @ kteb@ OSThreadEnvironmentBlock_StackBottom + !
+	thread@ PsThread_TID + @ kteb@ OSThreadEnvironmentBlock_ThreadID + !
+
+	// Copy the TEB to userspace.
+
+	thread@ PsThread_UTEB + @ // dest
+	kteb@ // src
+	OSThreadEnvironmentBlock_SIZEOF // size
+	KeSafeCopyOut drop
+
+	// Enter usermode for the first time, in some architecture-dependent way.
+
+	thread@ PsThread_UTEB + @ // teb
+	PsOSDLLInformation PsOSDLLInfo_ExitFunction + @ // exitfunc
+	context2@ // context
+	KeThreadCurrent@ PsThread_StackTop + @ // ustack
+	context1@ // entryfunc
+	KeEnterUserMode
+
+	// KeEnterUserMode should not return.
+
+	if (DEBUGCHECKS)
+		"PsThreadUserEntry\n" KeCrash
+	end
+end
+
+fn PsDispatchUsermodeInterrupts { trapframe -- }
+	// Called before the exception handler returns to usermode.
+	// Handles usermode interrupt dispatch, such as thread termination,
+	// suspension, and signal dispatch.
+	//
+	// N.B. This routine is architected to be called with all interrupts
+	// disabled. Just being at IPLDPC is not sufficient, because it creates a
+	// race condition on exit to usermode. This problem is worsened on MP
+	// systems, where we have to be sure that all IPIs are blocked while we
+	// check these things.
+
+	auto thread
+	KeThreadCurrent@ thread!
+
+	// Loop until there are no more usermode interrupts to dispatch.
+
+	while (thread@ KeThread_UserInterruptB + gb)
+		0 thread@ KeThread_UserInterruptB + sb
+
+		HALCPUInterruptEnable
+
+		if (thread@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+			// Exit the thread.
+
+			PsiThreadExit
+
+			if (DEBUGCHECKS)
+				"PsDispatchUsermodeInterrupts\n" KeCrash
+			end
+		end
+
+		if (thread@ KeThread_SignalAcceptMask + @
+			thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+			thread@ KeThread_Signals + @ &)
+
+			// Dispatch the pending signal.
+
+			PsOSDLLInformation PsOSDLLInfo_SignalDispatchFunction + @ // dispatchfunc
+			trapframe@ // trapframe
+			KeThreadDispatchSignal
+		end
+
+		if (thread@ KeThread_SuspendedB + gb)
+			// Suspend the thread.
+
+			KeThreadWaitSuspended
+		end
+
+		if (thread@ KeThread_UserAPCTriggeredB + gb)
+			0 thread@ KeThread_UserAPCTriggeredB + sb
+
+			// A user APC was previously triggered; deliver it now.
+			// It's safe to clear thread^.UserApcTriggered here because we
+			// only set it from the context of our own thread, anyway; except
+			// when a user APC is enqueued to us, but then only if we're
+			// waiting, which we clearly aren't doing right now.
+
+			if (thread@ KeThread_UserAPCListHead + @)
+				PsOSDLLInformation PsOSDLLInfo_APCDispatchFunction + @ // dispatchfunc
+				trapframe@ // trapframe
+				KeAPCDispatchQueueUser
+			end
+		end
+
+		HALCPUInterruptDisable drop
+	end
+end

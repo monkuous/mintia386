@@ -1,0 +1,904 @@
+//
+// Implements the DKS disk driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALXRstationCitron.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+const DKSBLOCKSHIFT 9
+const DKSBLOCKSIZE (1 DKSBLOCKSHIFT <<)
+const DKSBLOCKOFFMASK (DKSBLOCKSIZE 1 -)
+
+const DKS_REALDISK  1
+const DKS_PARTITION 2
+const DKS_REMOVED   3
+
+var DKSCompletedBitmap 0
+var DKSScan 0
+var DKSScanned 0
+
+struct Disk
+	4 Type
+	4 DKSID
+	4 BlockOffset
+	4 Blocks
+	4 RequestListHead
+	4 CurrentRequest
+endstruct
+
+const DKSKFLAG_READ 0x80000000
+
+const DKSMAXDISKID 7
+
+table DKSRealDisks[(DKSMAXDISKID 1 +)]
+
+const DKSPORTCMD 0x19
+const DKSPORTA   0x1A
+const DKSPORTB   0x1B
+
+const DKSCMDSELECT  0x1
+const DKSCMDREAD    0x2
+const DKSCMDWRITE   0x3
+const DKSCMDINFO    0x4
+const DKSCMDPOLL    0x5
+const DKSCMDINTR    0x6
+const DKSCMDINTROFF 0x7
+const DKSCMDSETTRC  0x8
+const DKSCMDSETTRA  0x9
+
+const DKSINTERRUPT  0x3
+
+const DKSBLOCKTRANSFER 0x0
+const DKSINSERTED      0x1
+const DKSREMOVED       0x2
+
+datasection "data"
+
+table DriverDKSDispatch
+	0                                    // open
+	0                                    // close
+	pointerof DriverDKSIOControl         // iocontrol
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // system control
+	0                                    // parse
+	0                                    // create
+	0                                    // flush
+	pointerof IODeviceDeleteFileObject   // delete object
+	0                                    // set information
+	0                                    // get information
+	0                                    // rename
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // truncate
+	0                                    // readdirectory
+	0                                    // getpageaddr
+	0                                    // delete device object
+	0                                    // reserved
+	0                                    // reserved
+	pointerof DriverDKSRead              // read
+	pointerof DriverDKSWrite             // write
+endtable
+
+table DriverDKS
+	IOVERSION_MAJOR                      // ioversion major
+	IOVERSION_MINOR                      // ioversion minor
+
+	"dks"                                // name
+	pointerof DriverDKSDispatch          // dispatch table
+	0                                    // flags
+
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+endtable
+
+datasection "data"
+
+buffer DKSDPC KeDPC_SIZEOF
+
+fn DriverDKSRescan { -- }
+	if (DKSScanned@ ~~)
+		// not scanned the first time
+
+		return
+	end
+
+	auto diskid
+	0 diskid!
+
+	while (diskid@ DKSMAXDISKID <=)
+		auto realdisk
+		[diskid@]DKSRealDisks@ realdisk!
+
+		if (realdisk@ ~~)
+			1 diskid +=
+
+			continue
+		end
+
+		auto present
+		auto blocks
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		diskid@ DKSPORTA HALXRstationCitronOutl
+
+		DKSCMDPOLL DKSPORTCMD HALXRstationCitronCommand
+
+		DKSPORTA HALXRstationCitronInl present!
+		DKSPORTB HALXRstationCitronInl blocks!
+
+		rs@ HALCPUInterruptRestore
+
+		if (present@ 1 & ~~)
+			if (realdisk@ Disk_Type + @ DKS_REALDISK ==)
+				// disk was removed, cancel any pending requests.
+
+				DKS_REMOVED realdisk@ Disk_Type + !
+
+				auto iop
+				realdisk@ Disk_CurrentRequest + @ iop!
+
+				if (iop@)
+					STATUS_MEDIA_REMOVED // status
+					IOBOOSTDISK // priboost
+					iop@ // iop
+					IOPacketComplete
+				end
+
+				0 realdisk@ Disk_CurrentRequest + !
+
+				realdisk@ Disk_RequestListHead + @ iop!
+
+				while (iop@)
+					auto niop
+					iop@ IOPacketHeader_DeviceQueueNext + @ niop!
+
+					STATUS_MEDIA_REMOVED // status
+					IOBOOSTDISK // priboost
+					iop@ // iop
+					IOPacketComplete
+
+					niop@ iop!
+				end
+
+				0 realdisk@ Disk_RequestListHead + !
+			end
+
+			1 diskid +=
+
+			continue
+		end
+
+		DKS_REALDISK realdisk@ Disk_Type + !
+
+		1 diskid +=
+	end
+end
+
+fn private CreateDisk { name blocks type id offset -- dev }
+	auto sizeinbytes
+	blocks@ 512 * sizeinbytes!
+
+	auto ok
+
+	Disk_SIZEOF // extensionsize
+	OSFILETYPE_BLOCKDEVICE // type
+	name@ // name
+	sizeinbytes@ // sizeinbytes
+	DriverDKS // driver
+	ACCESS_OWNER_ALL ACCESS_GROUP_READ | ACCESS_GROUP_EXEC | // permissions
+	IODeviceCreate ok! dev!
+
+	if (ok@)
+		ok@ "DKSDriverInit: failed to create device object (%i)\n" KeCrash
+	end
+
+	9 dev@ IODevice_BlockLog + ! // 1<<9 = 512
+
+	auto disk
+	dev@ IODevice_Extension + @ disk!
+
+	type@ disk@ Disk_Type + !
+	id@ disk@ Disk_DKSID + !
+	offset@ disk@ Disk_BlockOffset + !
+	blocks@ disk@ Disk_Blocks + !
+	0 disk@ Disk_RequestListHead + !
+	0 disk@ Disk_CurrentRequest + !
+
+	if (type@ DKS_REALDISK ==)
+		disk@ [id@]DKSRealDisks!
+	end
+end
+
+fn (FDriverInit) DriverInitDKS { stage -- ok }
+	if (stage@ STAGE_THREAD ==)
+		pointerof DriverDKSDPCFunction // function
+		DKSDPC // dpc
+		KeDPCInitialize
+
+		// detect and register disks
+
+		auto diskid
+		0 diskid!
+
+		auto namebuf
+		64 alloc namebuf!
+
+		namebuf@ // dest
+		"dks" // src
+		strcpy
+
+		// clear completion bitmap
+		DKSCMDINFO DKSPORTCMD HALXRstationCitronCommand
+
+		pointerof DriverDKSInterrupt // function
+		DKSINTERRUPT // interrupt number
+		IPLDISK // interrupt priority level
+		HALInterruptRegister
+
+		DKSCMDINTR DKSPORTCMD HALXRstationCitronCommand
+
+		auto dev
+
+		while (diskid@ DKSMAXDISKID <=)
+			auto present
+			auto blocks
+
+			auto rs
+			HALCPUInterruptDisable rs!
+
+			diskid@ DKSPORTA HALXRstationCitronOutl
+
+			DKSCMDPOLL DKSPORTCMD HALXRstationCitronCommand
+
+			DKSPORTA HALXRstationCitronInl present!
+			DKSPORTB HALXRstationCitronInl blocks!
+
+			rs@ HALCPUInterruptRestore
+
+			if (present@ 1 & ~~)
+				1 diskid +=
+				continue
+			end
+
+			if (blocks@ 8388608 >=)
+				namebuf@
+				"%s: disk is >=4GB; this is not supported! skipping.\n" "DKSDriverInit" HALLog
+
+				1 diskid +=
+				continue
+			end
+
+			// we have a disk at this ID
+
+			diskid@ // n
+			namebuf@ 3 + // buf
+			itoa
+
+			blocks@ namebuf@ diskid@ "ID %d: NAME=%s BLOCKSZ=512 BLOCKS=%d\n" "DKSDriverInit" HALLog
+
+			auto sizeinbytes
+			blocks@ 512 * sizeinbytes!
+
+			namebuf@ // name
+			blocks@ // blocks
+			DKS_REALDISK // type
+			diskid@ // id
+			0 // offset
+			CreateDisk dev!
+
+			auto partitiontable
+			dev@ IOPartitionTableRead ok! partitiontable!
+
+			if (ok@ 0 ==)
+				if (partitiontable@ IOPartitionTable_Label + gb)
+					partitiontable@ IOPartitionTable_Label + // label
+					dev@ // deviceobject
+					IODeviceSetLabel drop
+				end
+
+				auto pcount
+				partitiontable@ IOPartitionTable_PartitionCount + @ pcount!
+
+				auto pte
+				partitiontable@ IOPartitionTable_SIZEOF + pte!
+
+				namebuf@ 4 + // dest
+				"s" // src
+				strcpy
+
+				while (pcount@)
+					pte@ IOPartitionEntry_ID + @ // n
+					namebuf@ 5 + // buf
+					itoa
+
+					pte@ IOPartitionEntry_SizeInBlocks + @ blocks!
+
+					namebuf@ // name
+					blocks@ // blocks
+					DKS_PARTITION // type
+					diskid@ // id
+					pte@ IOPartitionEntry_BlockOffset + @ // offset
+					CreateDisk dev!
+
+					if (pte@ IOPartitionEntry_Label + gb)
+						pte@ IOPartitionEntry_Label + // label
+						dev@ // deviceobject
+						IODeviceSetLabel drop
+					end
+
+					IOPartitionEntry_SIZEOF pte +=
+					1 pcount -=
+				end
+
+				partitiontable@ MmFree
+			end
+
+			1 diskid +=
+		end
+
+		1 DKSScanned!
+	end
+
+	0 ok!
+end
+
+fn DKSComplete { id -- }
+	auto disk
+	[id@]DKSRealDisks@ disk!
+
+	if (DEBUGCHECKS)
+		if (disk@ ~~)
+			"DriverDKSDPCFunction: no disk\n" KeCrash
+		end
+	end
+
+	if (disk@ Disk_Type + @ DKS_REMOVED ==)
+		return
+	end
+
+	auto iop
+	disk@ Disk_CurrentRequest + @ iop!
+
+	if (DEBUGCHECKS)
+		if (iop@ ~~)
+			"DriverDKSDPCFunction: no request\n" KeCrash
+		end
+	end
+
+	auto iopl
+	iop@ IOPacketCurrentLocation iopl!
+
+	DKSBLOCKSIZE iopl@ IOPacketLocation_Offset + +=
+	DKSBLOCKSIZE iopl@ IOPacketLocation_Context + +=
+
+	if (iopl@ IOPacketLocation_Context + @
+		iopl@ IOPacketLocation_Length + @ >=)
+		// complete, start next one
+
+		if (iopl@ IOPacketLocation_FunctionCodeB + gb IODISPATCH_READ ==)
+			iopl@ IOPacketLocation_OffsetInMDL + @ // offset
+			iopl@ IOPacketLocation_Length + @ // length
+			0 // write
+			1 // dma
+			iop@ IOPacketHeader_MDL + @ // mdl
+			MmMDLFlush
+		end
+
+		0 // status
+		IOBOOSTDISK // priboost
+		iop@ // iop
+		IOPacketComplete
+
+		disk@ Disk_RequestListHead + @ iop!
+		iop@ disk@ Disk_CurrentRequest + !
+
+		if (iop@ ~~)
+			// no pending requests, we are done.
+
+			return
+		end
+
+		auto n
+		iop@ IOPacketHeader_DeviceQueueNext + @ n!
+
+		n@ disk@ Disk_RequestListHead + !
+
+		if (n@)
+			0 n@ IOPacketHeader_DeviceQueuePrev + !
+		end
+
+		iop@ IOPacketCurrentLocation iopl!
+	end
+
+	// start next transfer
+
+	auto phyaddr
+	iopl@ IOPacketLocation_Context + @ // offset
+	iopl@ // iopl
+	IOPacketLocationPhysical phyaddr!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	id@ DKSPORTA HALXRstationCitronOutl
+	DKSCMDSELECT DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+	1 DKSPORTA HALXRstationCitronOutl
+	DKSCMDSETTRC DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+	phyaddr@ DKSPORTA HALXRstationCitronOutl
+	DKSCMDSETTRA DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+	iopl@ IOPacketLocation_Offset + @ DKSBLOCKSHIFT >> DKSPORTA HALXRstationCitronOutl
+
+	if (iopl@ IOPacketLocation_FunctionCodeB + gb IODISPATCH_READ ==)
+		DKSCMDREAD DKSPORTCMD HALXRstationCitronCommandASyncIdle
+	end else
+		DKSCMDWRITE DKSPORTCMD HALXRstationCitronCommandASyncIdle
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn (KeDPCFunction) DriverDKSDPCFunction { context1 context2 dpc -- }
+	// fulfill pending requests
+
+	auto completed
+	auto doscan
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	DKSCompletedBitmap@ completed!
+	0 DKSCompletedBitmap!
+
+	DKSScan@ doscan!
+	0 DKSScan!
+
+	rs@ HALCPUInterruptRestore
+
+	if (doscan@)
+		DriverDKSRescan
+	end
+
+	auto id
+	0 id!
+
+	while (id@ DKSMAXDISKID <=)
+		if (completed@ 1 id@ << &)
+			id@ DKSComplete
+		end
+
+		1 id +=
+	end
+end
+
+fn (HALInterruptHandler) DriverDKSInterrupt { trapframe int -- }
+	auto event
+	auto details
+
+	DKSCMDINFO DKSPORTCMD HALXRstationCitronCommandASyncIdle
+	DKSPORTA HALXRstationCitronInl event!
+	DKSPORTB HALXRstationCitronInl details!
+
+	auto dpc
+	DKSDPC dpc!
+
+	if (event@ DKSBLOCKTRANSFER ==)
+		details@ DKSCompletedBitmap |=
+
+		// defer doing fun work til later,
+		// otherwise we will BSOD since we're at IPLDISK
+
+		0 // context1
+		0 // context2
+		DPCHIGHIMPORTANCE // importance
+		dpc@ // dpc
+		KeDPCEnqueue drop
+	end elseif (event@ DKSREMOVED ==
+				event@ DKSINSERTED == ||)
+
+		1 DKSScan!
+
+		0 // context1
+		0 // context2
+		DPCHIGHIMPORTANCE // importance
+		dpc@ // dpc
+		KeDPCEnqueue drop
+	end
+end
+
+fn DKSBlockTransferCommand { disk iopl -- ok }
+	0 ok!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto id
+	disk@ Disk_DKSID + @ id!
+
+	auto realdisk
+	[id@]DKSRealDisks@ realdisk!
+
+	// stash the completed length in context
+
+	0 iopl@ IOPacketLocation_Context + !
+
+	disk@ Disk_BlockOffset + @ DKSBLOCKSHIFT << iopl@ IOPacketLocation_Offset + +=
+
+	0 iop@ IOPacketHeader_DeviceQueueNext + !
+	0 iop@ IOPacketHeader_DeviceQueuePrev + !
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (realdisk@ Disk_Type + @ DKS_REMOVED ==)
+		ipl@ KeIPLLower
+
+		STATUS_MEDIA_REMOVED ok!
+
+		return
+	end
+
+	iop@ IOPacketWasEnqueued
+
+	if (realdisk@ Disk_CurrentRequest + @ ~~)
+		// no pending requests, start the disk.
+
+		iop@ realdisk@ Disk_CurrentRequest + !
+
+		auto phyaddr
+		0 // offset
+		iopl@ // iopl
+		IOPacketLocationPhysical phyaddr!
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		1 DKSPORTA HALXRstationCitronOutl
+		DKSCMDSETTRC DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+		phyaddr@ DKSPORTA HALXRstationCitronOutl
+		DKSCMDSETTRA DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+		id@ DKSPORTA HALXRstationCitronOutl
+		DKSCMDSELECT DKSPORTCMD HALXRstationCitronCommandASyncIdle
+
+		iopl@ IOPacketLocation_Offset + @ DKSBLOCKSHIFT >> DKSPORTA HALXRstationCitronOutl
+
+		if (iopl@ IOPacketLocation_FunctionCodeB + gb IODISPATCH_READ ==)
+			DKSCMDREAD DKSPORTCMD HALXRstationCitronCommandASyncIdle
+		end else
+			DKSCMDWRITE DKSPORTCMD HALXRstationCitronCommandASyncIdle
+		end
+
+		rs@ HALCPUInterruptRestore
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	auto t
+	realdisk@ Disk_RequestListHead + @ t!
+
+	if (t@ ~~)
+		iop@ realdisk@ Disk_RequestListHead + !
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	// insertion sort our request into the queue.
+
+	auto p
+	0 p!
+
+	while (t@)
+		auto otheriopl
+		t@ IOPacketCurrentLocation otheriopl!
+
+		if (otheriopl@ IOPacketLocation_Offset + @
+			iopl@ IOPacketLocation_Offset + @ >)
+
+			// this request has a greater offset than ours, so we will insert
+			// ourselves before it on the queue.
+
+			if (p@)
+				iop@ p@ IOPacketHeader_DeviceQueueNext + !
+			end else
+				iop@ realdisk@ Disk_RequestListHead + !
+			end
+
+			p@ iop@ IOPacketHeader_DeviceQueuePrev + !
+
+			t@ iop@ IOPacketHeader_DeviceQueueNext + !
+			iop@ t@ IOPacketHeader_DeviceQueuePrev + !
+
+			ipl@ KeIPLLower
+
+			return
+		end
+
+		t@ p!
+		t@ IOPacketHeader_DeviceQueueNext + @ t!
+	end
+
+	// there were no requests on the list with a greater starting offset, so
+	// we go at the tail.
+
+	p@ iop@ IOPacketHeader_DeviceQueuePrev + !
+	iop@ p@ IOPacketHeader_DeviceQueueNext + !
+
+	ipl@ KeIPLLower
+end
+
+fn (IODispatchIOControlFunction) DriverDKSIOControl { arg2 arg1 access fcb lastmode -- ret ok }
+	0 ok!
+end
+
+// routines for I/O by byte offset.
+// these are called when the device object is opened directly, either cached
+// (in which case the caller is the page cache) or uncached.
+
+// if caller isn't careful these can lead to some redundant reads and writes.
+// which are slow.
+
+fn (IODispatchEnqueueIOPFunction) DriverDKSRead { iopl -- done ok }
+	1 done!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto devobj
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ devobj!
+
+	auto disk
+	devobj@ IODevice_Extension + @ disk!
+
+	auto size
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @ size!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	0 ok!
+
+	if (offset@ size@ >=)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (offset@ DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	if (iopl@ IOPacketLocationVirtualBuffer DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto length
+	size@ offset@ -
+	iopl@ IOPacketLocation_Length + @
+	min length!
+
+	if (length@ DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (length@ ~~)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	1 // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+
+	disk@ // disk
+	iopl@ // iopl
+	DKSBlockTransferCommand ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+end
+
+fn (IODispatchEnqueueIOPFunction) DriverDKSWrite { iopl -- done ok }
+	1 done!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto devobj
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ devobj!
+
+	auto disk
+	devobj@ IODevice_Extension + @ disk!
+
+	auto bytesize
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @ bytesize!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	0 ok!
+
+	if (offset@ bytesize@ >=)
+		STATUS_END_OF_DISK ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (offset@ DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	if (iopl@ IOPacketLocationVirtualBuffer DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto length
+	bytesize@ offset@ -
+	iopl@ IOPacketLocation_Length + @
+	min length!
+
+	if (length@ DKSBLOCKOFFMASK &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (length@ ~~)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	0 // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+
+	iopl@ IOPacketLocation_OffsetInMDL + @ // offset
+	iopl@ IOPacketLocation_Length + @ // length
+	1 // write
+	1 // dma
+	mdl@ // mdl
+	MmMDLFlush
+
+	disk@ // disk
+	iopl@ // iopl
+	DKSBlockTransferCommand ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+end

@@ -1,0 +1,61 @@
+//
+// Initialization of the MINTIA kernel.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "KeInternal.h"
+
+extern KiCPUInit { -- }
+
+extern KiTimerInit { -- }
+
+extern KiDispatcherInit { -- }
+
+externptr KeIPLCurrent
+
+rosection "INIT$text"
+
+fn KeMain { -- ret }
+	fnsection "INIT$text"
+
+	// early init that takes place before there's a thread context.
+
+	KiCPUInit
+
+	KiDispatcherInit
+
+	KiTimerInit
+
+	KiIdleThread KiThreadSwitch
+
+	0 ret!
+end
+
+fn KiIdleThreadEntry { -- }
+	fnsection "INIT$text"
+
+	// the idle thread is never ever not ready to run.
+	// if it ever stops being ready to run, the system will do undefined
+	// things and crash -- INCLUDING DURING PHASE 0 INITIALIZATION.
+
+	"Hello MINTIA World!\n" "KiIdleThread" HALLog
+
+	// initialize the executive layer
+
+	ExInitPhase0
+
+	while (1)
+		HALCPUHalt
+	end
+end

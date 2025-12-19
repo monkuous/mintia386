@@ -1,0 +1,379 @@
+//
+// Implements IPC message management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+fn IPCiMessageAllocate { allowhandle umsg mode conid portobject -- clientid msg ok }
+	fnsection "PAGE$text"
+
+	portobject@ IPCiPort_ZoneHeader + // zoneheader
+	MmZoneAllocate ok! msg!
+
+	if (ok@)
+		if (DEBUGCHECKS)
+			if (ok@ STATUS_NO_MEMORY ~=)
+				ok@ "IPCiMessageAllocate: odd status (%i)\n" KeCrash
+			end
+		end
+
+		// try to extend the port message zone.
+
+		portobject@ // portobject
+		IPCiMessageZoneExtend ok! msg!
+
+		if (ok@)
+			return
+		end
+	end
+
+	0 msg@ IPCiKernelMessage_PortNext + !
+	0 msg@ IPCiKernelMessage_PortPrev + !
+
+	0 msg@ IPCiKernelMessage_QueueNext + !
+	0 msg@ IPCiKernelMessage_QueuePrev + !
+
+	portobject@ msg@ IPCiKernelMessage_OriginatingPort + !
+	0 msg@ IPCiKernelMessage_RundownPointer + !
+	0 msg@ IPCiKernelMessage_Object + !
+	0 msg@ IPCiKernelMessage_EnqueuedTo + !
+
+	// pull in the message header
+
+	if (mode@ USERMODE ==)
+		msg@ IPCiKernelMessage_Header + // dest
+		umsg@ // src
+		OSMessageHeader_SIZEOF // sz
+		KeSafeCopyIn ok!
+
+		if (ok@)
+			msg@ // ptr
+			portobject@ IPCiPort_ZoneHeader + // zoneheader
+			MmZoneFree
+
+			return
+		end
+	end else
+		msg@ IPCiKernelMessage_Header + // dest
+		umsg@ // src
+		OSMessageHeader_SIZEOF // sz
+		memcpy
+	end
+
+	// pull in the message body
+
+	if (msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi
+		portobject@ IPCiPort_MaximumMessageBody + @ >)
+
+		// The message is too long for the recipient.
+
+		STATUS_MESSAGE_TOO_LONG ok!
+
+		msg@ // ptr
+		portobject@ IPCiPort_ZoneHeader + // zoneheader
+		MmZoneFree
+
+		return
+	end
+
+	if (msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi)
+		if (mode@ USERMODE ==)
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_SIZEOF + // dest
+			umsg@ OSMessageHeader_SIZEOF + // src
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi // sz
+			KeSafeCopyIn ok!
+
+			if (ok@)
+				msg@ // ptr
+				portobject@ IPCiPort_ZoneHeader + // zoneheader
+				MmZoneFree
+
+				return
+			end
+		end else
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_SIZEOF + // dest
+			umsg@ OSMessageHeader_SIZEOF + // src
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi // sz
+			memcpy
+		end
+	end
+
+	msg@ IPCiKernelMessage_Header + OSMessageHeader_ClientID + @ clientid!
+
+	if (msg@ IPCiKernelMessage_Header + OSMessageHeader_Handle + @ OSNONE ~=)
+		if (allowhandle@ ~~
+			portobject@ IPCiPort_UFlags + @ OSPORT_FLAG_NO_HANDLES & ||)
+
+			// The caller isn't permitting us to pass a handle in this
+			// message, or the recipient has specified that he doesn't want to
+			// receive handles ever.
+
+			msg@ // ptr
+			portobject@ IPCiPort_ZoneHeader + // zoneheader
+			MmZoneFree
+
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+
+		auto passedobject
+		auto access
+
+		0 // type
+		msg@ IPCiKernelMessage_Header + OSMessageHeader_Handle + @ // handle
+		ObObjectReferenceByHandle ok! passedobject! access!
+
+		if (ok@)
+			msg@ // ptr
+			portobject@ IPCiPort_ZoneHeader + // zoneheader
+			MmZoneFree
+
+			return
+		end
+
+		if (access@ ACCESS_NOINHERIT &)
+			// The handle has NOINHERIT specified in its access bits, which
+			// indicates that it must never be passed out of this process.
+
+			msg@ // ptr
+			portobject@ IPCiPort_ZoneHeader + // zoneheader
+			MmZoneFree
+
+			passedobject@ ObObjectDereferenceByPointer drop
+
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+
+		ACCESS_ALL access &=
+
+		if (access@ msg@ IPCiKernelMessage_Header + OSMessageHeader_Access + @ | access@ ~=)
+			// The permissions that we're trying to pass the handle with
+			// aren't a subset of the permissions that we own the handle with.
+
+			msg@ // ptr
+			portobject@ IPCiPort_ZoneHeader + // zoneheader
+			MmZoneFree
+
+			passedobject@ ObObjectDereferenceByPointer drop
+
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+
+		passedobject@ msg@ IPCiKernelMessage_Object + !
+
+		// No other message type than REQUEST is allowed when passing a
+		// handle, so make sure that's our type.
+
+		OSPORT_MESSAGE_REQUEST msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+	end
+
+	// Fill in the kernel-controlled parts of the message header.
+
+	portobject@ IPCiPort_ClientID + @ msg@ IPCiKernelMessage_Header + OSMessageHeader_ClientID + !
+	portobject@ IPCiPort_ServerContextForClient + @ msg@ IPCiKernelMessage_Header + OSMessageHeader_Context + !
+
+	if (msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + gb OSPORT_MESSAGE_REPLY ==)
+		msg@ IPCiKernelMessage_Header + OSMessageHeader_ConversationID + @ conid!
+	end else
+		// Don't let clients prank the server into thinking there was a
+		// connection or disconnection when there wasn't.
+
+		OSPORT_MESSAGE_REQUEST msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+	end
+
+	if (conid@ OSPORT_CONID_NEW ==)
+		portobject@ IPCiPort_NextConversationID + @ conid!
+
+		conid@ msg@ IPCiKernelMessage_Header + OSMessageHeader_ConversationID + !
+
+		// Make sure to overflow to the first dynamic conversation ID
+		// correctly.
+
+		if (conid@ -1 ==)
+			OSPORT_CONID_FIRSTDYNAMIC portobject@ IPCiPort_NextConversationID + !
+		end else
+			conid@ 1 + portobject@ IPCiPort_NextConversationID + !
+		end
+	end else
+		conid@ msg@ IPCiKernelMessage_Header + OSMessageHeader_ConversationID + !
+	end
+end
+
+fn IPCiMessageFree { msg -- }
+	fnsection "PAGE$text"
+
+	if (msg@ IPCiKernelMessage_Object + @)
+		msg@ IPCiKernelMessage_Object + @ ObObjectDereferenceByPointer drop
+	end
+
+	msg@ // ptr
+	msg@ IPCiKernelMessage_OriginatingPort + @ IPCiPort_ZoneHeader + // zoneheader
+	MmZoneFree
+end
+
+fn IPCiMessageZoneExtend { portobject -- msg ok }
+	fnsection "PAGE$text"
+
+	auto msgzonesize
+	IPCiKernelMessage_SIZEOF portobject@ IPCiPort_MaximumMessageBody + @ +
+	IPCMESSAGEEXTENSION *
+	MMZONEOVERHEAD + msgzonesize!
+
+	auto quotablock
+	portobject@ ObObjectQuotaBlock quotablock!
+
+	auto charge
+	msgzonesize@ MmChargeBytesGet charge!
+
+	// charge the quotablock for the extra extension
+
+	charge@ // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargePaged ok!
+
+	if (ok@)
+		return
+	end
+
+	// allocate the chunk
+
+	auto chunk
+	msgzonesize@ // bytes
+	'PoZx' // tag
+	PAGED // flags
+	MmAllocWithTag ok! chunk!
+
+	if (ok@)
+		charge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargePaged
+
+		return
+	end
+
+	msgzonesize@ // bytes
+	chunk@ // chunk
+	portobject@ IPCiPort_ZoneHeader + // zoneheader
+	MmZoneExtend
+
+	charge@ portobject@ IPCiPort_ZoneExtensionCharge + +=
+
+	portobject@ IPCiPort_ZoneHeader + // zoneheader
+	MmZoneAllocate ok! msg!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			"IPCiMessageZoneExtend: failed to allocate even though just extended\n" KeCrash
+		end
+	end
+end
+
+fn IPCiMessageEnqueueRundown { msg -- }
+	fnsection "PAGE$text"
+
+	// add message to port rundown list
+
+	auto msgport
+	msg@ IPCiKernelMessage_OriginatingPort + @ msgport!
+
+	auto t
+	msgport@ IPCiPort_SentListTail + @ t!
+
+	t@ msg@ IPCiKernelMessage_PortPrev + !
+
+	if (t@ ~~)
+		msg@ msgport@ IPCiPort_SentListHead + !
+	end else
+		msg@ t@ IPCiKernelMessage_PortNext + !
+	end
+
+	msg@ msgport@ IPCiPort_SentListTail + !
+end
+
+fn IPCiMessageDequeueRundown { msg -- }
+	fnsection "PAGE$text"
+
+	// remove message from port rundown list
+
+	auto msgport
+	msg@ IPCiKernelMessage_OriginatingPort + @ msgport!
+
+	auto ls
+	auto ns
+
+	msg@ IPCiKernelMessage_PortPrev + @ ls!
+	msg@ IPCiKernelMessage_PortNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ IPCiKernelMessage_PortNext + !
+	end else
+		ns@ msgport@ IPCiPort_SentListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ IPCiKernelMessage_PortPrev + !
+	end else
+		ls@ msgport@ IPCiPort_SentListTail + !
+	end
+end
+
+fn IPCiMessageDequeue { msg -- }
+	fnsection "PAGE$text"
+
+	// remove message from queue
+
+	auto portobject
+	msg@ IPCiKernelMessage_EnqueuedTo + @ portobject!
+
+	1 portobject@ IPCiPort_QueueLength + -=
+
+	auto ls
+	auto ns
+
+	msg@ IPCiKernelMessage_QueuePrev + @ ls!
+	msg@ IPCiKernelMessage_QueueNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ IPCiKernelMessage_QueueNext + !
+	end else
+		ns@ portobject@ IPCiPort_MessageListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ IPCiKernelMessage_QueuePrev + !
+	end else
+		ls@ portobject@ IPCiPort_MessageListTail + !
+	end
+
+	0 msg@ IPCiKernelMessage_EnqueuedTo + !
+end

@@ -1,0 +1,158 @@
+//
+// Implements kernel stack management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "MmInternal.h"
+
+fn MmKernelStackAlloc { -- kstack ok }
+	fnsection "PAGE$text"
+
+	// reserve enough pages in POOLSPACE for the size of our kernel stack and
+	// for a guard page.
+
+	auto vaddr
+	auto pteaddr
+
+	CANBLOCK // pri
+	KETHREADSTACKSIZE PAGESHIFT >> 1 + // pagesneeded
+	MiPoolSpaceReserve ok! pteaddr! vaddr!
+
+	if (ok@)
+		return
+	end
+
+	vaddr@ PAGESIZE + kstack!
+
+	// map the guard page at the bottom
+
+	MMGUARDPTE pteaddr@!
+
+	PTESIZE pteaddr +=
+
+	auto i
+	0 i!
+
+	while (i@ KETHREADSTACKSIZE PAGESHIFT >> <)
+		FREEFIRST // pri
+		pteaddr@ // pteaddr
+		MiSystemPageAllocate drop
+
+		PTESIZE pteaddr +=
+		1 i +=
+	end
+end
+
+fn MmKernelStackFree { kstack -- }
+	fnsection "PAGE$text"
+
+	PAGESIZE kstack -=
+
+	// unmap guard page
+
+	auto pteaddr
+	kstack@ MmVirtualtoPTEAddress pteaddr!
+
+	if (DEBUGCHECKS)
+		if (pteaddr@@ MMGUARDPTE ~=)
+			"MmKernelStackFree: not a kernel stack\n" KeCrash
+		end
+	end
+
+	// clear special guard page magic pte
+
+	PTE_KERNEL_ZERO pteaddr@!
+
+	auto firstpteaddr
+	pteaddr@ firstpteaddr!
+
+	// unmap and free all the kernel stack page frames.
+
+	PTESIZE pteaddr +=
+
+	auto i
+	0 i!
+
+	while (i@ KETHREADSTACKSIZE PAGESHIFT >> <)
+		pteaddr@ MiSystemPageFree
+
+		PTESIZE pteaddr +=
+		1 i +=
+	end
+
+	// release the POOLSPACE.
+
+	KETHREADSTACKSIZE PAGESHIFT >> 1 + // pages
+	firstpteaddr@ // pteaddr
+	MiPoolSpaceRelease
+end
+
+fn MiKernelStackSwapOut { thread -- }
+	// dereference the thread's kernel stack pages.
+
+	// called at IPLDPC.
+
+	auto vaddr
+	thread@ KeThread_KernelStackTop + @ KETHREADSTACKSIZE - vaddr!
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto i
+	0 i!
+
+	while (i@ KETHREADSTACKSIZE PAGESHIFT >> <)
+		pteaddr@ MiSystemPageOut
+
+		PTESIZE pteaddr +=
+		1 i +=
+	end
+end
+
+fn MiKernelStackSwapIn { thread -- }
+	// bring in the thread's kernel stack pages.
+	// read from swap if necessary.
+
+	// called at IPLLOW.
+
+	auto vaddr
+	thread@ KeThread_KernelStackTop + @ KETHREADSTACKSIZE - vaddr!
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto i
+	0 i!
+
+	while (i@ KETHREADSTACKSIZE PAGESHIFT >> <)
+		vaddr@ // vaddr
+		pteaddr@ // pteaddr
+		MiSystemPageIn drop
+
+		PTESIZE pteaddr +=
+		PAGESIZE vaddr +=
+		1 i +=
+	end
+end

@@ -1,0 +1,127 @@
+//
+// Implements common volume-management routines for filesystem drivers.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+fn FSVolumeFlush { mount -- ok }
+	fnsection "PAGE$text"
+
+	auto volfcb
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ volfcb!
+
+	auto cacheblock
+	volfcb@ IOFileControlBlock_CacheInfoBlock + @ cacheblock!
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	cacheblock@ IOCacheInfoBlockFlush ok!
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn FSCheckAccess { access permbits owninguid owninggid mount -- ok }
+	fnsection "PAGE$text"
+
+	if (access@ ACCESS_WRITE &)
+		if (mount@ IOMount_Flags + @ OSMOUNT_READONLY &)
+			STATUS_READONLY_FILESYSTEM ok!
+
+			return
+		end
+	end
+
+	if (mount@ IOMount_Flags + @ OSMOUNT_NOUID &)
+		0 ok!
+
+		return
+	end
+
+	auto process
+	KeProcessCurrent process!
+
+	if (mount@ IOMount_Flags + @ OSMOUNT_MATCHUID &)
+		auto dev
+		mount@ IOMount_UnderlyingDeviceObject + @ dev!
+
+		dev@ ObObjectUIDGID owninggid! owninguid!
+
+		access@ // access
+		permbits@ // permbits
+		owninguid@ // owninguid
+		owninggid@ // owninggid
+		process@ // process
+		SeCheckAccessFilesystemX ok!
+
+		return
+	end
+
+	access@ // access
+	permbits@ // permbits
+	owninguid@ // owninguid
+	owninggid@ // owninggid 
+	process@ // process
+	SeCheckAccessFilesystemX ok!
+end
+
+fn FSFileObjectFill { fcb permissions uid gid fileobject mount -- }
+	fnsection "PAGE$text"
+
+	fcb@ fileobject@ IOFile_FileControlBlock + !
+
+	auto paged
+	KeProcessCurrent PsProcess_PagedArea + @ paged!
+
+	if (mount@ IOMount_Flags + @ OSMOUNT_NOUID &)
+		paged@ PsProcessPaged_UID + @ // uid
+		paged@ PsProcessPaged_GID + @ // gid
+		permissions@ // permissions
+		fileobject@ // object
+		ObObjectSetUIDGIDPermissions
+
+		return
+	end
+
+	if (mount@ IOMount_Flags + @ OSMOUNT_MATCHUID &)
+		auto dev
+		mount@ IOMount_UnderlyingDeviceObject + @ dev!
+
+		dev@ ObObjectUIDGID gid! uid!
+	end
+
+	uid@ // uid
+	gid@ // gid
+	permissions@ // permissions
+	fileobject@ // object
+	ObObjectSetUIDGIDPermissions
+end
+
+fn FSFileControlBlockGetMount { fcb -- mount }
+	fcb@ IOFileControlBlock_Paged + @
+	IOFileControlBlockPaged_DeviceObject + @
+	IODevice_RelevantMount + @ mount!
+end

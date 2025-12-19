@@ -1,0 +1,484 @@
+#include "<df>/dragonfruit.h"
+#include "<inc>/HALCrash.h"
+
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../KeInternal.h"
+#include "../../../OSLoader/OSLoaderGlobal.h"
+
+// if this seems janked up, its because it is, because this all used to be in
+// the HAL, and the process of moving it into the kernel was rough.
+
+const ECAUSEINTERRUPT 1
+const ECAUSESYS       2
+const ECAUSENMI       5
+const ECAUSEBRK       6
+const ECAUSEINVALID   7
+const ECAUSEPRIVVIOL  8
+const ECAUSEUNALIGNED 9
+const ECAUSEPAGEFAULT 12
+const ECAUSEPAGEWRITE 13
+
+externptr HALXRstationInterruptHandlers
+
+externptr HALXRstationLSICClaimComplete
+
+externptr HALXr17032SavedEV
+
+externptr KeThreadCurrentStackTop
+externptr KeThreadCurrentStackBottom
+externptr HALInterruptStackTop
+
+externptr OSCallCount
+externptr OSCallTable
+
+externptr KeIPLCurrent
+
+extern HALXr17032TLBFlushAll { -- }
+
+extern KiContinue { tf -- }
+
+externptr HALLoaderInfo
+
+extern KiXr17032Init { eb -- }
+
+fn KiCPUInit { -- }
+	auto ptr
+	HALLoaderInfo@ LdrInfo_ExceptionBlockBase + @ ptr!
+
+	// Construct a jump instruction that just jumps to our exception handler,
+	// and then copy it to the first instruction of each entry of the exception
+	// block, except for the TLB miss handler, which has already been set up by
+	// OSLoader.
+
+	auto jmpinstruction
+	6 jmpinstruction!
+
+	pointerof KiXr17032ExceptionVector 2 >> 3 << jmpinstruction |=
+
+	auto i
+	0 i!
+
+	while (i@ 14 <)
+		jmpinstruction@ ptr@!
+
+		1 i +=
+		256 ptr +=
+	end
+
+	HALLoaderInfo@ LdrInfo_ExceptionBlockBase + @ KiXr17032Init
+end
+
+extern KiThreadTrampoline { -- }
+
+extern KiXr17032Syscall { tf -- }
+
+const EXCNAMESMAX 15
+
+table ExceptionNames
+	"EXC0"
+	"INTERRUPT"
+	"SYSCALL"
+	"FWCALL"
+	"BUSERROR"
+	"EXC5"
+	"BREAKPOINT"
+	"INVALIDINSTRUCTION"
+	"PRIVILEGEVIOLATION"
+	"UNALIGNEDADDR"
+	"EXC10"
+	"EXC11"
+	"PAGEFAULT(READ)"
+	"PAGEFAULT(WRITE)"
+	"EXC14"
+	"EXC15"
+endtable
+
+extern PsDispatchUsermodeInterrupts { trapframe -- }
+
+fn KiStackOverflow { sp rs -- }
+	auto current
+	KeThreadCurrent@ current!
+
+	if (current@)
+		KeThreadCurrentStackBottom@
+		sp@
+		current@ KeThread_Name +
+		current@ KeThread_Process + @ KeProcess_Name +
+		"process '%s' thread '%s' kernel stack overflow (sp=%x bottom=%x)\n" KeCrash
+	end
+
+	rs@ "Kernel stack overflow %x\n" KeCrash
+end
+
+fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
+	// Cause a usermode interrupt of the current thread by saving the context
+	// on the user stack and redirecting the trapframe to the usermode
+	// interrupt handler. This is used to implement signal and APC dispatch.
+
+	auto usp
+	trapframe@ OSContext_sp + @ usp!
+
+	if (DEBUGCHECKS)
+		if (trapframe@ OSContext_ers + @ XR17032_ERS_USER & ~~)
+			trapframe@ "KiInterruptUsermode: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	OSContext_SIZEOF usp -=
+
+	auto ok
+	usp@ // dest
+	trapframe@ // src
+	OSContext_SIZEOF // sz
+	KeSafeCopyOut ok!
+
+	if (ok@)
+		// Failed to copy out context frame, this is fatal to the entire
+		// process.
+
+		// TODO automatically switch to an overflow stack?
+
+		OSSIGNAL_KILL // signal
+		KeThreadCurrent@ KeThread_Process + @ // process
+		KeProcessSignal drop
+
+		return
+	end
+
+	// Redirect the trapframe to the usermode interrupt handler.
+
+	usp@ trapframe@ OSContext_sp + !
+	dispatchfunc@ trapframe@ OSContext_epc + !
+	context@ trapframe@ OSContext_a0 + !
+	usp@ trapframe@ OSContext_a1 + !
+	userfunc@ trapframe@ OSContext_a2 + !
+end
+
+fn KeThreadContinue { alertable signum context thread -- ok }
+	// Restore context and continue out of a usermode interrupt handler.
+
+	if (signum@ -1 ~=)
+		if (signum@ ~~)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+
+		if (signum@ 32 >=)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+	end
+
+	0 ok!
+
+	auto tf
+	thread@ KeThread_TrapFrame + @ tf!
+
+	auto ers
+	tf@ OSContext_ers + @ ers!
+
+	if (DEBUGCHECKS)
+		if (ers@ XR17032_ERS_USER & ~~)
+			tf@ "KeThreadContinue: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	tf@ // dest
+	context@ // src
+	OSContext_SIZEOF // size
+	memcpy
+
+	// don't modify ers lest we allow our user programs to get kernelmode...
+	ers@ tf@ OSContext_ers + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (signum@ -1 ~=)
+		// atomically unmask the signal.
+
+		1 signum@ << thread@ KeThread_SignalAcceptMask + |=
+
+		if (thread@ KeThread_SignalAcceptMask + @
+			thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+			thread@ KeThread_Signals + @ &)
+
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	if (alertable@)
+		// check for another user APC to deliver, so that they "chain"
+		// properly.
+
+		if (thread@ KeThread_UserAPCListHead + @)
+			1 thread@ KeThread_UserAPCTriggeredB + sb
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	// Perform a direct return to avoid corrupting the newly-built trapframe
+	// on our way out from the syscall handler, and to make sure we can't
+	// miss any user APCs that get enqueued after we return.
+
+	if (thread@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
+end
+
+fn KiXr17032Exception { badaddr ecause tf -- }
+	auto handled
+	1 handled!
+
+	auto signal
+	0 signal!
+
+	badaddr@ tf@ OSContext_badaddr + !
+	KeIPLCurrent@ KiOldIPL!
+
+	if (tf@ OSContext_ers + @ XR17032_ERS_USER &)
+		tf@ KeThreadCurrent@ KeThread_TrapFrame + !
+	end
+
+	0 handled!
+
+	if (ecause@ ECAUSEINTERRUPT ==)
+		1 KeStatistics OSStatistics_Interrupts + +=
+
+		tf@ HALInterrupt
+
+		if (KeIPLCurrent@ IPLDPC <)
+			if (KiPendingSoftwareInterrupts@)
+				KiDispatchSoftwareInterrupts
+			end
+		end
+
+		0 signal!
+		1 handled!
+	end else
+		HALCPUInterruptEnable
+
+		if (ecause@ ECAUSESYS ==)
+			1 KeStatistics OSStatistics_SystemCalls + +=
+
+			tf@ KiXr17032Syscall
+
+			1 handled!
+		end elseif (ecause@ ECAUSEPAGEFAULT ==)
+			0 // writing
+			badaddr@ // badaddr
+			tf@ // trapframe
+			MmPageFault handled!
+		end elseif (ecause@ ECAUSEPAGEWRITE ==)
+			1 // writing
+			badaddr@ // badaddr
+			tf@ // trapframe
+			MmPageFault handled!
+		end elseif (ecause@ ECAUSEINVALID ==)
+			OSSIGNAL_ILL signal!
+		end elseif (ecause@ ECAUSEPRIVVIOL ==)
+			OSSIGNAL_ILL signal!
+		end elseif (ecause@ ECAUSEUNALIGNED ==)
+			OSSIGNAL_BUS signal!
+		end elseif (ecause@ ECAUSEBRK ==)
+			1 handled!
+			// TODO debugging stuff
+		end
+
+		if (signal@)
+			if (tf@ OSContext_ers + @ XR17032_ERS_USER &)
+				signal@ // signal
+				KeThreadCurrent@ // thread
+				KeThreadSignal drop
+
+				1 handled!
+			end elseif (ecause@ ECAUSEUNALIGNED ==)
+				auto abort
+				KeThreadCurrent@ KeThread_SafeAccessAbort + @ abort!
+
+				if (abort@)
+					// thought this might happen.
+
+					STATUS_FAULT abort@ tf@ HALCPUTrapFrameAbort
+
+					1 handled!
+				end
+			end
+		end
+
+		HALCPUInterruptDisable drop
+	end
+
+	if (handled@ ~~)
+		auto excname
+
+		if (ecause@ EXCNAMESMAX >)
+			"UNKNOWN" excname!
+		end else
+			[ecause@]ExceptionNames@ excname!
+		end
+
+		if (ecause@ ECAUSENMI ==)
+			if (HALDebug)
+				return
+			end
+
+			return
+		end
+
+		excname@
+		badaddr@
+		tf@ OSContext_epc + @
+		tf@ OSContext_ers + @
+		KeIPLCurrent@
+		"Fault: IPL=%d ERS=%08x EPC=%08x BADADDR=%08x ECAUSE=%s\n" KeCrash
+	end
+
+	if (tf@ OSContext_ers + @ XR17032_ERS_USER &)
+		if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+			tf@ PsDispatchUsermodeInterrupts
+		end
+	end
+end
+
+fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
+	// make a fake trap frame to return to
+
+	auto tf
+	OSContext_SIZEOF alloc tf!
+
+	tf@ // ptr
+	OSContext_SIZEOF // sz
+	0 // word
+	memset
+
+	teb@ tf@ OSContext_s18 + !
+
+	XR17032_ERS_UTHREAD XR17032_RS_MMU | tf@ OSContext_ers + !
+
+	entryfunc@ tf@ OSContext_epc + !
+	exitfunc@ tf@ OSContext_lr + !
+
+	context@ tf@ OSContext_a0 + !
+
+	ustack@ tf@ OSContext_sp + !
+
+	HALCPUInterruptDisable drop
+
+	if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
+end
+
+const MAX_ASID 4096
+
+var KiASIDNext 1
+
+var KiASIDSequenceNumber 0
+public KiASIDSequenceNumber
+
+extern HALXr17032MapSwitch { asid pgtb -- }
+
+fn KeAddressSpaceSwitch { process -- }
+	auto asid
+	process@ KeProcess_ASID + @ asid!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (process@ KeProcess_PageDirectory + @ HALPlatformKernelPageDirectory@ ==)
+		0 // asid
+		HALPlatformKernelPageDirectory@ // pgtb
+		HALXr17032MapSwitch
+	end else
+		if (process@ KeProcess_ASIDSequenceNumber + @
+			KiASIDSequenceNumber@ ~=)
+
+			// the ASIDs rolled over at some point, so we have to give this
+			// process a new one.
+
+			KiASIDNext@ asid!
+			asid@ 1 + KiASIDNext!
+
+			if (asid@ MAX_ASID >=)
+				// roll over! flush TLB and increment sequence number.
+
+				1 asid!
+				2 KiASIDNext!
+				1 KiASIDSequenceNumber +=
+
+				HALXr17032TLBFlushAll
+			end
+
+			asid@ process@ KeProcess_ASID + !
+			KiASIDSequenceNumber@ process@ KeProcess_ASIDSequenceNumber + !
+		end
+
+		asid@ // asid
+		process@ KeProcess_PageDirectory + @ 5 >> 12 << // pgtb
+		HALXr17032MapSwitch
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn HALCPUIsUserTrapFrame { tf -- user }
+	tf@ OSContext_ers + @ XR17032_ERS_USER & user!
+end
+
+fn HALCPUTrapFrameAbort { ok abort tf -- }
+	ok@ tf@ OSContext_a0 + !
+	abort@ tf@ OSContext_epc + !
+end
+
+fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
+	8 kstack -=
+
+	0 kstack@!
+	startfunc@ kstack@ 4 + !
+
+	kstack@ OSContext_SIZEOF - ctx!
+
+	ctx@ OSContext_SIZEOF 0 memset
+
+	startfunc@ ctx@ OSContext_a2 + !
+	context1@ ctx@ OSContext_a1 + !
+	context2@ ctx@ OSContext_a0 + !
+
+	// enable interrupts and paging in the thread's context
+	XR17032_ERS_KTHREAD XR17032_RS_MMU | ctx@ OSContext_ers + !
+
+	pointerof KiThreadTrampoline ctx@ OSContext_epc + !
+
+	kstack@ ctx@ OSContext_sp + !
+
+	OSContext_SIZEOF ctx -=
+
+	XR17032_RS_MMU ctx@ OSContext_ers + !
+
+	pointerof KiLoadInitialContext ctx@ OSContext_lr + !
+end

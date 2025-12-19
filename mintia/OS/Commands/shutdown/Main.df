@@ -1,0 +1,11 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+fn Main { ... -- ret }
+	OSSHUTDOWN_HALT OSShutdownSystem ret!
+
+	if (ret@)
+		ret@ OSStatusGetName "shutdown: %s\n" OSError
+	end
+end

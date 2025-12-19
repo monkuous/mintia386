@@ -1,0 +1,488 @@
+//
+// AMS user and group creation.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/OSDLL/OSCrypt.h"
+
+#include "<inc>/AmsAPI.h"
+
+#include "AmsServer.h"
+
+fn AmsInternalEndUserSessions { uid processhandle -- ok }
+	auto pinfo
+	OSObjectQuery_SIZEOF alloc pinfo!
+
+	processhandle@ // handle
+	pinfo@ // query
+	OSQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	if (pinfo@ OSObjectQuery_UID + @ uid@ ~=)
+		if (uid@ UID_SYSTEM ==)
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+
+		SYSTEMPERMISSION_ADMIN // permission
+		processhandle@ // processhandle
+		OSCheckPermission ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	0 // excludedprocess
+	OSSIGNAL_TERM // signal
+	uid@ // uid
+	AmsClientSignalByUID
+end
+
+fn AmsUserCreate { password info processhandle -- uid ok }
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	// check if the user already exists.
+
+	info@ AmsUserInformation_UserName + // username
+	AmsDbUserGetByName ok! drop
+
+	if (ok@ STATUS_NO_SUCH_USER ~=)
+		STATUS_USER_EXISTS ok!
+
+		return
+	end
+
+	// create the user with the specified initial properties.
+
+	auto userptr
+	info@ AmsUserInformation_UserName + // username
+	AmsDbUserCreate ok! userptr! uid!
+
+	if (ok@)
+		return
+	end
+
+	info@ AmsUserInformation_GID + @ // value
+	"gid" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_Home + // value
+	"home" // property
+	userptr@ // userptr
+	AmsDbUserSetProperty ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_Shell + // value
+	"shell" // property
+	userptr@ // userptr
+	AmsDbUserSetProperty ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_PoolQuota + @ // value
+	"poolquota" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_PagedPoolQuota + @ // value
+	"pgpoolquota" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_VirtualMemoryQuota + @ // value
+	"vmquota" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_WorkingSetQuota + @ // value
+	"wsquota" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	info@ AmsUserInformation_RestrictionLevel + @ // value
+	"restrict" // property
+	userptr@ // userptr
+	AmsDbUserSetPropertyNumeric ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	auto hash
+	AMSPASSWORDHASHLENGTH alloc hash!
+
+	password@ // userpass
+	hash@ // hash
+	AmsGeneratePasswordHash
+
+	hash@ // value
+	"password" // property
+	userptr@ // userptr
+	AmsDbUserSetProperty ok!
+
+	if (ok@)
+		userptr@ AmsDbUserDelete
+
+		return
+	end
+
+	AmsDbUserWrite drop
+end
+
+fn AmsUserDelete { uid processhandle -- ok }
+	if (uid@ UID_SYSTEM ==)
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto userptr
+	uid@ // uid
+	AmsDbUserGetByUID ok! userptr!
+
+	if (ok@)
+		return
+	end
+
+	userptr@ AmsDbUserDelete
+
+	// boot off any sessions under this UID.
+
+	OSNONE // excludedprocess
+	OSSIGNAL_TERM // signal
+	uid@ // uid
+	AmsClientSignalByUID
+
+	AmsDbUserWrite drop
+end
+
+fn AmsGroupCreate { info processhandle -- gid ok }
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	// check if the group already exists.
+
+	info@ AmsGroupInformation_GroupName + // groupname
+	AmsDbGroupGetByName ok! drop
+
+	if (ok@ STATUS_NO_SUCH_GROUP ~=)
+		STATUS_GROUP_EXISTS ok!
+
+		return
+	end
+
+	// create the group with the specified initial properties.
+
+	auto groupptr
+	info@ AmsGroupInformation_GroupName + // username
+	AmsDbGroupCreate ok! groupptr! gid!
+
+	if (ok@)
+		return
+	end
+
+	AmsDbGroupWrite drop
+end
+
+fn AmsGroupDelete { gid processhandle -- ok }
+	if (gid@ GID_SYSTEM ==)
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto groupptr
+	gid@ // gid
+	AmsDbGroupGetByGID ok! groupptr!
+
+	if (ok@)
+		return
+	end
+
+	groupptr@ AmsDbGroupDelete
+
+	AmsDbGroupWrite drop
+end
+
+fn AmsUserEdit { info uid processhandle -- ok }
+	auto pinfo
+	OSObjectQuery_SIZEOF alloc pinfo!
+
+	processhandle@ // handle
+	pinfo@ // query
+	OSQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	auto issystem
+	pinfo@ OSObjectQuery_UID + @ UID_SYSTEM == issystem!
+
+	if (issystem@ ~~)
+		if (uid@ UID_SYSTEM ==)
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+	end
+
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto userptr
+	uid@ // uid
+	AmsDbUserGetByUID ok! userptr!
+
+	if (ok@)
+		return
+	end
+
+	if (info@ AmsUserInformation_GID + @ -1 ~=)
+		// set GID
+
+		info@ AmsUserInformation_GID + @ // value
+		"gid" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_RestrictionLevel + @ -1 ~=)
+		// set restriction level
+
+		if (uid@ UID_SYSTEM ==)
+			// don't let anyone forbid the system user from logging in
+
+			AMSRESTRICT_NOLOG ~ info@ AmsUserInformation_RestrictionLevel + &=
+		end
+
+		info@ AmsUserInformation_RestrictionLevel + @ // value
+		"restrict" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_PoolQuota + @)
+		// set pool quota
+
+		info@ AmsUserInformation_PoolQuota + @ // value
+		"poolquota" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_PagedPoolQuota + @)
+		// set paged pool quota
+
+		info@ AmsUserInformation_PagedPoolQuota + @ // value
+		"pgpoolquota" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_VirtualMemoryQuota + @)
+		// set vm quota
+
+		info@ AmsUserInformation_VirtualMemoryQuota + @ // value
+		"vmquota" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_WorkingSetQuota + @)
+		// set ws quota
+
+		info@ AmsUserInformation_WorkingSetQuota + @ // value
+		"wsquota" // property
+		userptr@ // userptr
+		AmsDbUserSetPropertyNumeric ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_UserName + gb)
+		// set username
+
+		info@ AmsUserInformation_UserName + // name
+		userptr@ // userptr
+		AmsDbUserSetName
+	end
+
+	if (info@ AmsUserInformation_Home + gb)
+		// set home
+
+		info@ AmsUserInformation_Home + // value
+		"home" // property
+		userptr@ // userptr
+		AmsDbUserSetProperty ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (info@ AmsUserInformation_Shell + gb)
+		// set shell
+
+		info@ AmsUserInformation_Shell + // value
+		"shell" // property
+		userptr@ // userptr
+		AmsDbUserSetProperty ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	AmsDbUserWrite drop
+end
+
+fn AmsGroupEdit { info gid processhandle -- ok }
+	auto pinfo
+	OSObjectQuery_SIZEOF alloc pinfo!
+
+	processhandle@ // handle
+	pinfo@ // query
+	OSQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	if (pinfo@ OSObjectQuery_UID + @ UID_SYSTEM ~=)
+		if (gid@ GID_SYSTEM ==)
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+	end
+
+	SYSTEMPERMISSION_ADMIN // permission
+	processhandle@ // processhandle
+	OSCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto groupptr
+	gid@ // gid
+	AmsDbGroupGetByGID ok! groupptr!
+
+	if (ok@)
+		return
+	end
+
+	if (info@ AmsGroupInformation_GroupName + gb)
+		// set group name
+
+		info@ AmsGroupInformation_GroupName + // name
+		groupptr@ // groupptr
+		AmsDbGroupSetName
+	end
+
+	AmsDbGroupWrite drop
+end

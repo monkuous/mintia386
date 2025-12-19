@@ -1,0 +1,1 @@
+ARCHITECTURE := i386

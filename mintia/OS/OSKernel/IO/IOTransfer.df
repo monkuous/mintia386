@@ -1,0 +1,579 @@
+//
+// Implements IO transfer helper functions.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IOInternal.h"
+
+fn IOSystemBufferTransfer { functioncode flags kflags buf length offset fcb -- bytes ok }
+	auto iop
+	auto iopl
+
+	KERNELMODE // mode
+	IOPTYPE_NORMAL // type
+	kflags@ // kflags
+	fcb@ // fcb
+	IOPFLAG_COMPLMDL // iopflags
+	IOPacketAllocateForFile ok! iop! iopl!
+
+	if (ok@)
+		return
+	end
+
+	auto mdl
+	length@ // length
+	buf@ // vaddr
+	kflags@ // kflags
+	MmMDLAllocate ok! mdl!
+
+	if (ok@)
+		iop@ IOPacketFree
+
+		return
+	end
+
+	MMMDL_FREE mdl@ MmMDLHeader_Flags + |=
+
+	auto event
+	KeEvent_SIZEOF alloc event!
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"IOSystemBufferTransferEvent" // name
+	event@ // event
+	KeEventInitialize
+
+	event@ iop@ IOPacketHeader_Event + !
+
+	mdl@ iop@ IOPacketHeader_MDL + !
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+	offset@ iopl@ IOPacketLocation_Offset + !
+	flags@ iopl@ IOPacketLocation_Flags + !
+
+	functioncode@ iopl@ IOPacketLocation_FunctionCodeB + sb
+
+	iop@ IOPacketEnqueue ok!
+
+	if (event@ KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+		// wait for completion.
+
+		KERNELMODE // waitmode
+		0 // alertable
+		OSWAIT_TIMEOUTINFINITE // timeout
+		event@ // object
+		KeThreadWaitForObject drop
+	end
+
+	if (ok@ ~~)
+		iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ ok!
+		iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + @ bytes!
+	end
+
+	// we allocated this packet, so let's free it.
+
+	iop@ IOPacketFree
+end
+
+fn IOMDLTransfer { iop completionroutine functioncode flags kflags mdl offset fcb -- bytes ok }
+	auto iopl
+
+	auto type
+
+	if (completionroutine@)
+		IOPTYPE_PAGING type!
+	end else
+		IOPTYPE_NORMAL type!
+	end
+
+	if (iop@)
+		0 // quotablock
+		type@ // type
+		kflags@ // kflags
+		fcb@ IOFileControlBlock_StackDepth + @ // stacksize
+		IOPFLAG_COMPLMDL // iopflags
+		iop@ // iop
+		IOPacketInitialize iopl!
+
+		fcb@ iopl@ IOPacketLocation_FileControlBlock + !
+
+		// remember that we were given the packet.
+
+		0 type!
+	end else
+		KERNELMODE // mode
+		type@ // type
+		kflags@ // kflags
+		fcb@ // fcb
+		IOPFLAG_COMPLMDL // iopflags
+		IOPacketAllocateForFile ok! iop! iopl!
+
+		if (ok@)
+			return
+		end
+
+		// remember that we allocated the packet.
+
+		1 type!
+	end
+
+	if (completionroutine@ ~~)
+		auto event
+		KeEvent_SIZEOF alloc event!
+
+		0 // signaled
+		OSEVENT_NOTIF // type
+		"IOMDLTransferEvent" // name
+		event@ // event
+		KeEventInitialize
+
+		event@ iop@ IOPacketHeader_Event + !
+	end else
+		MmModifiedPageWriterThread@ // thread
+		completionroutine@ // specialfunc
+		0 // normalfunc
+		iop@ IOPacketHeaderPagingIO_CompletionAPC + // apc
+		KeAPCInitialize
+	end
+
+	mdl@ iop@ IOPacketHeader_MDL + !
+
+	mdl@ MmMDLHeader_Length + @ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	mdl@ MmMDLHeader_Length + @ iopl@ IOPacketLocation_Length + !
+	offset@ iopl@ IOPacketLocation_Offset + !
+	flags@ iopl@ IOPacketLocation_Flags + !
+
+	functioncode@ iopl@ IOPacketLocation_FunctionCodeB + sb
+
+	iop@ IOPacketEnqueue ok!
+
+	if (completionroutine@ ~~)
+		// no completion routine, caller wants this to be synchronous.
+
+		if (event@ KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+			// wait for completion.
+
+			KERNELMODE // waitmode
+			0 // alertable
+			OSWAIT_TIMEOUTINFINITE // timeout
+			event@ // object
+			KeThreadWaitForObject drop
+		end
+
+		if (ok@ ~~)
+			iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ ok!
+			iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + @ bytes!
+		end
+
+		if (type@)
+			// we allocated this packet, so let's free it.
+
+			iop@ IOPacketFree
+		end
+	end
+end
+
+fn IOiIncrementAsyncIOCount { fcb -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto oldcount
+	fcb@ IOFileControlBlock_AsyncIOCount + @ oldcount!
+	oldcount@ 1 + fcb@ IOFileControlBlock_AsyncIOCount + !
+
+	if (oldcount@ ~~)
+		// clear the event
+		fcb@ IOFileControlBlock_AsyncIOEvent + // event
+		KeEventReset drop
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOiDecrementAsyncIOCount { fcb -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	1 fcb@ IOFileControlBlock_AsyncIOCount + -=
+
+	if (fcb@ IOFileControlBlock_AsyncIOCount + @ ~~)
+		0 // priboost
+		fcb@ IOFileControlBlock_AsyncIOEvent + // event
+		KeEventSignal
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn IOReadWriteAsync { requestblock flags length offset buffer fileobject functioncode -- ok }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLLOW ~=)
+			"IOReadWriteAsync: ipl != IPLLOW\n" KeCrash
+		end
+	end
+
+	auto mdl
+	length@ // length
+	buffer@ // vaddr
+	0 // kflags
+	MmMDLAllocateWithQuota ok! mdl!
+
+	if (ok@)
+		return
+	end
+
+	MMMDL_FREE mdl@ MmMDLHeader_Flags + |=
+
+	auto iop
+	auto iopl
+
+	auto iopflags
+	IOPFLAG_COMPLMDL IOPFLAG_QUOTA | iopflags!
+
+	if (requestblock@ OSRequest_CompletionRoutine + @ ~~)
+		// only free the IOP if there's no completion routine.
+		// otherwise we will do it in the kernel function for the user APC.
+
+		IOPFLAG_FREEIOP iopflags |=
+	end
+
+	USERMODE // mode
+	IOPTYPE_USERASYNC // type
+	0 // kflags
+	fileobject@ IOFile_FileControlBlock + @ // fcb
+	iopflags@ // iopflags
+	IOPacketAllocateForFile ok! iop! iopl!
+
+	if (ok@)
+		mdl@ MmMDLFree
+
+		return
+	end
+
+	auto msg
+	0 msg!
+
+	// initialize the completion APC.
+
+	KeThreadCurrent@ // thread
+	pointerof IOiUserAsyncAPCRoutine // specialfunc
+	0 // normalfunc
+	iop@ IOPacketHeaderUserAsync_CompletionAPC + // apc
+	KeAPCInitialize
+
+	// stash the context in the completion APC.
+	// when IOPacketComplete enqueues the APC, it will preserve whatever is in
+	// the Context2 field of the APC.
+
+	requestblock@ OSRequest_Context + @
+	iop@ IOPacketHeaderUserAsync_CompletionAPC + KeAPC_Context2 + !
+
+	if (requestblock@ OSRequest_PortHandle + @)
+		// allocate a completion message from the port object.
+
+		requestblock@ OSRequest_Context + @ // context
+		requestblock@ OSRequest_PortHandle + @ // portobject
+		IPCPortAllocateCompletionMessage ok! msg!
+
+		if (ok@)
+			mdl@ MmMDLFree
+
+			iop@ IOPacketFree
+
+			return
+		end
+
+		requestblock@ OSRequest_PortHandle + @ ObObjectReferenceByPointer drop
+	end
+
+	if (requestblock@ OSRequest_EventHandle + @)
+		requestblock@ OSRequest_EventHandle + @ ObObjectReferenceByPointer drop
+	end
+
+	fileobject@ ObObjectReferenceByPointer drop
+
+	msg@ iop@ IOPacketHeaderUserAsync_CompletionMessage + !
+
+	fileobject@ iop@ IOPacketHeaderUserAsync_FileObject + !
+
+	requestblock@ OSRequest_EventHandle + @ iop@ IOPacketHeader_Event + !
+	requestblock@ OSRequest_StatusBlock + @ iop@ IOPacketHeaderUserAsync_UserStatusBlock + !
+
+	requestblock@ OSRequest_CompletionRoutine + @ iop@ IOPacketHeaderUserAsync_UserAPCFunction + !
+
+	mdl@ iop@ IOPacketHeader_MDL + !
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+	offset@ iopl@ IOPacketLocation_Offset + !
+	flags@ iopl@ IOPacketLocation_Flags + !
+
+	functioncode@ iopl@ IOPacketLocation_FunctionCodeB + sb
+
+	fileobject@ IOFile_FileControlBlock + @ IOiIncrementAsyncIOCount
+
+	// place on thread's pending I/O list.
+	// raise to IPLAPC to block out completion APCs.
+
+	0 iop@ IOPacketHeaderUserAsync_ThreadListPrev + !
+
+	auto ipl
+	IPLAPC KeIPLRaise ipl!
+
+	auto h
+	KeThreadCurrent@ PsThread_IOListHead + @ h!
+
+	h@ iop@ IOPacketHeaderUserAsync_ThreadListNext + !
+
+	if (h@)
+		iop@ h@ IOPacketHeaderUserAsync_ThreadListPrev + !
+	end
+
+	iop@ KeThreadCurrent@ PsThread_IOListHead + !
+
+	ipl@ KeIPLLower
+
+	iop@ IOPacketEnqueue ok!
+
+	// the completion APC will take care of all rundown, even in an error,
+	// such as dereferencing the event, port, and file objects, and removing
+	// the IOP from the thread's pending I/O list.
+end
+
+fn (KeAPCFunctionSpecial) IOiUserAsyncAPCRoutine { normalfunc context1 context2 apc -- }
+	fnsection "PAGE$text"
+
+	auto iop
+	context1@@ iop!
+
+	// copy out I/O status block
+
+	if (iop@ IOPacketHeaderUserAsync_UserStatusBlock + @)
+		iop@ IOPacketHeaderUserAsync_UserStatusBlock + @ // dest
+		iop@ IOPacketHeader_StatusBlock + // src
+		OSStatusBlock_SIZEOF // size
+		KeSafeCopyOut drop
+	end
+
+	auto msg
+	iop@ IOPacketHeaderUserAsync_CompletionMessage + @ msg!
+
+	if (msg@)
+		// both of these helper functions, IPCPort*, dereference the port
+		// object for us.
+
+		if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_DOCOMPLT &)
+			// the requestor is expecting a message.
+
+			iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + @ // bytes
+			iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ // status
+			msg@ // msg
+			IPCPortSendCompletionMessage
+		end else
+			// the requestor should not be expecting a message.
+
+			msg@ IPCCompletionMessageFree
+		end
+	end
+
+	// dequeue this request from the thread's outstanding IO list.
+	// no synchronization is required because we are running at IPLAPC
+	// and only this thread can manipulate this list.
+
+	auto ls
+	iop@ IOPacketHeaderUserAsync_ThreadListPrev + @ ls!
+
+	auto ns
+	iop@ IOPacketHeaderUserAsync_ThreadListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ IOPacketHeaderUserAsync_ThreadListNext + !
+	end else
+		ns@ KeThreadCurrent@ PsThread_IOListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ IOPacketHeaderUserAsync_ThreadListPrev + !
+	end
+
+	iop@ IOPacketHeaderUserAsync_FileObject + @ IOFile_FileControlBlock + @ IOiDecrementAsyncIOCount
+
+	iop@ IOPacketHeaderUserAsync_FileObject + @ ObObjectDereferenceByPointer drop
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_DOCOMPLT &)
+		if (iop@ IOPacketHeaderUserAsync_UserAPCFunction + @)
+			// reinitialize the APC and re-enqueue it as a user APC.
+
+			KeThreadCurrent@ // thread
+			pointerof IOiUserAsyncUserRoutine // kernelfunc
+			iop@ IOPacketHeaderUserAsync_UserAPCFunction + @ // userfunc
+			0 // special
+			apc@ // apc
+			KeUserAPCInitialize
+
+			context2@@ // context1
+			iop@ // context2
+			0 // priboost
+			apc@ // apc
+			KeAPCEnqueue drop
+		end
+	end
+
+	iop@ IOPacketFinishEitherContext
+end
+
+fn (KeAPCFunctionSpecial) IOiUserAsyncUserRoutine { normalfunc context1 context2 apc -- }
+	fnsection "PAGE$text"
+
+	// just free the IO packet.
+	// couldn't be done before this point because the APC lives in the IO
+	// packet.
+
+	context2@@ IOPacketFree
+end
+
+fn IOReadWrite { timeout flags length offset buffer fileobject functioncode -- bytes ok }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLLOW ~=)
+			"IOReadWrite: ipl != IPLLOW\n" KeCrash
+		end
+	end
+
+	auto alertable
+	fileobject@ IOFile_Flags + @ OSFILEFLAG_UNALERTABLE & ~~
+	flags@ OSACCESSFLAG_ALERTABLE & | alertable!
+
+	if (flags@ OSACCESSFLAG_UNALERTABLE &)
+		0 alertable!
+	end
+
+	0 bytes!
+
+	auto mdl
+	length@ // length
+	buffer@ // vaddr
+	0 // kflags
+	MmMDLAllocateWithQuota ok! mdl!
+
+	if (ok@)
+		return
+	end
+
+	MMMDL_FREE mdl@ MmMDLHeader_Flags + |=
+
+	auto iop
+	auto iopl
+
+	USERMODE // mode
+	IOPTYPE_NORMAL // type
+	0 // kflags
+	fileobject@ IOFile_FileControlBlock + @ // fcb
+	IOPFLAG_COMPLMDL IOPFLAG_QUOTA | // iopflags
+	IOPacketAllocateForFile ok! iop! iopl!
+
+	if (ok@)
+		mdl@ MmMDLFree
+
+		return
+	end
+
+	auto event
+	KeThreadCurrent@ PsThread_SynchronousIOEvent + event!
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"IOReadWriteEvent" // name
+	event@ // event
+	KeEventInitialize
+
+	event@ iop@ IOPacketHeader_Event + !
+	mdl@ iop@ IOPacketHeader_MDL + !
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+	offset@ iopl@ IOPacketLocation_Offset + !
+	flags@ iopl@ IOPacketLocation_Flags + !
+
+	functioncode@ iopl@ IOPacketLocation_FunctionCodeB + sb
+
+	iop@ IOPacketEnqueue ok!
+
+	if (event@ KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+		auto wok
+		USERMODE // waitmode
+		alertable@ // alertable
+		timeout@ // timeout
+		event@ // object
+		KeThreadWaitForObject wok!
+
+		if (wok@)
+			if (ok@ ~~)
+				wok@ ok!
+			end
+
+			// the wait was interrupted.
+			// cancel the IO if possible, and then wait for its total
+			// completion.
+
+			auto cancelfunc
+			fileobject@ IOFile_FileControlBlock + @
+			IOFileControlBlock_DispatchTable + @
+			IODispatchTable_Cancel + @ cancelfunc!
+
+			if (cancelfunc@)
+				IPLAPC KeIPLRaise drop
+
+				iop@ // iop
+				cancelfunc@ IODispatchCancelFunction drop
+
+				IPLLOW KeIPLLower
+			end
+
+			if (event@ KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+				KERNELMODE // waitmode
+				0 // alertable
+				OSWAIT_TIMEOUTINFINITE // timeout
+				event@ // object
+				KeThreadWaitForObject drop
+			end
+		end
+	end
+
+	if (ok@ ~~)
+		iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ ok!
+		iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + @ bytes!
+	end
+
+	iop@ IOPacketFree
+end

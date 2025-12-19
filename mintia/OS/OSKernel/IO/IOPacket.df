@@ -1,0 +1,822 @@
+//
+// Implements IO packet management.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Transfer.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+const SMALLSTACK 1
+const LARGESTACK 3
+
+buffer IOiPacketZoneUserAsync MmZoneHeader_SIZEOF
+buffer IOiPacketZonePaging    MmZoneHeader_SIZEOF
+buffer IOiPacketZoneNormal    MmZoneHeader_SIZEOF
+
+buffer IOiPacketZoneUserAsyncSmall MmZoneHeader_SIZEOF
+buffer IOiPacketZonePagingSmall    MmZoneHeader_SIZEOF
+buffer IOiPacketZoneNormalSmall    MmZoneHeader_SIZEOF
+
+table IOiPacketZonesLarge
+	0
+	pointerof IOiPacketZoneNormal
+	pointerof IOiPacketZonePaging
+	pointerof IOiPacketZoneUserAsync
+endtable
+
+table IOiPacketZonesSmall
+	0
+	pointerof IOiPacketZoneNormalSmall
+	pointerof IOiPacketZonePagingSmall
+	pointerof IOiPacketZoneUserAsyncSmall
+endtable
+
+table IOiPacketHeaderSizes
+	0
+	IOPacketHeader_SIZEOF
+	IOPacketHeaderPagingIO_SIZEOF
+	IOPacketHeaderUserAsync_SIZEOF
+endtable
+
+rosection "INIT$text"
+
+fn IOiPacketZoneInit { count stacksize headersize zone -- }
+	fnsection "INIT$text"
+
+	auto packetsize
+	headersize@ IOPacketLocation_SIZEOF stacksize@ * + packetsize!
+
+	packetsize@ count@ * MMZONEOVERHEAD +
+	"zonesize %d\n"
+	"IOiPacketZonesInit" HALLog
+
+	auto ok
+	auto chunk
+
+	packetsize@ count@ * MMZONEOVERHEAD + // bytes
+	'IOPz' // tag
+	0 // flags
+	MmAllocWithTag ok! chunk!
+
+	if (ok@)
+		"IOiPacketZonesInit: failed to create packet zones\n" KeCrash
+	end
+
+	packetsize@ count@ * MMZONEOVERHEAD + // bytes
+	chunk@ // chunk
+	packetsize@ // blocksize
+	zone@ // zoneheader
+	MmZoneInitialize
+end
+
+rosection "text"
+
+fn IOiPacketZonesInit { -- }
+	fnsection "INIT$text"
+
+	auto largenormalcount
+	auto largepagingcount
+	auto largeasynccount
+
+	auto smallnormalcount
+	auto smallpagingcount
+	auto smallasynccount
+
+	// Only this many file page writer pageouts can be in flight at once
+	// anyway. It would be nice to be able to allocate the IOPs inline with
+	// the transfer structure, as is done with pagefile transfers, but file
+	// pages can go anywhere in the driver stack, so we can't know how many
+	// IOPLs we need ahead of time.
+
+	MPWFILETRANSFERS smallpagingcount!
+	MPWFILETRANSFERS largepagingcount!
+
+	if (MmSystemSize@ MMTINYSYSTEM <=)
+		3 smallasynccount!
+		2 largeasynccount!
+
+		4 smallnormalcount!
+		5 largenormalcount!
+	end elseif (MmSystemSize@ MMMEDIUMSYSTEM <=)
+		8 smallasynccount!
+		5 largeasynccount!
+
+		8 smallnormalcount!
+		10 largenormalcount!
+	end else
+		16 smallasynccount!
+		24 largeasynccount!
+
+		50 smallnormalcount!
+		64 largenormalcount!
+	end
+
+	// create large normal zone
+
+	largenormalcount@ // count
+	LARGESTACK // stacksize
+	IOPacketHeader_SIZEOF // headersize
+	IOiPacketZoneNormal // zone
+	IOiPacketZoneInit
+
+	// create large paging zone
+
+	largepagingcount@ // count
+	LARGESTACK // stacksize
+	IOPacketHeaderPagingIO_SIZEOF // headersize
+	IOiPacketZonePaging // zone
+	IOiPacketZoneInit
+
+	// create large user async zone
+
+	largeasynccount@ // count
+	LARGESTACK // stacksize
+	IOPacketHeaderUserAsync_SIZEOF // headersize
+	IOiPacketZoneUserAsync // zone
+	IOiPacketZoneInit
+
+	// create small normal zone
+
+	smallnormalcount@ // count
+	SMALLSTACK // stacksize
+	IOPacketHeader_SIZEOF // headersize
+	IOiPacketZoneNormalSmall // zone
+	IOiPacketZoneInit
+
+	// create small paging zone
+
+	smallpagingcount@ // count
+	SMALLSTACK // stacksize
+	IOPacketHeaderPagingIO_SIZEOF // headersize
+	IOiPacketZonePagingSmall // zone
+	IOiPacketZoneInit
+
+	// create small user async zone
+
+	smallasynccount@ // count
+	SMALLSTACK // stacksize
+	IOPacketHeaderUserAsync_SIZEOF // headersize
+	IOiPacketZoneUserAsyncSmall // zone
+	IOiPacketZoneInit
+end
+
+fn IOPacketFree { iop -- }
+	auto quotablock
+	iop@ IOPacketHeader_QuotaBlock + @ quotablock!
+
+	auto charge
+
+	if (quotablock@)
+		iop@ IOPacketHeader_HeaderSizeB + gb
+		iop@ IOPacketHeader_StackDepthB + gb IOPacketLocation_SIZEOF * + // bytes
+		MmChargeBytesGet charge!
+	end
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_ZONEIOP &)
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		if (iop@ IOPacketHeader_StackDepthB + gb SMALLSTACK <=)
+			iop@ // ptr
+			[iop@ IOPacketHeader_TypeB + gb]IOiPacketZonesSmall@ // zoneheader
+			MmZoneFree
+		end else
+			iop@ // ptr
+			[iop@ IOPacketHeader_TypeB + gb]IOiPacketZonesLarge@ // zoneheader
+			MmZoneFree
+		end
+
+		rs@ HALCPUInterruptRestore
+	end else
+		iop@ MmFree
+	end
+
+	if (quotablock@)
+		charge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUncharge
+	end
+end
+
+fn IOPacketAllocateForFile { mode type kflags fcb iopflags -- ioplzero iop ok }
+	mode@ // mode
+	type@ // type
+	kflags@ // kflags
+	fcb@ IOFileControlBlock_StackDepth + @ // stacksize
+	iopflags@ // iopflags
+	IOPacketAllocate ok! iop! ioplzero!
+
+	if (ok@)
+		return
+	end
+
+	fcb@ ioplzero@ IOPacketLocation_FileControlBlock + !
+end
+
+fn IOPacketAllocate { mode type kflags stacksize iopflags -- ioplzero iop ok }
+	auto packetsize
+	[type@]IOiPacketHeaderSizes@ stacksize@ IOPacketLocation_SIZEOF * + packetsize!
+
+	auto quotablock
+	0 quotablock!
+
+	if (mode@ USERMODE ==)
+		IOPFLAG_USERMODE iopflags |=
+	end
+
+	if (iopflags@ IOPFLAG_QUOTA &)
+		if (kflags@ IOKFLAG_PAGING &)
+			// Never charge quota for paging IO, we need it to work at all
+			// costs.
+
+			IOPFLAG_QUOTA ~ iopflags &=
+		end else
+			KeThreadCurrent@ KeThread_Process + @ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+			packetsize@ MmChargeBytesGet // charge
+			quotablock@ // quotablock
+			MmQuotaBlockCharge ok!
+
+			if (ok@)
+				return
+			end
+		end
+	end
+
+	auto zone
+	0 zone!
+	0 iop!
+
+	if (stacksize@ SMALLSTACK <=)
+		[type@]IOiPacketZonesSmall@ zone!
+	end elseif (stacksize@ LARGESTACK <=)
+		[type@]IOiPacketZonesLarge@ zone!
+	end
+
+	if (zone@)
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		zone@ MmZoneAllocate ok! iop!
+
+		rs@ HALCPUInterruptRestore
+
+		if (ok@)
+			// There are no IOPs left in the zone, so we will have to hit the
+			// nonpaged pool.
+
+			0 iop!
+			0 zone!
+		end else
+			IOPFLAG_ZONEIOP iopflags |=
+		end
+	end
+
+	if (iop@ ~~)
+		auto flags
+		CANBLOCK flags!
+
+		kflags@ MmKflagToPriority flags |=
+
+		packetsize@ // bytes
+		'IOPa' // tag
+		flags@ // flags
+		MmAllocWithTag ok! iop!
+
+		if (ok@)
+			if (quotablock@)
+				packetsize@ MmChargeBytesGet // charge
+				quotablock@ // quotablock
+				MmQuotaBlockUncharge
+			end
+
+			return
+		end
+	end
+
+	quotablock@ // quotablock
+	type@ // type
+	kflags@ // kflags
+	stacksize@ // stacksize
+	iopflags@ // iopflags
+	iop@ // iop
+	IOPacketInitialize ioplzero!
+end
+
+fn IOPacketInitialize { quotablock type kflags stacksize iopflags iop -- ioplzero }
+	0 iop@ IOPacketHeader_CurrentStackIndexB + sb
+	stacksize@ iop@ IOPacketHeader_StackDepthB + sb
+	0 iop@ IOPacketHeader_PriorityBoostB + sb
+
+	type@ iop@ IOPacketHeader_TypeB + sb
+	iopflags@ iop@ IOPacketHeader_IOPFlagsB + sb
+
+	[type@]IOiPacketHeaderSizes@ iop@ IOPacketHeader_HeaderSizeB + sb
+
+	iop@ IOPacketHeader_StatusBlock + // ptr
+	OSStatusBlock_SIZEOF // sz
+	0 // word
+	memset
+
+	quotablock@ iop@ IOPacketHeader_QuotaBlock + !
+
+	0 iop@ IOPacketHeader_ParentIOP + !
+
+	0 iop@ IOPacketHeader_Event + !
+
+	kflags@ iop@ IOPacketHeader_KFlags + !
+
+	0 iop@ IOPacketHeader_MDL + !
+
+	OSWAIT_TIMEOUTINFINITE iop@ IOPacketHeader_Timeout + !
+
+	0 iop@ IOPacketHeader_DeviceQueueNext + !
+	0 iop@ IOPacketHeader_DeviceQueuePrev + !
+
+	1 iop@ IOPacketHeader_IOCountI + si
+
+	// Initialize the IOPLs of the packet to indicate their stack location.
+	// XXX This could probably be done earlier for zone-allocated IOPs.
+
+	auto iopl
+	iop@ [type@]IOiPacketHeaderSizes@ + iopl!
+
+	auto i
+	0 i!
+
+	while (i@ stacksize@ <)
+		0 iopl@ IOPacketLocation_FunctionCodeB + sb
+		i@ iopl@ IOPacketLocation_StackLocationB + sb
+
+		0 iopl@ IOPacketLocation_Flags + !
+
+		0 iopl@ IOPacketLocation_FileControlBlock + !
+		0 iopl@ IOPacketLocation_CallbackRoutine + !
+
+		0 iopl@ IOPacketLocation_Offset + !
+		0 iopl@ IOPacketLocation_Length + !
+
+		0 iopl@ IOPacketLocation_OffsetInMDL + !
+
+		iop@ iopl@ IOPacketLocation_IOPH + !
+
+		1 i +=
+		IOPacketLocation_SIZEOF iopl +=
+	end
+
+	iop@ [type@]IOiPacketHeaderSizes@ + ioplzero!
+end
+
+fn IOPacketIndex { index iop -- iopl }
+	if (DEBUGCHECKS)
+		if (index@ iop@ IOPacketHeader_StackDepthB + gb >=)
+			"IOPacketIndex: index out of bounds\n" KeCrash
+		end
+	end
+
+	iop@ iop@ IOPacketHeader_HeaderSizeB + gb + iopl!
+	index@ IOPacketLocation_SIZEOF * iopl +=
+end
+
+fn IOPacketFromLocation { iopl -- iop }
+	iopl@ IOPacketLocation_IOPH + @ iop!
+end
+
+fn IOPacketCurrentLocation { iop -- iopl }
+	iop@ iop@ IOPacketHeader_HeaderSizeB + gb + iopl!
+	iop@ IOPacketHeader_CurrentStackIndexB + gb IOPacketLocation_SIZEOF * iopl +=
+end
+
+fn IOPacketLocationNext { iopl -- nextiopl }
+	if (DEBUGCHECKS)
+		if (iopl@ IOPacketLocation_StackLocationB + gb
+			iopl@ IOPacketLocation_IOPH + @ IOPacketHeader_StackDepthB + gb >=)
+			"IOPacketLocationNext: out of bounds\n" KeCrash
+		end
+	end
+
+	iopl@ IOPacketLocation_SIZEOF + nextiopl!
+end
+
+fn IOPacketLocationMappedBuffer { iopl -- vaddr }
+	iopl@ IOPacketLocation_IOPH + @
+	IOPacketHeader_MDL + @
+	MmMDLHeader_MappedAddress + @
+	iopl@ IOPacketLocation_OffsetInMDL + @ + vaddr!
+end
+
+fn IOPacketLocationVirtualBuffer { iopl -- vaddr }
+	iopl@ IOPacketLocation_IOPH + @
+	IOPacketHeader_MDL + @
+	MmMDLHeader_VirtualAddress + @
+	iopl@ IOPacketLocation_OffsetInMDL + @ + vaddr!
+end
+
+fn IOPacketLocationPhysical { offset iopl -- phyaddr }
+	auto mdl
+	iopl@ IOPacketLocation_IOPH + @ IOPacketHeader_MDL + @ mdl!
+
+	auto buf
+	iopl@ IOPacketLocation_OffsetInMDL + @ offset@ +
+	mdl@ MmMDLHeader_VirtualAddress + @ PAGEOFFSETMASK & + buf!
+
+	mdl@ MmMDLHeader_SIZEOF + buf@ PAGESHIFT >> 2 << + @ // pfdbe
+	MmPFDBEToPhysicalAddress phyaddr!
+
+	buf@ PAGEOFFSETMASK & phyaddr +=
+end
+
+fn IOPacketWasEnqueued { iop -- }
+	iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_DOCOMPLT |
+	iop@ IOPacketHeader_IOPFlagsB + sb
+end
+
+fn IOPacketAllocateAssoc { kflags stacksize iopflags iop -- ioplzero associop ok }
+	// Allocate an IOP to later associate with the master IOP.
+	// It does not associate it yet because the driver may still fail, and
+	// there is no good way to clean up associated IOPs.
+	// Useful for when you want to target this IOP to another driver stack,
+	// laterally.
+
+	auto mode
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_USERMODE &)
+		USERMODE mode!
+	end else
+		KERNELMODE mode!
+	end
+
+	mode@ // mode
+	IOPTYPE_NORMAL // type
+	kflags@ // kflags
+	stacksize@ // stacksize
+	iopflags@ // iopflags
+	IOPacketAllocate ok! associop! ioplzero!
+end
+
+fn IOPacketAllocateAssocStack { kflags iopflags iopl -- ioplzero associop ok }
+	// Allocate an IOP to later associate with the master IOP.
+	// It does not associate it yet because the driver may still fail, and
+	// there is no good way to clean up associated IOPs.
+	// Gives it as many stack locations as needed for the given IOPL minus
+	// one. Useful for when you want to give this IOP directly to the lower
+	// level driver.
+
+	auto iop
+	iopl@ IOPacketLocation_IOPH + @ iop!
+
+	if (DEBUGCHECKS)
+		if (iopl@ IOPacketLocation_StackLocationB + gb 1 +
+			iop@ IOPacketHeader_StackDepthB + gb >=)
+			"IOPacketAllocateAssocStack: stack overflow\n" KeCrash
+		end
+	end
+
+	auto stacksize
+	iop@ IOPacketHeader_StackDepthB + gb
+	iopl@ IOPacketLocation_StackLocationB + gb - 1 - stacksize!
+
+	auto mode
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_USERMODE &)
+		USERMODE mode!
+	end else
+		KERNELMODE mode!
+	end
+
+	mode@ // mode
+	IOPTYPE_NORMAL // type
+	kflags@ // kflags
+	stacksize@ // stacksize
+	iopflags@ // iopflags
+	IOPacketAllocate ok! associop! ioplzero!
+end
+
+fn IOPacketAssociate { associop iop -- }
+	// Associate the given IOP with the master IOP.
+	// This biases the IOCount on the master IOP and adds the associated IOP
+	// to the current thread's deferred enqueue list.
+
+	if (DEBUGCHECKS)
+		if (associop@ IOPacketHeader_ParentIOP + @)
+			"IOPacketAssociate: already associated\n" KeCrash
+		end
+	end
+
+	iop@ IOPacketHeader_IOCountI + gi 1 + 
+	iop@ IOPacketHeader_IOCountI + si
+
+	iop@ associop@ IOPacketHeader_ParentIOP + !
+
+	iop@ IOPacketHeader_KFlags + @ associop@ IOPacketHeader_KFlags + |=
+
+	auto current
+	KeThreadCurrent@ current!
+
+	0 associop@ IOPacketHeader_DeviceQueueNext + !
+
+	// Note that instead of disabling interrupts, this could raise IPL to
+	// IPLAPC, since this list is only manipulated in the context of this
+	// thread. This also means that no spinlock is required here on SMP.
+	// However, adding an item to the tail of a linked list is so fast that
+	// the overhead of raising IPL here is actually not worth it.
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto t
+	current@ PsThread_IOPDeferredListTail + @ t!
+
+	if (t@ ~~)
+		associop@ current@ PsThread_IOPDeferredListHead + !
+	end else
+		associop@ t@ IOPacketHeader_DeviceQueueNext + !
+	end
+
+	associop@ current@ PsThread_IOPDeferredListTail + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn IOPacketEnqueue { iop -- ok }
+	// Enqueue the IOP, and any associated IOPs that appear.
+
+	auto current
+	KeThreadCurrent@ current!
+
+	auto masteriop
+	1 masteriop!
+
+	0 ok!
+
+	while (1)
+		auto niop
+		iop@ IOPacketHeader_DeviceQueueNext + @ niop!
+
+		0 iop@ IOPacketHeader_CurrentStackIndexB + sb
+
+		auto iopl
+		iop@ iop@ IOPacketHeader_HeaderSizeB + gb + iopl!
+
+		while (1)
+			if (DEBUGCHECKS)
+				if (iop@ IOPacketHeader_CurrentStackIndexB + gb
+					iop@ IOPacketHeader_StackDepthB + gb >=)
+					"IOPacketEnqueue: stack overflow\n" KeCrash
+				end
+
+				if (iopl@ IOPacketLocation_FileControlBlock + @ ~~)
+					"IOPacketEnqueue: no FCB in stack location\n" KeCrash
+				end
+			end
+
+			auto func
+			iopl@ IOPacketLocation_FileControlBlock + @
+			IOFileControlBlock_DispatchTable + @
+			iopl@ IOPacketLocation_FunctionCodeB + gb 2 << + @ func!
+
+			if (func@ ~~)
+				STATUS_NOT_SUPPORTED // status
+				0 // priboost
+				iop@ // iop
+				IOPacketCompleteLow
+
+				if (ok@ ~~)
+					STATUS_NOT_SUPPORTED ok!
+				end
+
+				break
+			end
+
+			auto eok
+			auto done
+
+			iopl@ // iopl
+			func@ IODispatchEnqueueIOPFunction eok! done!
+
+			if (masteriop@)
+				// Don't propagate an error to the caller if it's from an
+				// associated IOP.
+
+				eok@ ok!
+			end
+
+			if (eok@ done@ IODONE_NOLOCATIONS == ||)
+				// Error or done indicated; don't proceed to next stack
+				// location. Also, the IOP may or may not exist anymore, so
+				// don't touch it again.
+
+				break
+			end
+
+			if (done@ IODONE_SAMELOCATION ~=)
+				iop@ IOPacketHeader_CurrentStackIndexB + gb 1 +
+				iop@ IOPacketHeader_CurrentStackIndexB + sb
+
+				IOPacketLocation_SIZEOF iopl +=
+			end
+		end
+
+		0 masteriop!
+
+		niop@ iop!
+
+		if (iop@ ~~)
+			// There's no next associated IOP, so this must have been a master
+			// one, or a lone associated one. Try to process the deferred IOP
+			// list that was accumulated while processing the last IOP.
+
+			// Note that instead of disabling interrupts, this could raise IPL
+			// to IPLAPC, since this list is only manipulated in the context
+			// of this thread. This also means that no spinlock is required
+			// here on SMP. However, adding an item to the tail of a linked
+			// list is so fast that the overhead of raising IPL here is
+			// actually not worth it.
+
+			auto rs
+			HALCPUInterruptDisable rs!
+
+			current@ PsThread_IOPDeferredListHead + @ iop!
+
+			0 current@ PsThread_IOPDeferredListHead + !
+			0 current@ PsThread_IOPDeferredListTail + !
+
+			rs@ HALCPUInterruptRestore
+
+			if (iop@ ~~)
+				break
+			end
+		end
+	end
+end
+
+fn IOPacketCompleteLow { status priboost iop -- }
+	// Unlike IOPacketComplete, this routine can be called from <IPLDPC.
+	// This can also be used if calling IPL varies.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	status@ priboost@ iop@ IOPacketComplete
+
+	ipl@ KeIPLLower
+end
+
+fn IOPacketComplete { status priboost iop -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"IOPacketComplete: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	// Complete the IOP, and also decrement the IO count on the parent IOP, if
+	// there is one.
+
+	while (1)
+		if (priboost@)
+			priboost@ iop@ IOPacketHeader_PriorityBoostB + sb
+		end
+
+		if (status@)
+			// A status was given for completing this IOP, save it.
+
+			status@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + !
+		end else
+			// No status given for completing this IOP.
+			// Try to propagate an existing status to the parent.
+
+			iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ status!
+		end
+
+		auto oldcount
+		iop@ IOPacketHeader_IOCountI + gi oldcount!
+
+		if (DEBUGCHECKS)
+			if (oldcount@ ~~)
+				"IOPacketComplete: underflow\n" KeCrash
+			end
+		end
+
+		oldcount@ 1 - iop@ IOPacketHeader_IOCountI + si
+
+		if (oldcount@ 1 >)
+			// There are still IOPs depending on this IOP, so break out now.
+
+			break
+		end
+
+		if (iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Status + @ ~~)
+			// Since the status is successful, always do full completion.
+			// This covers the cases where a driver does an early-out
+			// successful completion, i.e. a filesystem driver discovers that
+			// the transfer is zero-length.
+
+			iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_DOCOMPLT |
+			iop@ IOPacketHeader_IOPFlagsB + sb
+		end
+
+		// Call completion routines.
+
+		auto iopl
+		iop@ iop@ IOPacketHeader_HeaderSizeB + gb + iopl!
+
+		auto depth
+		iop@ IOPacketHeader_StackDepthB + gb depth!
+
+		while (depth@)
+			if (iopl@ IOPacketLocation_CallbackRoutine + @)
+				iopl@ // iopl
+				iopl@ IOPacketLocation_CallbackRoutine + @ IOPacketCompletionDPCRoutine drop
+			end
+
+			IOPacketLocation_SIZEOF iopl +=
+			1 depth -=
+		end
+
+		// Operation is completely done.
+
+		iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_COMPLETE |
+		iop@ IOPacketHeader_IOPFlagsB + sb
+
+		auto parentiop
+		iop@ IOPacketHeader_ParentIOP + @ parentiop!
+
+		auto flags
+		iop@ IOPacketHeader_IOPFlagsB + gb flags!
+
+		// If this is a paging or user async IOP, we have to enqueue an APC to
+		// do the rest of the completion processing. Otherwise, rundown the
+		// packet now.
+
+		if (iop@ IOPacketHeader_TypeB + gb IOPTYPE_PAGING ==)
+			iop@ // context1
+			iop@ IOPacketHeaderPagingIO_CompletionAPC + KeAPC_Context2 + @ // context2
+			priboost@ // priboost
+			iop@ IOPacketHeaderPagingIO_CompletionAPC + // apc
+			KeAPCEnqueue drop
+		end elseif (iop@ IOPacketHeader_TypeB + gb IOPTYPE_USERASYNC ==)
+			iop@ // context1
+			iop@ IOPacketHeaderUserAsync_CompletionAPC + KeAPC_Context2 + @ // context2
+			priboost@ // priboost
+			iop@ IOPacketHeaderUserAsync_CompletionAPC + // apc
+			KeAPCEnqueue drop
+		end else
+			iop@ IOPacketFinishEitherContext
+		end
+
+		if (parentiop@)
+			parentiop@ iop!
+		end else
+			return
+		end
+	end
+end
+
+fn IOPacketFinishEitherContext { iop -- }
+	// The final steps of IOP completion, which can be done from either DPC
+	// or APC context.
+
+	auto event
+	iop@ IOPacketHeader_Event + @ event!
+
+	if (event@)
+		iop@ IOPacketHeader_PriorityBoostB + gb // priboost
+		event@ // event
+		KeEventSignal
+
+		if (iop@ IOPacketHeader_TypeB + gb IOPTYPE_USERASYNC ==)
+			event@ ObObjectDereferenceByPointer drop
+		end
+	end
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_COMPLMDL &)
+		iop@ IOPacketHeader_MDL + @ MmMDLFreeComplete
+	end
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_FREEIOP &)
+		iop@ IOPacketFree
+	end
+end

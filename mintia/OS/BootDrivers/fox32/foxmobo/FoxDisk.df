@@ -1,0 +1,517 @@
+//
+// Implements the fox32 disk driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALfox32IO.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+const PORT_POLL_DISK    0x80001000
+const PORT_SET_BUFFER   0x80002000
+const PORT_READ_SECTOR  0x80003000
+const PORT_WRITE_SECTOR 0x80004000
+
+const DISKMAX    4
+const BLOCKSHIFT 9
+const BLOCKSIZE  (1 BLOCKSHIFT <<)
+
+const MAXDISKID 3
+
+struct Disk
+	4 Type
+	4 DKSID
+	4 BlockOffset
+	4 Blocks
+endstruct
+
+table FoxDiskDispatch
+	0                                    // open
+	0                                    // close
+	pointerof FoxDiskIOControl           // iocontrol
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // system control
+	0                                    // parse
+	0                                    // create
+	0                                    // flush
+	pointerof IODeviceDeleteFileObject   // delete object
+	0                                    // set information
+	0                                    // get information
+	0                                    // rename
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // truncate
+	0                                    // readdirectory
+	0                                    // getpageaddr
+	0                                    // delete device object
+	0                                    // reserved
+	0                                    // reserved
+	pointerof FoxDiskRead                // read
+	pointerof FoxDiskWrite               // write
+endtable
+
+table DriverFoxDisk
+	IOVERSION_MAJOR                      // ioversion major
+	IOVERSION_MINOR                      // ioversion minor
+
+	"dks"                                // name
+	pointerof FoxDiskDispatch            // dispatch table
+	0                                    // flags
+
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+endtable
+
+const DKS_REALDISK  1
+const DKS_PARTITION 2
+
+table DKSRealDisks[(MAXDISKID 1 +)]
+
+rosection "INIT$text"
+
+fn private CreateDisk { name blocks type id offset -- dev }
+	fnsection "INIT$text"
+
+	auto sizeinbytes
+	blocks@ 512 * sizeinbytes!
+
+	auto ok
+
+	Disk_SIZEOF // extensionsize
+	OSFILETYPE_BLOCKDEVICE // type
+	name@ // name
+	sizeinbytes@ // sizeinbytes
+	DriverFoxDisk // driver
+	ACCESS_OWNER_ALL ACCESS_GROUP_READ | ACCESS_GROUP_EXEC | // permissions
+	IODeviceCreate ok! dev!
+
+	if (ok@)
+		ok@ "FoxDiskInit: failed to create device object (%i)\n" KeCrash
+	end
+
+	BLOCKSHIFT dev@ IODevice_BlockLog + ! // 1<<9 = 512
+
+	auto disk
+	dev@ IODevice_Extension + @ disk!
+
+	type@ disk@ Disk_Type + !
+	id@ disk@ Disk_DKSID + !
+	offset@ disk@ Disk_BlockOffset + !
+	blocks@ disk@ Disk_Blocks + !
+
+	if (type@ DKS_REALDISK ==)
+		disk@ [id@]DKSRealDisks!
+	end
+end
+
+fn (IODispatchIOControlFunction) FoxDiskIOControl { arg2 arg1 access fcb lastmode -- ret ok }
+	0 ok!
+end
+
+fn FoxDiskInit { -- }
+	fnsection "INIT$text"
+
+	auto ok
+
+	// detect and register disks
+
+	auto diskid
+	0 diskid!
+
+	auto namebuf
+	64 alloc namebuf!
+
+	namebuf@ // dest
+	"dks" // src
+	strcpy
+
+	auto dev
+
+	while (diskid@ MAXDISKID <=)
+		auto blocks
+
+		PORT_POLL_DISK diskid@ | HALfox32In blocks!
+
+		if (blocks@ ~~)
+			1 diskid +=
+			continue
+		end
+
+		blocks@ BLOCKSIZE 1 - + BLOCKSHIFT >> blocks!
+
+		if (blocks@ 8388608 >=)
+			namebuf@
+			"%s: disk is >=4GB; this is not supported! skipping.\n" "FoxDiskInit" HALLog
+
+			1 diskid +=
+			continue
+		end
+
+		// we have a disk at this ID
+
+		diskid@ // n
+		namebuf@ 3 + // buf
+		itoa
+
+		blocks@ namebuf@ diskid@ "ID %d: NAME=%s BLOCKSZ=512 BLOCKS=%d\n" "FoxDiskInit" HALLog
+
+		auto sizeinbytes
+		blocks@ 512 * sizeinbytes!
+
+		namebuf@ // name
+		blocks@ // blocks
+		DKS_REALDISK // type
+		diskid@ // id
+		0 // offset
+		CreateDisk dev!
+
+		auto partitiontable
+		dev@ IOPartitionTableRead ok! partitiontable!
+
+		if (ok@ 0 ==)
+			if (partitiontable@ IOPartitionTable_Label + gb)
+				partitiontable@ IOPartitionTable_Label + // label
+				dev@ // deviceobject
+				IODeviceSetLabel drop
+			end
+
+			auto pcount
+			partitiontable@ IOPartitionTable_PartitionCount + @ pcount!
+
+			auto pte
+			partitiontable@ IOPartitionTable_SIZEOF + pte!
+
+			namebuf@ 4 + // dest
+			"s" // src
+			strcpy
+
+			while (pcount@)
+				pte@ IOPartitionEntry_ID + @ // n
+				namebuf@ 5 + // buf
+				itoa
+
+				pte@ IOPartitionEntry_SizeInBlocks + @ blocks!
+
+				namebuf@ // name
+				blocks@ // blocks
+				DKS_PARTITION // type
+				diskid@ // id
+				pte@ IOPartitionEntry_BlockOffset + @ // offset
+				CreateDisk dev!
+
+				if (pte@ IOPartitionEntry_Label + gb)
+					pte@ IOPartitionEntry_Label + // label
+					dev@ // deviceobject
+					IODeviceSetLabel drop
+				end
+
+				IOPartitionEntry_SIZEOF pte +=
+				1 pcount -=
+			end
+
+			partitiontable@ MmFree
+		end
+
+		1 diskid +=
+	end
+
+	0 ok!
+end
+
+rosection "text"
+
+fn (IODispatchEnqueueIOPFunction) FoxDiskRead { iopl -- done ok }
+	1 done!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto devobj
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ devobj!
+
+	auto disk
+	devobj@ IODevice_Extension + @ disk!
+
+	auto size
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @ size!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	0 ok!
+
+	if (offset@ size@ >=)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (offset@ BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	if (iopl@ IOPacketLocationVirtualBuffer BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto length
+	size@ offset@ -
+	iopl@ IOPacketLocation_Length + @
+	min length!
+
+	if (length@ BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (length@ ~~)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	1 // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+
+	BLOCKSHIFT offset >>=
+	BLOCKSHIFT length >>=
+
+	disk@ Disk_BlockOffset + @ offset +=
+
+	auto buf
+	0 buf!
+
+	while (length@)
+		auto phyaddr
+		buf@ // offset
+		iopl@ // iopl
+		IOPacketLocationPhysical phyaddr!
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		phyaddr@ // value
+		PORT_SET_BUFFER // port
+		HALfox32Out
+
+		offset@ // value
+		PORT_READ_SECTOR disk@ Disk_DKSID + @ | // port
+		HALfox32Out
+
+		rs@ HALCPUInterruptRestore
+
+		1 offset +=
+		1 length -=
+		BLOCKSIZE buf +=
+	end
+
+	0 // status
+	0 // priboost
+	iop@ // iop
+	IOPacketCompleteLow
+end
+
+fn (IODispatchEnqueueIOPFunction) FoxDiskWrite { iopl -- done ok }
+	1 done!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	auto devobj
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ devobj!
+
+	auto disk
+	devobj@ IODevice_Extension + @ disk!
+
+	auto bytesize
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @ bytesize!
+
+	auto offset
+	iopl@ IOPacketLocation_Offset + @ offset!
+
+	0 ok!
+
+	if (offset@ bytesize@ >=)
+		STATUS_END_OF_DISK ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (offset@ BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	if (iopl@ IOPacketLocationVirtualBuffer BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto length
+	bytesize@ offset@ -
+	iopl@ IOPacketLocation_Length + @
+	min length!
+
+	if (length@ BLOCKSIZE 1 - &)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (length@ ~~)
+		0 iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	0 // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	length@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+	length@ iopl@ IOPacketLocation_Length + !
+
+	BLOCKSHIFT offset >>=
+	BLOCKSHIFT length >>=
+
+	disk@ Disk_BlockOffset + @ offset +=
+
+	auto buf
+	0 buf!
+
+	while (length@)
+		auto phyaddr
+		buf@ // offset
+		iopl@ // iopl
+		IOPacketLocationPhysical phyaddr!
+
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		phyaddr@ // value
+		PORT_SET_BUFFER // port
+		HALfox32Out
+
+		offset@ // value
+		PORT_WRITE_SECTOR disk@ Disk_DKSID + @ | // port
+		HALfox32Out
+
+		rs@ HALCPUInterruptRestore
+
+		1 offset +=
+		1 length -=
+		BLOCKSIZE buf +=
+	end
+
+	0 // status
+	0 // priboost
+	iop@ // iop
+	IOPacketCompleteLow
+end

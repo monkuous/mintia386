@@ -1,0 +1,688 @@
+//
+// Implements the system calls for the executive support subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALCrash.h"
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALNvram.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ExInternal.h"
+
+table ExFaultStatuses
+	STATUS_FAULT // read operation resulted in fault
+	STATUS_FAULT_WRITE // write operation resulted in fault
+endtable
+
+public ExFaultStatuses
+
+fn ExCallGetString { max string -- buf ok }
+	fnsection "PAGE$text"
+
+	max@ MmQuotaChargeBuffer ok!
+
+	if (ok@)
+		return
+	end
+
+	max@ // bytes
+	'cStr' // tag
+	CANBLOCK // flags
+	MmAllocWithTag ok! buf!
+
+	if (ok@)
+		max@ MmQuotaUnchargeBuffer
+		return
+	end
+
+	buf@ // dest
+	string@ // src
+	max@ 1 - // max
+	KeSafeStringCopyIn ok!
+
+	if (ok@)
+		buf@ MmFree
+		max@ MmQuotaUnchargeBuffer
+	end
+end
+
+fn ExCallFreeString { buf -- }
+	fnsection "PAGE$text"
+
+	auto charge
+	buf@ MmBlockChargeGet charge!
+
+	buf@ MmFree
+
+	charge@ // charge
+	KeProcessCurrent PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockUncharge
+end
+
+fn ExCallGetUserBuffer { lockforwrite length vaddr -- buf mdl ok }
+	fnsection "PAGE$text"
+
+	// get a direct, safe view of the user's buffer.
+	// this is often more desirable than creating a temporary kernel buffer.
+
+	if (vaddr@ MMHIGHESTUSERADDRESS >)
+		[lockforwrite@]ExFaultStatuses@ ok!
+
+		return
+	end elseif (length@ MMHIGHESTUSERADDRESS >)
+		[lockforwrite@]ExFaultStatuses@ ok!
+
+		return
+	end
+
+	if (vaddr@ length@ + MMHIGHESTUSERADDRESS >)
+		[lockforwrite@]ExFaultStatuses@ ok!
+
+		return
+	end
+
+	length@ // length
+	vaddr@ // vaddr
+	0 // kflags
+	MmMDLAllocateWithQuota ok! mdl!
+
+	if (ok@)
+		return
+	end
+
+	lockforwrite@ // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		mdl@ MmMDLFree
+
+		return
+	end
+
+	mdl@ MmMDLMap ok!
+
+	if (ok@)
+		mdl@ MmMDLUnpin
+
+		mdl@ MmMDLFree
+
+		return
+	end
+
+	mdl@ MmMDLHeader_MappedAddress + @ buf!
+end
+
+fn ExCallFreeUserBuffer { mdl -- }
+	fnsection "PAGE$text"
+
+	mdl@ MmMDLUnmap
+	mdl@ MmMDLUnpin
+	mdl@ MmMDLFree
+end
+
+fn OSGetBootFlags { -- bootflags ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	ExBootFlags@ bootflags!
+end
+
+fn OSConsolePutCharacter { c -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		// process must be owned by an admin to print to HAL console
+		return
+	end
+
+	c@ HALPutc
+end
+
+fn OSSystemAbort { num1 num2 msg -- ok }
+	fnsection "PAGE$text"
+
+	SYSTEMPERMISSION_SYSTEM // permission
+	KeProcessCurrent // process
+	SeProcessCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto msgbuf
+	128 // max
+	msg@ // string
+	ExCallGetString ok! msgbuf!
+
+	if (ok@)
+		return
+	end
+
+	num2@ num1@ msgbuf@ "OSSystemAbort: %s %08x %08x\n" KeCrash
+
+	msgbuf@ ExCallFreeString
+end
+
+fn OSContinue { alertable signum context -- ok }
+	fnsection "PAGE$text"
+
+	// load an arbitrary context, atomically unmask a signal, and check for
+	// remaining user APCs to deliver.
+
+	auto kcontext
+	OSContext_SIZEOF alloc kcontext!
+
+	kcontext@ // dest
+	context@ // src
+	OSContext_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	alertable@ // alertable
+	signum@ // signum
+	kcontext@ // context
+	KeThreadCurrent@ // thread
+	KeThreadContinue ok!
+end
+
+fn OSQueryTime { -- sec ms }
+	fnsection "PAGE$text"
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	time@ KeTimeQuery
+
+	time@ KeTime_SecPart + @ sec!
+	time@ KeTime_MsPart + @ ms!
+end
+
+fn OSQueryUptime { -- sec ms }
+	fnsection "PAGE$text"
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	time@ HALUptimeQuery
+
+	time@ KeTime_SecPart + @ sec!
+	time@ KeTime_MsPart + @ ms!
+end
+
+fn OSTimeSet { sec ms -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	sec@ time@ KeTime_SecPart + !
+	ms@ time@ KeTime_MsPart + !
+
+	time@ KeTimeSet ok!
+end
+
+fn OSTimeZoneGet { -- offset ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	KeTimeZoneGet offset!
+end
+
+fn OSTimeZoneSet { offset -- oldoffset ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	offset@ KeTimeZoneSet oldoffset!
+end
+
+fn OSShutdownSystem { mode -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	mode@ ExShutdownSystem
+end
+
+fn OSGetStatistics { statistics -- ok }
+	fnsection "PAGE$text"
+
+	statistics@ // dest
+	KeStatistics // src
+	OSStatistics_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+externptr ExBuildDate
+externptr ExReleaseName
+
+fn OSVersion { query -- ok }
+	fnsection "PAGE$text"
+
+	query@ OSVersionQuery_OSName + // dest
+	"MINTIA" // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ OSVersionQuery_NodeName + // dest
+	"unk" // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ OSVersionQuery_Release + // dest
+	ExReleaseName // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ OSVersionQuery_Version + // dest
+	ExBuildDate // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ OSVersionQuery_Machine + // dest
+	HALPlatformModel // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ OSVersionQuery_Processor + // dest
+	HALCPUModel // src
+	255 // max
+	KeSafeStringCopyOut ok!
+
+	if (ok@)
+		return
+	end
+end
+
+// ExEvent
+
+fn OSEventCreate { signaled type permissions name -- eventhandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	signaled@ // signaled
+	type@ // type
+	permissions@ // permissions
+	kname@ // name
+	ExEventCreate ok! eventhandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSEventReset { eventhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	eventhandle@ ExEventReset ok! signaled!
+end
+
+fn OSEventSignal { eventhandle -- ok }
+	fnsection "PAGE$text"
+
+	eventhandle@ ExEventSignal ok!
+end
+
+fn OSEventPulse { eventhandle -- ok }
+	fnsection "PAGE$text"
+
+	eventhandle@ ExEventPulse ok!
+end
+
+fn OSEventReadState { eventhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	eventhandle@ ExEventReadState ok! signaled!
+end
+
+// ExSemaphore
+
+fn OSSemaphoreCreate { count permissions name -- semaphorehandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	count@ // count
+	permissions@ // permissions
+	kname@ // name
+	ExSemaphoreCreate ok! semaphorehandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSSemaphoreRelease { adjustment semaphorehandle -- ok }
+	fnsection "PAGE$text"
+
+	adjustment@ semaphorehandle@ ExSemaphoreRelease ok!
+end
+
+fn OSSemaphoreReadState { semaphorehandle -- count ok }
+	fnsection "PAGE$text"
+
+	semaphorehandle@ ExSemaphoreReadState ok! count!
+end
+
+// ExMutex
+
+fn OSMutexCreate { permissions name -- mutexhandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	permissions@ // permissions
+	kname@ // name
+	ExMutexCreate ok! mutexhandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSMutexRelease { mutexhandle -- ok }
+	fnsection "PAGE$text"
+
+	mutexhandle@ ExMutexRelease ok!
+end
+
+fn OSMutexReadState { mutexhandle -- locked ok }
+	fnsection "PAGE$text"
+
+	mutexhandle@ ExMutexReadState ok! locked!
+end
+
+// ExTimer
+
+fn OSTimerCreate { permissions name -- timerhandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	permissions@ // permissions
+	kname@ // name
+	ExTimerCreate ok! timerhandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSTimerReset { timerhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	timerhandle@ ExTimerReset ok! signaled!
+end
+
+fn OSTimerEnqueue { interval timerhandle -- ok }
+	fnsection "PAGE$text"
+
+	interval@ timerhandle@ ExTimerEnqueue ok!
+end
+
+fn OSTimerDequeue { timerhandle -- ok }
+	fnsection "PAGE$text"
+
+	timerhandle@ ExTimerDequeue ok!
+end
+
+fn OSTimerReadState { timerhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	timerhandle@ ExTimerReadState ok! signaled!
+end
+
+fn OSNvramVariableQuery { query -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	auto kquery
+	OSNvramQuery_SIZEOF alloc kquery!
+
+	kquery@ // dest
+	query@ // src
+	OSNvramQuery_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	0 kquery@ OSNvramQuery_NameNullTerminator + sb
+	0 kquery@ OSNvramQuery_ContentsNullTerminator + sb
+
+	ExiNvramLock
+
+	kquery@ HALNvramQuery ok!
+
+	ExiNvramUnlock
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSNvramQuery_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSNvramVariableSet { delete query -- ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	auto kquery
+	OSNvramQuery_SIZEOF alloc kquery!
+
+	kquery@ // dest
+	query@ // src
+	OSNvramQuery_SIZEOF // sz
+	KeSafeCopyIn ok!
+
+	if (ok@)
+		return
+	end
+
+	0 kquery@ OSNvramQuery_NameNullTerminator + sb
+	0 kquery@ OSNvramQuery_ContentsNullTerminator + sb
+
+	ExiNvramLock
+
+	delete@ // delete
+	kquery@ // query
+	HALNvramSet ok!
+
+	ExiNvramUnlock
+
+	if (ok@)
+		return
+	end
+end
+
+fn OSNvramVariableRead { query index -- nextindex ok }
+	fnsection "PAGE$text"
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	auto kquery
+	OSNvramQuery_SIZEOF alloc kquery!
+
+	ExiNvramLock
+
+	kquery@ // query
+	index@ // index
+	HALNvramRead ok! nextindex!
+
+	ExiNvramUnlock
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSNvramQuery_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSIsComputerOn { -- ison ok }
+	fnsection "PAGE$text"
+
+	// the power status of the computer is highly sensitive information and
+	// therefore, in a bid to pursue C2 class security certification, we
+	// require administrator privileges to query it.
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	// this algorithm has been finely tuned through rigorous heuristics and
+	// intensive profiling.
+
+	1 ison!
+
+	// if you need more information on how it works, consult Knuth.
+end
+
+fn OSIsComputerOnFire { -- isonfire ok }
+	fnsection "PAGE$text"
+
+	// it has been shown that having access to the incendiary status of the
+	// physical machine can be used as a side-channel through which an
+	// unprivileged user can extract privileged information, such as the
+	// incendiary status of the building or server room. therefore, we require
+	// administrator privileges to query it.
+
+	SeAmIAdmin ok!
+
+	if (ok@)
+		return
+	end
+
+	HALIsComputerOnFire ok! isonfire!
+end

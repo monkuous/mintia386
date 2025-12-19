@@ -1,0 +1,96 @@
+//
+// Implements the Truncate dispatch routine for the AisixFS driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "AisixFS.h"
+
+fn (IODispatchTruncateFunction) AFSTruncate { newsize zero flags fcb -- ok }
+	fnsection "PAGE$text"
+
+	// add or remove blocks from file specified by FCB according to newsize.
+
+	auto oldsize
+	fcb@ IOFileControlBlock_SizeInBytes + @ oldsize!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto oldblocks
+	oldsize@ AFSBLOCKOFFMASK + AFSBLOCKSHIFT >> oldblocks!
+
+	auto newblocks
+	newsize@ AFSBLOCKOFFMASK + AFSBLOCKSHIFT >> newblocks!
+
+	0 ok!
+
+	if (newblocks@ oldblocks@ ==)
+		// no blocks to allocate or release, just set size and return
+
+		if (newsize@ oldsize@ ~=)
+			newsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+			fcb@ AFSINodeUpdate
+		end
+
+		return
+	end
+
+	if (zero@ ~~)
+		if (newsize@ oldsize@ >)
+			if (newsize@ AFSBLOCKOFFMASK &)
+				2 zero!
+			end
+		end
+	end
+
+	0 fcb@ IOFileControlBlockLockForPaging
+
+	newsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+	0 // lookuptable
+	newblocks@ // newblocks
+	oldblocks@ // oldblocks
+	zero@ // zero
+	flags@ // flags
+	fcb@ // fcb
+	AFSBlockTruncate ok!
+
+	if (ok@)
+		// failed to truncate blocks, reset size
+
+		oldsize@ fcb@ IOFileControlBlock_SizeInBytes + !
+
+		0 fcb@ IOFileControlBlockUnlockForPaging
+	end else
+		0 fcb@ IOFileControlBlockUnlockForPaging
+
+		fcb@ AFSINodeUpdate
+	end
+end

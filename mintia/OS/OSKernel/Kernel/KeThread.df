@@ -1,0 +1,648 @@
+//
+// Implements the kernel thread object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive/Boost.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "KeInternal.h"
+
+// 'context1' and 'context2' are parameters passed to the start function
+
+fn KeThreadInitialize { context1 context2 startfunc process kstacksize kstack name thread -- }
+	fnsection "PAGE$text"
+
+	thread@ KeThread_Name + name@ KETHREADNAMELEN 1 - strncpy
+
+	THREADSTATUS_INITIALIZED thread@ KeThread_StatusB + sb
+
+	process@ KeProcess_BaseQuantumB + gb thread@ KeThread_QuantumB + sb
+
+	process@ thread@ KeThread_ActualProcess + !
+	process@ thread@ KeThread_Process + !
+
+	if (process@ KeProcess_SignalThread + @ ~~)
+		// first thread of process. apply KEBOOSTINITIAL
+		process@ KeProcess_BasePriorityB + gb KEBOOSTINITIAL + thread@ KeThread_PriorityB + sb
+	end else
+		process@ KeProcess_BasePriorityB + gb thread@ KeThread_PriorityB + sb
+	end
+
+	process@ KeProcess_BasePriorityB + gb thread@ KeThread_BasePriorityB + sb
+
+	context1@ // context1
+	context2@ // context2
+	startfunc@ // startfunc
+	kstack@ kstacksize@ + // kstack
+	process@ // process
+	HALCPUContextInit thread@ KeThread_Context + !
+
+	kstack@ kstacksize@ + thread@ KeThread_KernelStackTop + !
+
+	// add to the process's thread list
+
+	thread@ // thread
+	process@ // process
+	KiThreadInitializeAddToList
+
+	0 thread@ KeThread_QueueNext + !
+	0 thread@ KeThread_QueuePrev + !
+
+	0 thread@ KeThread_WasPreemptedB + sb
+
+	0 thread@ KeThread_SwapListNext + !
+	1 thread@ KeThread_KernelStackCanBeSwappedB + sb
+	1 thread@ KeThread_KernelStackResidentB + sb
+
+	0 thread@ KeThread_InstantDecayB + sb
+
+	0 thread@ KeThread_InSwapListB + sb
+
+	0 thread@ KeThread_WaitStatus + !
+	KERNELMODE thread@ KeThread_WaitModeB + sb
+	IPLLOW thread@ KeThread_WaitIPLB + sb
+
+	0 thread@ KeThread_MutexListHead + !
+
+	0 thread@ KeThread_IgnoreKill + !
+
+	0 thread@ KeThread_KilledStatus + !
+
+	0 thread@ KeThread_SuspendedB + sb
+
+	if (process@ KeProcess_SignalThread + @ ~~)
+		// this is synchronized by the CreateDeleteMutex
+
+		thread@ process@ KeProcess_SignalThread + !
+	end
+
+	thread@ // thread
+	THREADWAITBLOCKS // count
+	thread@ KeThread_WaitBlocks + // waitblocktable
+	KeDispatchWaitBlockTableInitialize
+
+	thread@ // thread
+	1 // count
+	thread@ KeThread_TimeoutWaitBlock + // waitblocktable
+	KeDispatchWaitBlockTableInitialize
+
+	0 thread@ KeThread_SafeAccessAbort + !
+	0 thread@ KeThread_SafeAccessSP + !
+
+	"NA" 0 thread@ KeThread_Timer + KeTimerInitialize
+
+	0 thread@ KeThread_Signals + !
+	0 thread@ KeThread_SignalAcceptMask + !
+	0 thread@ KeThread_SignalDeliverOnWaitMask + !
+
+	0 thread@ KeThread_TrapFrame + !
+
+	0 thread@ KeThread_UserTimeMs + !
+	0 thread@ KeThread_SystemTimeMs + !
+	0 thread@ KeThread_DPCTimeMs + !
+
+	0 thread@ KeThread_APCListHead + !
+	0 thread@ KeThread_APCListTail + !
+
+	0 thread@ KeThread_UserAPCListHead + !
+	0 thread@ KeThread_UserAPCListTail + !
+
+	0 thread@ KeThread_APCInProgressB + sb
+	0 thread@ KeThread_APCDisableCount + !
+
+	0 thread@ KeThread_WaitBlockTable + !
+	0 thread@ KeThread_WaitBlockCountB + sb
+
+	0 thread@ KeThread_QuantumEndCountB + sb
+
+	0 thread@ KeThread_UserAPCTriggeredB + sb
+
+	0 thread@ KeThread_UserInterruptB + sb
+end
+
+fn KeThreadUninitialize { thread -- }
+	// remove from process thread list
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (DEBUGCHECKS)
+		if (thread@ KeThread_KernelStackResidentB + gb ~~)
+			"KeThreadUninitialize: stack not resident\n" KeCrash
+		end
+	end
+
+	auto process
+	thread@ KeThread_Process + @ process!
+
+	if (process@ KeProcess_SignalThread + @ thread@ ==)
+		thread@ KeThread_ProcessNext + @ process@ KeProcess_SignalThread + !
+
+		if (process@ KeProcess_SignalThread + @ ~~)
+			thread@ KeThread_ProcessPrev + @ process@ KeProcess_SignalThread + !
+		end
+	end
+
+	auto n
+	thread@ KeThread_ProcessNext + @ n!
+
+	auto l
+	thread@ KeThread_ProcessPrev + @ l!
+
+	if (n@)
+		l@ n@ KeThread_ProcessPrev + !
+	end
+
+	if (l@)
+		n@ l@ KeThread_ProcessNext + !
+	end else
+		// no prev means we were the listhead
+
+		n@ process@ KeProcess_ThreadListHead + !
+	end
+
+	if (DEBUGCHECKS)
+		if (process@ KeProcess_ThreadCountI + gi ~~)
+			"KeThreadUninitialize: thread count underflow\n" KeCrash
+		end
+	end
+
+	process@ KeProcess_ThreadCountI + gi 1 -
+	process@ KeProcess_ThreadCountI + si
+
+	process@ KeProcess_ResidentStackCountI + gi 1 -
+	process@ KeProcess_ResidentStackCountI + si
+
+	ipl@ KeIPLLower
+end
+
+fn KeThreadAPCDisable { thread -- oldcount }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	thread@ KeThread_APCDisableCount + @ oldcount!
+
+	oldcount@ 1 + thread@ KeThread_APCDisableCount + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeThreadAPCEnable { thread -- oldcount }
+	// we use IPL sync here to ensure that APCs are dispatched if we happen to
+	// lower to zero here.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	thread@ KeThread_APCDisableCount + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"KeThreadAPCEnable: attempt to accept APC more than APC was ignored\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - thread@ KeThread_APCDisableCount + !
+
+	if (oldcount@ 1 ==)
+		if (thread@ KeThreadCurrent@ ==)
+			if (thread@ KeThread_APCListHead + @)
+				IPLAPC KiSoftwareInterruptRequest
+			end
+		end
+	end
+
+	ipl@ KeIPLLower
+end
+
+fn KeThreadIgnoreKill { thread -- oldcount }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	thread@ KeThread_IgnoreKill + @ oldcount!
+
+	1 thread@ KeThread_IgnoreKill + +=
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeThreadAcceptKill { thread -- oldcount }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	thread@ KeThread_IgnoreKill + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"KeThreadAcceptKill: attempt to accept kill more than kill was ignored\n" KeCrash
+		end
+	end
+
+	1 thread@ KeThread_IgnoreKill + -=
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeThreadTerminate { status thread -- }
+	fnsection "PAGE$text"
+
+	status@ thread@ KeThread_KilledStatus + !
+
+	OSSIGNAL_KILL // signal
+	thread@ // thread
+	KeThreadSignal drop
+end
+
+fn KeThreadSuspend { thread -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (thread@ KeThread_Signals + @ 1 OSSIGNAL_KILL << &)
+		// Never suspend a killed thread.
+
+		rs@ HALCPUInterruptRestore
+
+		return
+	end
+
+	// XXX This would not work at all in MP. IPI needed here.
+	// and also in like 50 other places, like TLB shootdown, etc etc
+
+	1 thread@ KeThread_SuspendedB + sb
+	1 thread@ KeThread_UserInterruptB + sb
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KeThreadResume { thread -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	thread@ KiThreadResume
+
+	ipl@ KeIPLLower
+end
+
+fn KeThreadDeliverOnWaitSignal { signal thread -- ok }
+	auto sigabs
+	signal@ abs sigabs!
+
+	if (sigabs@ ~~)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	if (sigabs@ 32 >=)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	0 ok!
+
+	auto rs
+
+	if (signal@ z<)
+		// un deliver on wait the signal
+
+		HALCPUInterruptDisable rs!
+
+		1 sigabs@ << ~ thread@ KeThread_SignalDeliverOnWaitMask + &=
+
+		if (thread@ KeThread_SignalAcceptMask + @
+			thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+			thread@ KeThread_Signals + @ &)
+
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+
+		rs@ HALCPUInterruptRestore
+	end else
+		// deliver on wait the signal
+
+		HALCPUInterruptDisable rs!
+
+		1 sigabs@ << thread@ KeThread_SignalDeliverOnWaitMask + |=
+
+		rs@ HALCPUInterruptRestore
+	end
+end
+
+fn KeThreadMaskSignal { signal thread -- ok }
+	auto sigabs
+	signal@ abs sigabs!
+
+	if (sigabs@ ~~)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	if (sigabs@ 32 >=)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto ipl
+
+	0 ok!
+
+	if (signal@ z<)
+		// unmask the signal.
+
+		IPLDPC KeIPLRaise ipl!
+
+		1 sigabs@ << thread@ KeThread_SignalAcceptMask + |=
+
+		thread@ KiThreadWakeForSignal
+
+		ipl@ KeIPLLower
+	end else
+		// mask the signal.
+
+		// not actually ipl, but reuse that variable here.
+
+		HALCPUInterruptDisable ipl!
+
+		1 sigabs@ << ~ thread@ KeThread_SignalAcceptMask + &=
+
+		ipl@ HALCPUInterruptRestore
+	end
+end
+
+fn KeThreadRundown { thread -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto mutex
+	thread@ KeThread_MutexListHead + @ mutex!
+
+	auto next
+
+	while (mutex@)
+		mutex@ KeMutex_Next + @ next!
+
+		if (mutex@ KeMutex_Mode + @ KERNELMODE ==)
+			mutex@ KeMutex_DispatchHeader + KeDispatchHeader_Name + @
+			"KeThreadRundown: thread held a kernelmode mutex '%s' at rundown time\n" KeCrash
+		end
+
+		1 // abandon
+		mutex@ // mutex
+		KeMutexRelease drop
+
+		next@ mutex!
+	end
+
+	ipl@ KeIPLLower
+
+	auto context1
+	4 alloc context1!
+
+	auto context2
+	4 alloc context2!
+
+	auto normalfunc
+	4 alloc normalfunc!
+
+	while (thread@ KeThread_UserAPCListHead + @)
+		auto apc
+		thread@ KeThread_UserAPCListHead + @ apc!
+
+		apc@ KeAPC_Context1 + @ context1@!
+		apc@ KeAPC_Context2 + @ context2@!
+
+		apc@ KeAPC_FunctionNormal + @ normalfunc@!
+
+		apc@ KeAPCDequeue drop
+
+		// just call the special function, for user APCs this should delete
+		// the APC and currently nobody needs any indication that this is
+		// rundown time and not normal dispatch time.
+
+		normalfunc@ // normalfunc
+		context1@ // context1
+		context2@ // context2
+		apc@ // apc
+		apc@ KeAPC_FunctionSpecial + @ KeAPCFunctionSpecial
+	end
+end
+
+fn KeThreadSignal { signal thread -- ok }
+	if (signal@ ~~)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	if (signal@ 32 >=)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	1 signal@ << thread@ KeThread_Signals + |=
+
+	if (signal@ OSSIGNAL_KILL ==)
+		0 thread@ KeThread_SuspendedB + sb
+	end
+
+	thread@ KiThreadWakeForSignal
+
+	ipl@ KeIPLLower
+end
+
+fn KeThreadDispatchSignal { dispatchfunc trapframe -- }
+	auto thread
+	KeThreadCurrent@ thread!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto excsignals
+	thread@ KeThread_Signals + @
+	thread@ KeThread_SignalAcceptMask + @ &
+	thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+	excsignals!
+
+	auto signum
+	0 signum!
+
+	while (signum@ 32 <)
+		if (excsignals@ 1 signum@ << &)
+			break
+		end
+
+		1 signum +=
+	end
+
+	if (signum@ 32 >=)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	1 signum@ << ~ thread@ KeThread_Signals + &=
+	1 signum@ << ~ thread@ KeThread_SignalAcceptMask + &=
+
+	ipl@ KeIPLLower
+
+	// Cause a usermode interrupt to dispatch this signal.
+
+	signum@ // context
+	0 // userfunc
+	dispatchfunc@ // dispatchfunc
+	trapframe@ // trapframe
+	KiInterruptUsermode
+end
+
+fn KiThreadInitializeAddToList { thread process -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto h
+	process@ KeProcess_ThreadListHead + @ h!
+
+	0 thread@ KeThread_ProcessNext + !
+	0 thread@ KeThread_ProcessPrev + !
+
+	if (h@)
+		thread@ h@ KeThread_ProcessPrev + !
+		h@ thread@ KeThread_ProcessNext + !
+	end
+
+	thread@ process@ KeProcess_ThreadListHead + !
+
+	process@ KeProcess_ThreadCountI + gi 1 +
+	process@ KeProcess_ThreadCountI + si
+
+	process@ KeProcess_ResidentStackCountI + gi 1 +
+	process@ KeProcess_ResidentStackCountI + si
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn KiThreadResume { thread -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KiThreadResume: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	0 thread@ KeThread_SuspendedB + sb
+
+	if (thread@ KeThread_StatusB + gb THREADSTATUS_SUSPENDED ==)
+		0 // waitstatus
+		0 // priboost
+		thread@ // thread
+		KiThreadWakeup
+	end
+end
+
+fn KiThreadWakeForSignal { thread -- }
+	// determine whether we need to wake the thread up due to signal state or
+	// termination.
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"KiThreadWakeForSignal: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	1 thread@ KeThread_UserInterruptB + sb
+
+	if (thread@ KeThread_IgnoreKill + @)
+		// the system is ignoring all events for this thread.
+
+		return
+	end
+
+	if (thread@ KeThread_WaitIPLB + gb IPLAPC >=)
+		// the thread is waiting at IPL >= IPLAPC, which blocks all events.
+		//
+		// N.B. its possible that the thread isn't waiting, so the WaitIPL is
+		// actually meaningless, but that's fine since in the non-waiting
+		// case we wouldn't have woken the thread anyway.
+
+		return
+	end
+
+	auto sig
+	thread@ KeThread_Signals + @ sig!
+
+	if (thread@ KeThread_StatusB + gb THREADSTATUS_WAITINGUNALERTABLE ==)
+		if (thread@ KeThread_WaitModeB + gb KERNELMODE ==)
+			// kernel mode unalertable masks everything.
+
+			return
+		end
+
+		// user mode unalertable masks everything except kill.
+
+		if (sig@ 1 OSSIGNAL_KILL << &)
+			STATUS_KILLED // waitstatus
+			0 // priboost
+			thread@ // thread
+			KiThreadWakeup
+		end
+	end elseif (thread@ KeThread_StatusB + gb THREADSTATUS_WAITINGALERTABLE ==
+		thread@ KeThread_StatusB + gb THREADSTATUS_SUSPENDED == ||)
+
+		// either mode alertable does not mask kill.
+
+		if (sig@ 1 OSSIGNAL_KILL << &)
+			0 thread@ KeThread_SuspendedB + sb
+
+			STATUS_KILLED // waitstatus
+			0 // priboost
+			thread@ // thread
+			KiThreadWakeup
+
+			return
+		end
+
+		if (thread@ KeThread_WaitModeB + gb KERNELMODE ==)
+			// kernel mode alertable masks all signals.
+
+			return
+		end
+
+		// check for unmasked signals.
+
+		thread@ KeThread_SignalAcceptMask + @ sig &=
+
+		if (sig@ ~~)
+			// no unmasked signals.
+
+			return
+		end
+
+		// un-suspend the thread if it's suspended.
+
+		0 thread@ KeThread_SuspendedB + sb
+
+		// clear these signals from the deliver-on-wait mask so that they
+		// prevent future attempts to wait and eventually get delivered.
+
+		sig@ ~ thread@ KeThread_SignalDeliverOnWaitMask + &=
+
+		STATUS_SIGNALLED // waitstatus
+		0 // priboost
+		thread@ // thread
+		KiThreadWakeup
+	end
+end

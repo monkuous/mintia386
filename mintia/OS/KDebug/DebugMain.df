@@ -1,0 +1,70 @@
+//
+// Initialization of KDebug.dll.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALLog.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCrash.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/DebugTrace.h"
+
+#include "../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/Kernel.h"
+
+extern DebugPrompt { -- }
+
+externptr HALDebugDumpFunction
+externptr HALDebuggerFunction
+
+externptr HALResourceKeepHeaders
+
+fn DebugInit { ldrinfo -- }
+	if (ldrinfo@ LdrInfo_Major + @ OSLOADERMAJOR ~=)
+		ldrinfo@ LdrInfo_Major + @ OSLOADERMAJOR "LOADERMAJOR mismatch: expected %d, was given %d.\n" "DebugInit" HALLog
+		"224Debug can't be used with this system.\n" "DebugInit" HALLog
+		return
+	end elseif (ldrinfo@ LdrInfo_Minor + @ OSLOADERMINOR ~=)
+		ldrinfo@ LdrInfo_Minor + @ OSLOADERMINOR "LOADERMINOR mismatch: expected %d, was given %d.\n" "DebugInit" HALLog
+		"Will proceed, but there may be unexpected behavior.\n" "DebugInit" HALLog
+	end
+
+	pointerof DebugDump HALDebugDumpFunction!
+
+	pointerof DebugMain HALDebuggerFunction!
+
+	1 HALResourceKeepHeaders!
+end
+
+var DebugCrashLater 0
+public DebugCrashLater
+
+var DebugSavedIPL 0
+public DebugSavedIPL
+
+fn DebugMain { -- }
+	auto oldmode
+	CONSOLEMODETTY HALConsoleSetMode oldmode!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	KeIPLCurrentGet DebugSavedIPL!
+
+	//"224Debug invoked!\n" "DebugMain" HALLog
+
+	DebugPrompt
+
+	oldmode@ HALConsoleSetMode drop
+
+	rs@ HALCPUInterruptRestore
+
+	if (DebugCrashLater@)
+		0 DebugCrashLater!
+		"debug\n" KeCrash
+	end
+end

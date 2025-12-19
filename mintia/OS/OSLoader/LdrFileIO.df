@@ -1,0 +1,119 @@
+//
+// Implements file I/O for the MINTIA bootloader.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "OSLoader.h"
+
+table LdrMountTable
+	pointerof LdrAisixFSMount
+endtable
+
+const LDRFILESYSTEMS 1
+
+buffer LdrBootDevice LdrFile_SIZEOF
+public LdrBootDevice
+
+buffer LdrBootDeviceName 64
+public LdrBootDeviceName
+
+fn LdrIOInit { -- }
+	LdrBootDevice LdrFileInitialize
+
+	auto bootdevpath
+	"BOOTDEV" LdrArgsValue bootdevpath!
+
+	bootdevpath@ LdrPlatformIOInit
+
+	LdrBootDeviceName "LdrIOInit: bootdev @ %s\n" Printf
+
+	auto ok
+	LdrBootDevice LdrDeviceMount ok!
+
+	if (ok@)
+		ok@ "LdrIOInit: Inaccessible boot device (%i)\n" LdrCrash
+	end
+end
+
+fn LdrDeviceMount { device -- ok }
+	// iterates all the filesystems the bootloader supports and tries to mount
+	// the device object as one.
+
+	if (device@ LdrFile_OpenFunction + @)
+		LDRSTATUS_DEVICE_BUSY ok!
+		return
+	end
+
+	LDRSTATUS_BAD_FILESYSTEM ok!
+
+	auto count
+	LDRFILESYSTEMS count!
+
+	auto ptr
+	LdrMountTable ptr!
+
+	while (count@)
+
+		device@ // device
+		ptr@@ LdrMountFunction ok!
+
+		if (ok@ ~~)
+			return
+		end
+
+		4 ptr +=
+		1 count -=
+	end
+end
+
+fn LdrFileInitialize { file -- }
+	file@ // ptr
+	LdrFile_SIZEOF // size
+	0 // word
+	memset
+end
+
+fn LdrFileOpen { path device -- file ok }
+	if (device@ LdrFile_OpenFunction + @ ~~)
+		LDRSTATUS_NOT_SUPPORTED ok!
+		return
+	end
+
+	path@ // path
+	device@ // device
+	device@ LdrFile_OpenFunction + @ LdrOpenFunction ok! file!
+end
+
+fn LdrFileRead { length buf offset file -- bytesread ok }
+	if (file@ LdrFile_ReadFunction + @ ~~)
+		LDRSTATUS_NOT_SUPPORTED ok!
+		return
+	end
+
+	length@ // length
+	buf@ // buf
+	offset@ // offset
+	file@ // file
+	file@ LdrFile_ReadFunction + @ LdrReadFunction ok! bytesread!
+end
+
+fn LdrLastComponent { path -- lcomp }
+	// get pointer to last component of path
+
+	path@ lcomp!
+
+	auto ins
+	0 ins!
+
+	while (path@ gb)
+		if (path@ gb '/' ==)
+			1 ins!
+		end elseif (ins@ 1 ==)
+			0 ins!
+			path@ lcomp!
+		end
+
+		1 path +=
+	end
+end

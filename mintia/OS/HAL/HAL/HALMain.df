@@ -1,0 +1,169 @@
+//
+// Initialization of the MINTIA HAL.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALCrash.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCPU.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+extern HALArgsInit { ldrinfo -- }
+extern HALResourceInit { ldrinfo -- ret }
+extern HALConsoleInit { ldrinfo -- }
+extern HALPlatformInit { ldrinfo -- ret }
+extern HALResourceTest { -- }
+extern HALPlatformExit { ret mode -- }
+extern HALDebugInit { ldrinfo -- }
+
+fnptr KeMain { -- ret }
+
+var HALLoaderInfo 0
+public HALLoaderInfo
+
+var HALLoaderPFDB 0
+public HALLoaderPFDB
+
+var HALLoaderTotalRAM 0
+public HALLoaderTotalRAM
+
+var HALLoaderBootDeviceName 0
+public HALLoaderBootDeviceName
+
+buffer HALLocalLoaderBootDeviceName 32
+
+var HALInterruptStackTop 0
+public HALInterruptStackTop
+
+buffer HALLocalLoaderInfo LdrInfo_SIZEOF
+
+fn HALMain { ldrinfo -- ret }
+	fnsection "INIT$text"
+
+	0 ret!
+
+	HALLocalLoaderInfo // dest
+	ldrinfo@ // src
+	LdrInfo_SIZEOF // size
+	memcpy
+
+	HALLocalLoaderInfo ldrinfo!
+	ldrinfo@ HALLoaderInfo!
+
+	ldrinfo@ HALArgsInit
+
+	ldrinfo@ HALResourceInit ret!
+
+	if (ret@)
+		return
+	end
+
+	ldrinfo@ HALConsoleInit
+
+	ldrinfo@ LdrInfo_PageFrameDB + @ HALLoaderPFDB!
+	ldrinfo@ LdrInfo_TotalRAM + @ HALLoaderTotalRAM!
+
+	HALLocalLoaderBootDeviceName // dest
+	ldrinfo@ LdrInfo_BootDeviceName + @ // src
+	strcpy
+
+	HALLocalLoaderBootDeviceName HALLoaderBootDeviceName!
+
+	ldrinfo@ LdrInfo_PageDirectory + @ HALPlatformKernelPageDirectory!
+
+	ldrinfo@ LdrInfo_InterruptStack + @
+	ldrinfo@ LdrInfo_InterruptStackPages + @ PAGESHIFT << +
+	HALInterruptStackTop!
+
+	ldrinfo@ HALDebugInit
+
+	ldrinfo@ HALPlatformInit ret!
+
+	if (ret@)
+		return
+	end
+
+	if (ldrinfo@ LdrInfo_Major + @ OSLOADERMAJOR ~=)
+		ldrinfo@ LdrInfo_Major + @ OSLOADERMAJOR "The OS can't be booted with this loader: LOADERMAJOR: expected %d, got %d." HALCrash
+	end elseif (ldrinfo@ LdrInfo_Minor + @ OSLOADERMINOR ~=)
+		ldrinfo@ LdrInfo_Minor + @ OSLOADERMINOR "LOADERMINOR mismatch: expected %d, was given %d.\n" "HALMain" HALLog
+		"Will proceed, but there may be unexpected behavior.\n" "HALMain" HALLog
+	end
+
+	"MINTIA is awake!\n" "HALMain" HALLog
+
+	"\n" Printf
+
+	if (HALConsoleMode@ CONSOLEMODESCREEN ==)
+		HALConsoleFontHeight@
+		HALConsoleFontWidth@
+		HALConsoleFontName@
+		"Font: %s %dx%d\n" "HALMain" HALLog
+	end
+
+	STAGE_PRETASKING ldrinfo@ HALDriverInit
+
+	ldrinfo@ LdrInfo_KeMain + @ KeMain ret!
+
+	ret@ OSSHUTDOWN_HALT HALExit
+end
+
+fn HALDriverInit { stage ldrinfo -- }
+	fnsection "INIT$text"
+
+	auto dll
+	ldrinfo@ LdrInfo_DLLListHead + @ dll!
+
+	while (dll@)
+		if (dll@ ComDLL_LoadFunction + @)
+			if (stage@ STAGE_THREAD ==)
+				dll@ ComDLL_Name + @ "initializing %s\n" "HALDriverInit" HALLog
+			end
+
+			auto ok
+			stage@ dll@ ComDLL_LoadFunction + @ FDriverInit ok!
+
+			if (ok@)
+				ok@ dll@ ComDLL_Name + @ "HALDriverInit: driver '%s' failed to initialize (%i)\n" HALCrash
+			end
+		end
+
+		dll@ ComDLL_Next + @ dll!
+	end
+
+	if (stage@ STAGE_PRETASKING ==)
+		// we need these things to have been defined by some driver
+
+		if (HALRTCQueryFunction@ ~~)
+			"HALDriverInit: HALRTCQueryFunction not defined\n" HALCrash
+		end
+
+		if (HALUptimeQueryFunction@ ~~)
+			"HALDriverInit: HALUptimeQueryFunction not defined\n" HALCrash
+		end
+
+		if (HALRTCInterval@ ~~)
+			"HALDriverInit: HALRTCInterval not defined\n" HALCrash
+		end
+
+		if (HALRTCSetFunction@ ~~)
+			"HALDriverInit: HALRTCSetFunction not defined\n" HALCrash
+		end
+	end
+end
+
+fn HALExit { ret mode -- }
+	// ret@ mode@ "Exit (%d): %i.\n" "HALExit" HALLog
+
+	auto rs
+	HALCPUInterruptDisable rs!
+	ret@ mode@ HALPlatformExit
+	rs@ HALCPUInterruptRestore
+end

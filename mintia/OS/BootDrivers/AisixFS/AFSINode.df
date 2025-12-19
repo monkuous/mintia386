@@ -1,0 +1,909 @@
+//
+// Implements inode management for the AisixFS driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "AisixFS.h"
+
+fn AFSINodeRead { inum mount urgent -- ptr bcb ok }
+	fnsection "PAGE$text"
+
+	auto block
+	auto off
+
+	auto kflags
+	if (urgent@)
+		IOKFLAG_URGENT kflags!
+	end else
+		0 kflags!
+	end
+
+	inum@ AFSINode_SIZEOF * off!
+
+	mount@ IOMount_Extension + @ AFSData_IStart + @ AFSBLOCKSHIFT << off@ + block!
+
+	block@ // offset
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ // fcb
+	VcFileControlBlockMapAndPin ok! bcb! ptr!
+end
+
+fn AFSINodeFree { inum mount -- }
+	fnsection "PAGE$text"
+
+	auto ok
+
+	auto bcb
+	auto inode
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	inum@ // inum
+	mount@ // mount
+	1 // urgent
+	AFSINodeRead ok! bcb! inode!
+
+	if (ok@)
+		ok@ "AFSINodeFree: couldn't read inode (%i)\n" KeCrash
+	end
+
+	0 inode@ AFSINode_type + !
+
+	bcb@ VcBufferDirty
+	bcb@ VcBufferDecrementMapAndUnpin
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn AFSINodeAllocate { mount -- inum inode bcb ok }
+	fnsection "PAGE$text"
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto inodes
+	afsdata@ AFSData_ICount + @ inodes!
+
+	auto inoblk
+	afsdata@ AFSData_IStart + @ inoblk!
+
+	inoblk@ AFSBLOCKSHIFT << // offset
+	mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ // fcb
+	VcFileControlBlockMapAndPin ok! bcb! inode!
+
+	if (ok@)
+		return
+	end
+
+	// skip inode 0
+	1 inum!
+	AFSINode_SIZEOF inode +=
+
+	while (inum@ inodes@ <)
+		if (inum@ AFSINode_SIZEOF * AFSBLOCKOFFMASK & ~~)
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			1 inoblk +=
+
+			inoblk@ AFSBLOCKSHIFT << // offset
+			mount@ IOMount_FsDeviceObject + @ IODevice_FileControlBlock + @ // fcb
+			VcFileControlBlockMapAndPin ok! bcb! inode!
+
+			if (ok@)
+				return
+			end
+		end
+
+		if (inode@ AFSINode_type + @ 0 ==)
+			// found a free inode! reserve it and return
+			
+			-1 inode@ AFSINode_type + !
+
+			return
+		end
+
+		AFSINode_SIZEOF inode +=
+		1 inum +=
+	end
+
+	STATUS_END_OF_DISK ok!
+
+	bcb@ VcBufferDecrementMapAndUnpin
+end
+
+fn (IODispatchSetFileFunction) AFSSetFile { info fileobject -- ok }
+	0 ok!
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbp
+	fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+	if (fcb@ FSFileControlBlockGetMount IOMount_Flags + @ OSMOUNT_READONLY &)
+		STATUS_READONLY_FILESYSTEM ok!
+
+		return
+	end
+
+	if (info@ OSFileInformation_MTimeMsPart + @ -1 ~=)
+		// set modify timestamp
+
+		info@ OSFileInformation_MTimeMsPart + @
+		fcbp@ IOFileControlBlockPaged_ModifyTime + KeTime_MsPart + !
+
+		info@ OSFileInformation_MTimeSecPart + @
+		fcbp@ IOFileControlBlockPaged_ModifyTime + KeTime_SecPart + !
+
+		if (fileobject@ IOFile_Context + @ AFSFILECONTEXT_UPDATEONCLOSE & ~~)
+			// wasn't already marked update-on-close, so do that now.
+
+			0 // alertable
+			fcb@ // fcb
+			IOFileControlBlockLock drop
+
+			AFSFILECONTEXT_UPDATEONCLOSE fileobject@ IOFile_Context + |=
+
+			fcb@ IOFileControlBlockUnlock
+		end
+	end
+end
+
+fn (IODispatchPokeFunction) AFSPoke { poketype object -- }
+	// this function gives us a chance to update timestamps when an operation
+	// occurs that might bypass us entirely i.e. a fully cached read or write.
+
+	auto fcb
+	object@ IOFile_FileControlBlock + @ fcb!
+
+	if (fcb@ FSFileControlBlockGetMount IOMount_Flags + @ OSMOUNT_READONLY &)
+		return
+	end
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	auto ok
+
+	if (poketype@ IOPOKE_WRITE ==)
+		time@ KeTimeQuery
+
+		0 time@ KeTime_MsPart + !
+
+		if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime +
+			KeTime_SecPart + @ time@ KeTime_SecPart + @ ~=)
+
+			fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime + // dest
+			time@ // src
+			KeTime_SIZEOF // sz
+			memcpy
+
+			if (object@ IOFile_Context + @ AFSFILECONTEXT_UPDATEONCLOSE & ~~)
+				// wasn't already marked update-on-close, so do that now.
+
+				0 // alertable
+				fcb@ // fcb
+				IOFileControlBlockLock drop
+
+				AFSFILECONTEXT_UPDATEONCLOSE object@ IOFile_Context + |=
+
+				fcb@ IOFileControlBlockUnlock
+			end
+		end
+	end
+end
+
+fn (IODispatchSetSecurityFunction) AFSSetSecurity { uid gid permissions object -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	object@ IOFile_FileControlBlock + @ fcb!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	if (mount@ IOMount_Flags + @ OSMOUNT_READONLY &)
+		STATUS_READONLY_FILESYSTEM ok!
+		return
+	end
+
+	if (gid@ -1 ~=)
+		gid@ fcbdata@ AFSFCBData_GID + !
+	end
+
+	if (uid@ -1 ~=)
+		uid@ fcbdata@ AFSFCBData_UID + !
+	end
+
+	if (permissions@ -1 ~=)
+		permissions@ fcbdata@ AFSFCBData_Permissions + !
+	end
+
+	fcb@ AFSINodeUpdate
+
+	0 ok!
+end
+
+fn AFSINodeUpdateModificationTime { fcb -- }
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	auto ok
+
+	time@ KeTimeQuery
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime +
+		KeTime_SecPart + @ time@ KeTime_SecPart + @ ~=)
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime + // dest
+		time@ // src
+		KeTime_SIZEOF // sz
+		memcpy
+
+		fcb@ AFSINodeUpdate
+	end
+end
+
+fn AFSINodeUpdate { fcb -- }
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto inum
+	fcbdata@ AFSFCBData_INum + @ inum!
+
+	auto ok
+
+	auto bcb
+	auto inode
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	inum@ // inum
+	mount@ // mount
+	1 // urgent
+	AFSINodeRead ok! bcb! inode!
+
+	if (ok@)
+		ok@ "AFSINodeUpdate: couldn't read inode (%i)\n" KeCrash
+	end
+
+	0 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLock drop
+
+	fcb@ IOFileControlBlock_SizeInBytes + @ inode@ AFSINode_bytesize + !
+	fcbdata@ AFSFCBData_FirstFATLink + @ inode@ AFSINode_startblock + !
+	fcbdata@ AFSFCBData_IParent + @ inode@ AFSINode_iparent + !
+	fcbdata@ AFSFCBData_Permissions + @ inode@ AFSINode_permissions + !
+	fcbdata@ AFSFCBData_UID + @ inode@ AFSINode_uid + !
+	fcbdata@ AFSFCBData_GID + @ inode@ AFSINode_gid + !
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime + KeTime_SecPart + @ inode@ AFSINode_timestamp + !
+
+	fcb@ IOFileControlBlockUnlock
+
+	bcb@ VcBufferDirty
+	bcb@ VcBufferDecrementMapAndUnpin
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn AFSTreeLock { alertable mount -- ok }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	mount@ IOMount_Extension + @ AFSData_TreeMutex + // object
+	KeThreadWaitForObject ok!
+end
+
+fn AFSTreeUnlock { mount -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	mount@ IOMount_Extension + @ AFSData_TreeMutex + // mutex
+	KeMutexRelease drop
+end
+
+fn AFSFCBRemove { fcb buckethead -- }
+	fnsection "PAGE$text"
+
+	// remove from hash list.
+	// assumes tree is locked.
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto n
+	fcbdata@ AFSFCBData_NextFCB + @ n!
+
+	if (n@)
+		fcbdata@ AFSFCBData_PrevFCB + @ n@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_PrevFCB + !
+	end else // no next means we were the tail
+		fcbdata@ AFSFCBData_PrevFCB + @ buckethead@ 4 + !
+	end
+
+	fcbdata@ AFSFCBData_PrevFCB + @ n!
+
+	if (n@)
+		fcbdata@ AFSFCBData_NextFCB + @ n@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_NextFCB + !
+	end else // no prev means we were the head
+		fcbdata@ AFSFCBData_NextFCB + @ buckethead@!
+	end
+end
+
+fn AFSFCBInsert { fcb buckethead -- }
+	fnsection "PAGE$text"
+
+	// insert into hash list on the recently-used end.
+	// assumes tree is locked.
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto n
+	buckethead@@ n!
+
+	0 fcbdata@ AFSFCBData_PrevFCB + !
+	n@ fcbdata@ AFSFCBData_NextFCB + !
+
+	if (n@)
+		fcb@ n@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_PrevFCB + !
+	end else // no head, set tail
+		fcb@ buckethead@ 4 + !
+	end
+
+	fcb@ buckethead@!
+end
+
+fn AFSMountReference { mount -- oldcount }
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	afsdata@ AFSData_FCBRefTotal + @ oldcount!
+
+	oldcount@ 1 + afsdata@ AFSData_FCBRefTotal + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn AFSMountDereference { mount -- oldcount }
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	afsdata@ AFSData_FCBRefTotal + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"AFSMountDereference: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - afsdata@ AFSData_FCBRefTotal + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn AFSFCBCacheFlush { destroy mount -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto rootfcb
+	mount@ IOMount_RootFCB + @ rootfcb!
+
+	// iterate each bucket from 0 to AFSFCBBUCKETS-1.
+	// for each bucket, flush or destroy the FCB.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	0 mount@ AFSTreeLock drop
+
+	auto i
+	0 i!
+
+	while (i@ AFSFCBBUCKETS <)
+		auto buckethead
+		afsdata@ AFSData_FCBBucketListHeads + i@ 3 << + buckethead!
+
+		auto fcb
+		buckethead@@ fcb!
+
+		while (fcb@)
+			auto fcbdata
+			fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+			auto nextfcb
+			fcbdata@ AFSFCBData_NextFCB + @ nextfcb!
+
+			if (destroy@)
+				if (DEBUGCHECKS)
+					if (fcbdata@ AFSFCBData_References + @)
+						if (fcb@ rootfcb@ ~=)
+							"AFSFCBCacheFlush: destroy: fcb refcount > 0\n" KeCrash
+						end
+					end
+				end
+
+				fcb@ AFSFCBReference
+
+				1 // writeout
+				fcb@ // fcb
+				IOFileControlBlockDelete ok!
+
+				if (ok@)
+					break
+				end
+			end else
+				fcb@ IOFileControlBlockFlush drop
+			end
+
+			nextfcb@ fcb!
+		end
+
+		if (ok@)
+			break
+		end
+
+		1 i +=
+	end
+
+	mount@ AFSTreeUnlock
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn AFSDelete { fcb -- }
+	fnsection "PAGE$text"
+
+	// called by AFSFCBDereference when it is removing the last
+	// reference from the FCB and the DeleteLastReference flag is set.
+
+	// must clean up any internal structures relating to the FCB and free any
+	// on-disk resources associated with it as well.
+
+	// assumes tree lock is held.
+
+	0 // writeout
+	fcb@ // fcb
+	IOFileControlBlockDestroyCache
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto bucket
+	fcbdata@ AFSFCBData_INum + @ AFSFCBMASK & bucket!
+
+	auto buckethead
+	afsdata@ AFSData_FCBBucketListHeads + bucket@ 3 << + buckethead!
+
+	// free disk blocks
+
+	0 // newsize
+	0 // zero
+	0 // flags
+	fcb@ // fcb
+	AFSTruncate ok!
+
+	if (ok@)
+		ok@ "AFSDelete: couldn't truncate FCB (%i)\n" Printf
+	end
+
+	fcb@ // fcb
+	buckethead@ // buckethead
+	AFSFCBRemove
+
+	auto ok
+	auto bcb
+	auto inode
+
+	fcbdata@ AFSFCBData_INum + @ // inum
+	mount@ // mount
+	1 // urgent
+	AFSINodeRead ok! bcb! inode!
+
+	if (ok@)
+		ok@ "AFSDelete: couldn't read inode (%i)\n" Printf
+	end else
+		// mark inode freed
+
+		0 inode@ AFSINode_type + !
+
+		bcb@ VcBufferDirty
+		bcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	-1 // writeout
+	fcb@ // fcb
+	IOFileControlBlockDelete drop
+end
+
+fn (IOFilesystemReclaimFunction) AFSINodeReclaim { preferredcount fsdeviceobject -- actualcount }
+	fnsection "PAGE$text"
+
+	// called from the context of an IO worker thread to trim FCBs from our
+	// cache.
+
+	auto mount
+	fsdeviceobject@ IODevice_RelevantMount + @ mount!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	0 actualcount!
+
+	0 mount@ AFSTreeLock drop
+
+	while (actualcount@ preferredcount@ <)
+		auto fcb
+		auto fcbdata
+		auto bucket
+
+		// get an FCB from the head of the reclaimable list. we can't try to
+		// reclaim it until we get the bucket mutex, so capture the bucket
+		// number and then lock that bucket, and see if the head of the
+		// reclaimable list is still a member of that bucket. if so, we can
+		// proceed with reclaiming it, otherwise we have to restart and try a
+		// new one.
+
+		afsdata@ AFSData_ReclaimableListHead + @ fcb!
+
+		if (fcb@ ~~)
+			break
+		end
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+		fcbdata@ AFSFCBData_INum + @ AFSFCBMASK & bucket!
+
+		// we have selected an FCB and locked the appropriate cache bucket.
+
+		// first, remove it from the reclaimable list.
+
+		fcb@ AFSFCBReference
+
+		// next, remove it from the cache bucket.
+
+		fcb@ // fcb
+		afsdata@ AFSData_FCBBucketListHeads + bucket@ 3 << + // buckethead
+		AFSFCBRemove
+
+		// next, delete the FCB (with writeout).
+
+		1 // writeout
+		fcb@ // fcb
+		IOFileControlBlockDelete drop
+
+		1 actualcount +=
+	end
+
+	mount@ AFSTreeUnlock
+end
+
+fn AFSFCBReference { fcb -- }
+	fnsection "PAGE$text"
+
+	// assumes the tree lock is held
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto oldcount
+	fcbdata@ AFSFCBData_References + @ oldcount!
+
+	oldcount@ 1 + fcbdata@ AFSFCBData_References + !
+
+	if (oldcount@ ~~)
+		// remove from reclaimable list
+
+		auto ls
+		fcbdata@ AFSFCBData_ReclaimPrev + @ ls!
+
+		auto ns
+		fcbdata@ AFSFCBData_ReclaimNext + @ ns!
+
+		if (ls@)
+			ns@ ls@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_ReclaimNext + !
+		end else
+			ns@ afsdata@ AFSData_ReclaimableListHead + !
+		end
+
+		if (ns@)
+			ls@ ns@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_ReclaimPrev + !
+		end else
+			ls@ afsdata@ AFSData_ReclaimableListTail + !
+		end
+
+		IOFileControlBlockDecrementReclaimable
+	end
+end
+
+fn AFSFCBDereference { fcb -- }
+	fnsection "PAGE$text"
+
+	// assumes tree lock is held
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto oldcount
+	fcbdata@ AFSFCBData_References + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ ~~)
+			"AFSFCBDereference: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - fcbdata@ AFSFCBData_References + !
+
+	if (oldcount@ 1 ==)
+		if (fcbdata@ AFSFCBData_Flags + @ AFSFILEFLAG_DELETE & ~~)
+			// insert into reclaimable list
+
+			auto t
+			afsdata@ AFSData_ReclaimableListTail + @ t!
+
+			if (t@ ~~)
+				0 fcbdata@ AFSFCBData_ReclaimNext + !
+				0 fcbdata@ AFSFCBData_ReclaimPrev + !
+
+				fcb@ afsdata@ AFSData_ReclaimableListHead + !
+				fcb@ afsdata@ AFSData_ReclaimableListTail + !
+			end else
+				0 fcbdata@ AFSFCBData_ReclaimNext + !
+
+				t@ fcbdata@ AFSFCBData_ReclaimPrev + !
+				fcb@ t@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_ReclaimNext + !
+				fcb@ afsdata@ AFSData_ReclaimableListTail + !
+			end
+
+			IOFileControlBlockIncrementReclaimable
+		end else
+			// delete the FCB
+
+			fcb@ AFSDelete
+		end
+	end
+end
+
+fn AFSFCBRead { flags inum mount -- fcb ok }
+	fnsection "PAGE$text"
+
+	// assumes tree lock is held
+
+	0 ok!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	if (inum@ 0 ==)
+		"AFSFCBRead: inum == 0\n" KeCrash
+	end
+
+	if (inum@ afsdata@ AFSData_ICount + @ >=)
+		"AFSFCBRead: inum >= icount\n" KeCrash
+	end
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	0 time@ KeTime_MsPart + !
+
+	auto bucket
+	inum@ AFSFCBMASK & bucket!
+
+	auto buckethead
+	afsdata@ AFSData_FCBBucketListHeads + bucket@ 3 << + buckethead!
+
+	buckethead@@ fcb!
+
+	while (fcb@)
+		if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_INum + @ inum@ ==)
+			break
+		end
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_NextFCB + @ fcb!
+	end
+
+	auto bcb
+	auto fcbdata
+	auto rs
+
+	if (fcb@ ~~)
+		// didn't find, need to allocate and read in the inode.
+
+		auto ptr
+		inum@ // inum
+		mount@ // mount
+		0 // urgent
+		AFSINodeRead ok! bcb! ptr!
+
+		if (ok@)
+			return
+		end
+
+		auto filetype
+
+		if (ptr@ AFSINode_type + @ 1 ==)
+			OSFILETYPE_FILE filetype!
+		end elseif (ptr@ AFSINode_type + @ 2 ==)
+			OSFILETYPE_DIRECTORY filetype!
+		end else
+			ptr@ AFSINode_type + @
+			inum@
+			"AFSFCBRead: i=%d weird inode type %d\n" Printf
+
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			STATUS_FILE_CORRUPT ok!
+
+			return
+		end
+
+		auto fcbflags
+
+		if (flags@ OSFILEFLAG_PAGEFILE &)
+			if (filetype@ OSFILETYPE_DIRECTORY ==)
+				bcb@ VcBufferDecrementMapAndUnpin
+
+				STATUS_IS_A_DIRECTORY ok!
+
+				return
+			end
+
+			0 fcbflags!
+		end else
+			IOFCBFLAG_PAGED fcbflags!
+		end
+
+		AFSFCBDataNonpaged_SIZEOF // extensionsize
+		AFSFCBData_SIZEOF // pagedextensionsize
+		mount@ IOMount_FsDeviceObject + @ // devobj
+		filetype@ // filetype
+		fcbflags@ // flags
+		IOFileControlBlockCreate ok! fcb!
+
+		if (ok@)
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			return
+		end
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+		auto fcbnp
+		fcb@ IOFileControlBlock_Extension + @ fcbnp!
+
+		fcbnp@ fcbdata@ AFSFCBData_Nonpaged + !
+
+		1 fcbdata@ AFSFCBData_References + !
+		flags@ fcbdata@ AFSFCBData_InitialFlags + !
+
+		0 fcbdata@ AFSFCBData_Flags + !
+
+		0 fcbdata@ AFSFCBData_NextFCB + !
+		0 fcbdata@ AFSFCBData_PrevFCB + !
+
+		0 fcbdata@ AFSFCBData_ReclaimNext + !
+		0 fcbdata@ AFSFCBData_ReclaimPrev + !
+
+		inum@ fcbdata@ AFSFCBData_INum + !
+
+		ptr@ AFSINode_startblock + @ fcbdata@ AFSFCBData_FirstFATLink + !
+		ptr@ AFSINode_gid + @ fcbdata@ AFSFCBData_GID + !
+		ptr@ AFSINode_uid + @ fcbdata@ AFSFCBData_UID + !
+		ptr@ AFSINode_permissions + @ fcbdata@ AFSFCBData_Permissions + !
+		ptr@ AFSINode_iparent + @ fcbdata@ AFSFCBData_IParent + !
+
+		0 fcbnp@ AFSFCBDataNonpaged_LastFATLinkBlkOff + !
+		ptr@ AFSINode_startblock + @ fcbnp@ AFSFCBDataNonpaged_LastFATLinkValue + !
+
+		ptr@ AFSINode_bytesize + @ fcb@ IOFileControlBlock_SizeInBytes + !
+
+		ptr@ AFSINode_timestamp + @ time@ KeTime_SecPart + !
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_AccessTime + // dest
+		time@ // src
+		KeTime_SIZEOF // sz
+		memcpy
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ModifyTime + // dest
+		time@ // src
+		KeTime_SIZEOF // sz
+		memcpy
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_ChangeTime + // dest
+		time@ // src
+		KeTime_SIZEOF // sz
+		memcpy
+
+		bcb@ VcBufferDecrementMapAndUnpin
+
+		fcb@ // fcb
+		buckethead@ // buckethead
+		AFSFCBInsert
+
+		// fcb@ "->0x%08x " Printf
+	end else
+		// found the FCB, it was in the cache already!
+
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+		if (flags@ OSFILEFLAG_PAGEFILE &)
+			if (fcbdata@ AFSFCBData_InitialFlags + @ OSFILEFLAG_PAGEFILE & ~~)
+				// fcbdata is in paged pool, so it won't work for the pagefile.
+
+				STATUS_FORBIDDEN_OPERATION ok!
+
+				return
+			end
+		end
+
+		// remove from hash list and reinsert on the recently-used end
+
+		if (fcb@ buckethead@@ ~=)
+			fcb@ // fcb
+			buckethead@ // buckethead
+			AFSFCBRemove
+
+			fcb@ // fcb
+			buckethead@ // buckethead
+			AFSFCBInsert
+		end
+
+		fcb@ AFSFCBReference
+	end
+end

@@ -1,0 +1,160 @@
+//
+// Implements the executive semaphore object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+var ExiSemaphoreObjectType 0
+
+fn ExiSemaphoreInit { -- }
+	fnsection "INIT$text"
+
+	auto type
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	"Semaphore" typeinit@ ObTypeInitializer_Name + !
+	'ExSp' typeinit@ ObTypeInitializer_Tag + !
+	OSTYPE_SEMAPHORE typeinit@ ObTypeInitializer_TypeIdentifier + !
+	0 typeinit@ ObTypeInitializer_WaitOffset + !
+
+	auto ok
+	typeinit@ ObTypeCreate ok! type!
+
+rosection "INIT$text"
+
+	if (ok@)
+		ok@ "ExiSemaphoreInit: couldn't create Semaphore type (%i)\n" KeCrash
+	end
+
+rosection "text"
+
+	type@ ExiSemaphoreObjectType!
+end
+
+fn ExSemaphoreCreateObject { count permissions name -- semaphoreobject ok }
+	fnsection "PAGE$text"
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	0 // pquotabias
+	KeSemaphore_SIZEOF // bodysize
+	ExiSemaphoreObjectType@ // type
+	ObObjectCreate ok! semaphoreobject!
+
+	if (ok@)
+		return
+	end
+
+	count@ // count
+	"ExSemaphoreObject" // name
+	semaphoreobject@ // semaphore
+	KeSemaphoreInitialize
+end
+
+fn ExSemaphoreCreate { count permissions name -- semaphorehandle ok }
+	fnsection "PAGE$text"
+
+	auto semaphoreobject
+
+	count@ // count
+	permissions@ // permissions
+	name@ // name
+	ExSemaphoreCreateObject ok! semaphoreobject!
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	semaphoreobject@ // object
+	ObObjectOpen ok! semaphorehandle!
+
+	if (ok@)
+		semaphoreobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+end
+
+fn ExSemaphoreRelease { adjustment semaphorehandle -- ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExiSemaphoreObjectType@ // type
+	semaphorehandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	adjustment@ // adjustment
+	obj@ // semaphoreobject
+	KeSemaphoreRelease ok!
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn ExSemaphoreReadState { semaphorehandle -- count ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExiSemaphoreObjectType@ // type
+	semaphorehandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ KeSemaphore_DispatchHeader + KeDispatchHeader_Signaled + @ count!
+
+	obj@ ObObjectDereferenceByPointer drop
+end

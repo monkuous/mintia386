@@ -1,0 +1,263 @@
+//
+// Implements the API entrypoints for the MINTIA Command Language library.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+#include "<ll>/MCL/Mcl.h"
+
+#include "Mcl.h"
+
+fn (OSModuleMainFunction) DLLMain { -- ok }
+	MclpLexInit
+
+	0 ok!
+end
+
+fn MclMachineCreate { -- machine ok }
+	MclpMachine_SIZEOF OSHeapAllocate ok! machine!
+
+	if (ok@)
+		return
+	end
+
+	0 // upperscope
+	machine@ MclpMachine_RootSymbolTable + // symboltable
+	MclpSymbolTableInitialize
+
+	machine@ MclpMachine_RootSymbolTable + machine@ MclpMachine_CurrentScope + !
+
+	0 machine@ MclpMachine_HistoryCount + !
+	0 machine@ MclpMachine_HistoryListHead + !
+	0 machine@ MclpMachine_HistoryListTail + !
+
+	0 machine@ MclpMachine_CurrentNode + !
+	0 machine@ MclpMachine_CaptureDepth + !
+
+	0 machine@ MclpMachine_Interactive + !
+	0 machine@ MclpMachine_Interrupted + !
+
+	machine@ MclpRegisterPrimitiveBuiltins ok!
+
+	if (ok@)
+		machine@ MclMachineFree
+
+		return
+	end
+end
+
+fn MclMachineFree { machine -- }
+	machine@ MclpMachine_RootSymbolTable + MclpSymbolTableUninitialize
+
+	machine@ OSHeapFree
+end
+
+fn MclMachineParseFile { filename interactive streamhandle machine -- rootblock ok }
+	filename@ // filename
+	interactive@ // interactive
+	streamhandle@ // streamhandle
+	machine@ // machine
+	MclpParseFile ok! rootblock!
+end
+
+fn MclParseSubtreeFree { node -- }
+	node@ MclpParseSubtreeFree
+end
+
+fn MclMachineEvaluateNode { capture node machine -- value ok }
+	0 machine@ MclpMachine_Interrupted + !
+
+	capture@ // capture
+	node@ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+end
+
+fn MclMachineRegisterBuiltin { func name machine -- ok }
+	func@ // func
+	name@ // name
+	machine@ // machine
+	MclpRegisterBuiltin ok!
+end
+
+fn MclDiagnostic { ... fmt machine -- }
+	auto node
+	machine@ MclpMachine_CurrentNode + @ node!
+
+	auto linenum
+	auto fname
+
+	node@ MclpParseNode_LineNumber + @ linenum!
+	node@ MclpParseNode_FileName + @ fname!
+
+	linenum@
+	fname@
+	"%s:%d: " OSGetStdErr FPrintf
+
+	argv // argvt
+	argc@ // argcn
+	fmt@ // fmt
+	OSGetStdErr // fd
+	VFPrintf
+end
+
+fn MclFreeValue { value -- }
+	value@ MclpFreeValue
+end
+
+fn MclValueContents { value -- contents }
+	value@ MclpValueContents contents!
+end
+
+fn MclRunScript { argcn argvt filename -- value ok }
+	auto streamhandle
+	OSFILETYPE_ANY_STREAM // filetype
+	0 // flags
+	ACCESS_READ // access
+	filename@ // path
+	OSFileOpen ok! streamhandle!
+
+	if (ok@)
+		return
+	end
+
+	auto machine
+	MclMachineCreate ok! machine!
+
+	if (ok@)
+		streamhandle@ OSClose drop
+
+		return
+	end
+
+	LEXTOK_LITERAL // tokflag
+	0 // len
+	filename@ // contents
+	VALTYPE_INLINE // type
+	MclpValueNew ok! value!
+
+	if (ok@)
+		machine@ MclMachineFree
+
+		streamhandle@ OSClose drop
+
+		return
+	end
+
+	value@ // value
+	SYMTYPE_VALUE // type
+	"0" // name
+	machine@ MclpMachine_RootSymbolTable + // symboltable
+	MclpSymbolCreate ok! drop
+
+	if (ok@)
+		value@ MclpFreeValue
+
+		machine@ MclMachineFree
+
+		streamhandle@ OSClose drop
+
+		return
+	end
+
+	auto name
+	16 alloc name!
+
+	argcn@ name@ itoa
+
+	LEXTOK_LITERAL // tokflag
+	0 // len
+	name@ // contents
+	VALTYPE_INLINE // type
+	MclpValueNew ok! value!
+
+	if (ok@)
+		machine@ MclMachineFree
+
+		streamhandle@ OSClose drop
+
+		return
+	end
+
+	value@ // value
+	SYMTYPE_VALUE // type
+	"argc" // name
+	machine@ MclpMachine_RootSymbolTable + // symboltable
+	MclpSymbolCreate ok! drop
+
+	if (ok@)
+		value@ MclpFreeValue
+
+		machine@ MclMachineFree
+
+		streamhandle@ OSClose drop
+
+		return
+	end
+
+	auto i
+	0 i!
+
+	while (argcn@)
+		0 // tokflag
+		0 // len
+		argvt@@ // contents
+		VALTYPE_INLINE // type
+		MclpValueNew ok! value!
+
+		if (ok@)
+			machine@ MclMachineFree
+
+			streamhandle@ OSClose drop
+
+			return
+		end
+
+		i@ 1 + name@ itoa
+
+		value@ // value
+		SYMTYPE_VALUE // type
+		name@ // name
+		machine@ MclpMachine_RootSymbolTable + // symboltable
+		MclpSymbolCreate ok! drop
+
+		if (ok@)
+			value@ MclpFreeValue
+
+			machine@ MclMachineFree
+
+			streamhandle@ OSClose drop
+
+			return
+		end
+
+		1 argcn -=
+		4 argvt +=
+		1 i +=
+	end
+
+	auto rootblock
+	filename@ // filename
+	0 // interactive
+	streamhandle@ // streamhandle
+	machine@ // machine
+	MclMachineParseFile ok! rootblock!
+
+	streamhandle@ OSClose drop
+
+	if (ok@)
+		machine@ MclMachineFree
+
+		return
+	end
+
+	0 // capture
+	rootblock@ // node
+	machine@ // machine
+	MclpEvaluateNode ok! value!
+
+	rootblock@ MclpParseSubtreeFree
+
+	machine@ MclMachineFree
+end

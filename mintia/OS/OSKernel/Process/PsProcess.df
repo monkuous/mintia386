@@ -1,0 +1,705 @@
+//
+// Implements management routines for the executive process object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "PsInternal.h"
+
+fn PsProcessSignalObject { signal processobject -- ok }
+	fnsection "PAGE$text"
+
+	if (processobject@ PsSystemProcess@ ==)
+		STATUS_FORBIDDEN_OPERATION ok!
+
+		return
+	end
+
+	if (signal@ OSSIGNAL_KILL ==)
+		// lock the createdelete lock to make sure that this termination is
+		// atomic with respect to thread creation (i.e., thread creation will
+		// be denied after this point & all existing threads are guaranteed to
+		// receive an OSSIGNAL_KILL).
+
+		1 // needsthread
+		processobject@ // processobject
+		PsProcessCreateDeleteAcquireCheck ok!
+
+		if (ok@)
+			return
+		end
+
+		if (processobject@ KeProcess_KilledStatus + @ ~~)
+			137 processobject@ KeProcess_KilledStatus + !
+		end
+	end
+
+	signal@ // signal
+	processobject@ // process
+	KeProcessSignal ok!
+
+	if (signal@ OSSIGNAL_KILL ==)
+		processobject@ PsProcessCreateDeleteUnlock
+	end
+end
+
+fn PsProcessSignal { signal processhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	signal@ // signal
+	obj@ // processobject
+	PsProcessSignalObject ok!
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessReadStatusObject { processobject -- status ok }
+	fnsection "PAGE$text"
+
+	if (processobject@ KeProcess_TerminatedB + gb ~~)
+		STATUS_ALIVE ok!
+
+		return
+	end
+
+	0 ok!
+	processobject@ KeProcess_KilledStatus + @ status!
+end
+
+fn PsProcessReadStatus { processhandle -- status ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ PsProcessReadStatusObject ok! status!
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessCreateDeleteLock { alertable processobject -- ok }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	processobject@ PsProcess_ThreadCreateDeleteMutex + // object
+	KeThreadWaitForObject ok!
+end
+
+fn PsProcessCreateDeleteUnlock { processobject -- }
+	fnsection "PAGE$text"
+
+	0 processobject@ PsProcess_ThreadCreateDeleteMutex + KeMutexRelease drop
+end
+
+fn PsProcessCreateDeleteAcquireCheck { needsthread processobject -- ok }
+	fnsection "PAGE$text"
+
+	1 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		return
+	end
+
+	if (processobject@ KeProcess_TerminatedB + gb)
+		processobject@ PsProcessCreateDeleteUnlock
+
+		STATUS_PROCESS_IS_TERMINATED ok!
+
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (processobject@ PsProcess_PagedArea + @ PsProcessPaged_CleanedUp + @)
+			"PsProcessCreateDeleteAcquireCheck: process cleaned up?\n" KeCrash
+		end
+	end
+
+	if (needsthread@)
+		if (processobject@ KeProcess_SignalThread + @ ~~)
+			// there will always be a signal thread so long as there's at
+			// least one thread, so this means the process either has no
+			// threads anymore or it has never been given one.
+
+			processobject@ PsProcessCreateDeleteUnlock
+
+			STATUS_PROCESS_NO_THREAD ok!
+
+			return
+		end
+	end
+end
+
+fn PsProcessReferenceByPID { pid -- processobject ok }
+	fnsection "PAGE$text"
+
+	pid@ PSI_ID_INDEX_SHIFT >> // handle
+	PsProcessTable@ // handletable
+	0 // locked
+	ExHandleTableLookupAndReferenceObject ok! processobject!
+
+	if (ok@)
+		return
+	end
+
+	if (processobject@ ObObjectType PsProcessObjectType@ ~=)
+		// This object is actually a thread. We use the same table for PIDs
+		// and TIDs to save some space.
+
+		STATUS_INVALID_HANDLE ok!
+	end elseif (processobject@ PsProcess_PagedArea + @ PsProcessPaged_PID + @ pid@ ~=)
+		// The process object's PID doesn't match the one we have. This
+		// happens on a sequence number mismatch.
+
+		STATUS_INVALID_HANDLE ok!
+	end
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn PsProcessOpenByPID { access pid -- processhandle ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	pid@ PsProcessReferenceByPID ok! processobject!
+
+	if (ok@)
+		return
+	end
+
+	0 // nocheck
+	access@ // access
+	processobject@ // object
+	KeProcessCurrent // process
+	ObObjectOpenProcess ok! processhandle!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn PsProcessInformationQueryObject { processobject query -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	query@ // ptr
+	OSProcessInformation_SIZEOF // size
+	0 // word
+	memset
+
+	auto paged
+	processobject@ PsProcess_PagedArea + @ paged!
+
+	paged@ PsProcessPaged_PID + @ query@ OSProcessInformation_PID + !
+	paged@ PsProcessPaged_ParentPID + @ query@ OSProcessInformation_ParentPID + !
+
+	if (processobject@ ObObjectName)
+		query@ OSProcessInformation_Name + // dest
+		processobject@ ObObjectName // src
+		OBNAMEMAX 1 - // max
+		strncpy
+	end else
+		0 query@ OSProcessInformation_Name + sb
+	end
+
+	// lock createdelete lock to avoid console object disappearing.
+
+	1 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto consoleobject
+	processobject@ PsProcess_ConsoleObject + @ consoleobject!
+
+	if (consoleobject@)
+		if (consoleobject@ ObObjectName)
+			query@ OSProcessInformation_ConsoleName + // dest
+			consoleobject@ ObObjectName // src
+			OBNAMEMAX 1 - // max
+			strncpy
+		end else
+			0 query@ OSProcessInformation_ConsoleName + sb
+		end
+	end else
+		0 query@ OSProcessInformation_ConsoleName + sb
+	end
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	paged@ PsProcessPaged_UID + @ query@ OSProcessInformation_OwningUID + !
+	paged@ PsProcessPaged_GID + @ query@ OSProcessInformation_OwningGID + !
+
+	query@ // query
+	processobject@ // process
+	KeProcessQuerySignalThread
+
+	query@ // query
+	processobject@ // process
+	MmProcessQuery
+
+	processobject@ KeProcess_TerminatedB + gb query@ OSProcessInformation_Terminated + !
+	processobject@ KeProcess_KilledStatus + @ query@ OSProcessInformation_ExitStatus + !
+
+	processobject@ PsProcess_PageFaultCount + @ query@ OSProcessInformation_PageFaultCount + !
+
+	processobject@ KeProcess_UserTimeMs + @ query@ OSProcessInformation_UserTimeMs + !
+	processobject@ KeProcess_SystemTimeMs + @ query@ OSProcessInformation_SystemTimeMs + !
+	processobject@ KeProcess_DPCTimeMs + @ query@ OSProcessInformation_DPCTimeMs + !
+end
+
+fn PsProcessInformationQuery { processhandle query -- ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! drop
+
+	if (ok@)
+		return
+	end
+
+	processobject@ // processobject
+	query@ // query
+	PsProcessInformationQueryObject ok!
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessInformationQueryByPID { pid query -- ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	pid@ PsProcessReferenceByPID ok! processobject!
+
+	if (ok@)
+		return
+	end
+
+	processobject@ // object
+	KeProcessCurrent // process
+	SeCheckAccessObjectOwnerX ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	processobject@ // processobject
+	query@ // query
+	PsProcessInformationQueryObject ok!
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessQueryAll { buffer maxquery -- count ok }
+	fnsection "PAGE$text"
+
+	1 PsProcessListLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto process
+	PsProcessListHead@ process!
+
+	0 count!
+
+	while (process@)
+		if (maxquery@ ~~)
+			break
+		end
+
+		process@ // processobject
+		buffer@ // query
+		PsProcessInformationQueryObject ok!
+
+		if (ok@)
+			PsProcessListUnlock
+
+			return
+		end
+
+		1 count +=
+		1 maxquery -=
+		OSProcessInformation_SIZEOF buffer +=
+		process@ PsProcess_GlobalListNext + @ process!
+	end
+
+	PsProcessListUnlock
+end
+
+fn PsProcessSignalActivation { activationstatus -- ok }
+	fnsection "PAGE$text"
+
+	auto curproc
+	KeProcessCurrent curproc!
+
+	auto pagedarea
+	curproc@ PsProcess_PagedArea + @ pagedarea!
+
+	if (pagedarea@ PsProcessPaged_ActivationStatus + @)
+		STATUS_ALIVE ok!
+
+		return
+	end
+
+	activationstatus@ pagedarea@ PsProcessPaged_ActivationStatus + !
+
+	1 // alertable
+	curproc@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto activationblock
+	pagedarea@ PsProcessPaged_ActivationBlock + @ activationblock!
+
+	if (activationblock@ ~~)
+		-1 pagedarea@ PsProcessPaged_ActivationBlock + !
+	end elseif (activationblock@ -1 ~=)
+		0 // priboost
+		activationblock@ PsiProcessActivationBlock_Event + // event
+		KeEventSignal
+	end
+
+	curproc@ PsProcessCreateDeleteUnlock
+end
+
+fn PsProcessWaitForActivationObject { timeout processobject -- activationstatus ok }
+	fnsection "PAGE$text"
+
+	auto activationblock
+
+	auto pagedarea
+	processobject@ PsProcess_PagedArea + @ pagedarea!
+
+	1 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		return
+	end
+
+	pagedarea@ PsProcessPaged_ActivationBlock + @ activationblock!
+
+	if (activationblock@ ~~)
+		PsiProcessActivationBlock_SIZEOF // bytes
+		'PsAc' // tag
+		CANBLOCK // flags
+		MmAllocWithTag ok! activationblock!
+
+		if (ok@)
+			processobject@ PsProcessCreateDeleteUnlock
+
+			return
+		end
+
+		0 // signaled
+		OSEVENT_NOTIF // type
+		"PsProcessActivationEvent" // name
+		activationblock@ PsiProcessActivationBlock_Event + // event
+		KeEventInitialize
+
+		0 activationblock@ PsiProcessActivationBlock_References + !
+
+		activationblock@ pagedarea@ PsProcessPaged_ActivationBlock + !
+	end elseif (activationblock@ -1 ==)
+		processobject@ PsProcessCreateDeleteUnlock
+
+		pagedarea@ PsProcessPaged_ActivationStatus + @ activationstatus!
+
+		return
+	end
+
+	1 activationblock@ PsiProcessActivationBlock_References + +=
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	USERMODE // waitmode
+	1 // alertable
+	timeout@ // timeout
+	activationblock@ PsiProcessActivationBlock_Event + // object
+	KeThreadWaitForObject ok!
+
+	0 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock drop
+
+	1 activationblock@ PsiProcessActivationBlock_References + -=
+
+	if (activationblock@ PsiProcessActivationBlock_References + @ ~~)
+		activationblock@ MmFree
+		-1 pagedarea@ PsProcessPaged_ActivationBlock + !
+	end
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	if (ok@)
+		return
+	end
+
+	pagedarea@ PsProcessPaged_ActivationStatus + @ activationstatus!
+end
+
+fn PsProcessWaitForActivation { timeout processhandle -- activationstatus ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! drop
+
+	if (ok@)
+		return
+	end
+
+	timeout@ // timeout
+	processobject@ // processobject
+	PsProcessWaitForActivationObject ok! activationstatus!
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessSetConsoleGroup { filehandle processhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto consoleobject
+	ACCESS_READ // permissions
+	filehandle@ // filehandle
+	CoConsoleByFileHandle ok! consoleobject!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // needsthread
+	processobject@ // processobject
+	PsProcessCreateDeleteAcquireCheck ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+		consoleobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	processobject@ // process
+	consoleobject@ // console
+	CoConsoleInsertProcess ok!
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	consoleobject@ ObObjectDereferenceByPointer drop
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessClearConsoleGroup { processhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	processobject@ // process
+	CoConsoleRemoveProcess ok!
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsProcessBasePrioritySet { priority processhandle -- ok }
+	fnsection "PAGE$text"
+
+	if (priority@ PRIORITY_LOWUSER <)
+		STATUS_INVALID_ARGUMENT ok!
+		return
+	end
+
+	if (priority@ PRIORITY_HIGHREALTIME >)
+		STATUS_INVALID_ARGUMENT ok!
+		return
+	end
+
+	SYSTEMPERMISSION_RAISEPRIORITY // permission
+	KeProcessCurrent // process
+	SeProcessCheckPermission ok!
+
+	if (ok@)
+		return
+	end
+
+	auto processobject
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	priority@ // priority
+	processobject@ // process
+	KeProcessBasePrioritySet
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsSignalAllProcesses { onlysystem signal -- }
+	fnsection "PAGE$text"
+
+	0 PsProcessListLock drop
+
+	auto process
+	PsProcessListHead@ process!
+
+	while (process@)
+		if (process@ PsSystemProcess@ ~=)
+			// if we should only signal system processes such as session
+			// controllers, we can tell this by is the process is job-less or
+			// not. all other processes should be part of a session and
+			// therefore have a job object.
+
+			if (onlysystem@ ~~
+				process@ PsProcess_PagedArea + @ PsProcessPaged_Job + @ ~~ ||)
+
+				signal@ // signal
+				process@ // process
+				KeProcessSignal drop
+			end
+		end
+
+		process@ PsProcess_GlobalListNext + @ process!
+	end
+
+	PsProcessListUnlock
+end

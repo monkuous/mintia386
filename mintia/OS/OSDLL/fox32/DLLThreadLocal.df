@@ -1,0 +1,133 @@
+//
+// Implements the interlocked OSFastMutex for the fox32 architecture, along
+// with several other synchronization and thread-local features.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSModule.h"
+#include "<ll>/OSDLL/OSAlloc.h"
+#include "<ll>/OSDLL/OSWait.h"
+#include "<ll>/OSDLL/OSFastMutex.h"
+#include "<ll>/OSDLL/OSProcess.h"
+
+#include "../OSDLL.h"
+
+fn OSFastMutexAcquire { fastmutex -- }
+	auto oldcount
+	1 fastmutex@ OSFastMutex_LockCount + OSInterlockedIncrement oldcount!
+
+	if (oldcount@ -1 ==)
+		OSThreadCurrentTID fastmutex@ OSFastMutex_OwningThread + !
+		1 fastmutex@ OSFastMutex_ThreadLockCount + !
+
+		return
+	end
+
+	if (fastmutex@ OSFastMutex_OwningThread + @ OSThreadCurrentTID ==)
+		1 fastmutex@ OSFastMutex_ThreadLockCount + +=
+
+		return
+	end
+
+	fastmutex@ DLLFastMutexWait
+
+	OSThreadCurrentTID fastmutex@ OSFastMutex_OwningThread + !
+	1 fastmutex@ OSFastMutex_ThreadLockCount + !
+end
+
+fn OSFastMutexRelease { fastmutex -- }
+	1 fastmutex@ OSFastMutex_ThreadLockCount + -=
+
+	if (fastmutex@ OSFastMutex_ThreadLockCount + @ ~~)
+		0 fastmutex@ OSFastMutex_OwningThread + !
+
+		auto oldcount
+		-1 fastmutex@ OSFastMutex_LockCount + OSInterlockedIncrement oldcount!
+
+		if (oldcount@ 0 ==)
+			return
+		end
+
+		fastmutex@ DLLFastMutexWake
+
+		return
+	end
+
+	-1 fastmutex@ OSFastMutex_LockCount + OSInterlockedIncrement drop
+end
+
+extern DLLTryAcquireHelp { ptr -- acquired }
+
+fn OSFastMutexTryAcquire { fastmutex -- acquired }
+	fastmutex@ OSFastMutex_LockCount + DLLTryAcquireHelp acquired!
+
+	if (acquired@ ~~)
+		return
+	end
+
+	OSThreadCurrentTID fastmutex@ OSFastMutex_OwningThread + !
+	1 fastmutex@ OSFastMutex_ThreadLockCount + !
+	0 fastmutex@ OSFastMutex_LockCount + !
+end
+
+asm "
+
+; the following two routines contain critical sections whose atomicity is
+; enforced by a trick that requires the cooperation of the kernel. if an
+; interrupt occurs during those sections of code, the kernel will detect this
+; and back up the PC to the beginning of the section. in this way, the section
+; will be retried until it succeeds atomically, and the correct oldcount is
+; reported. this trick is required in order to implement syscall-free
+; userspace atomics since fox32 provides no atomic instructions.
+
+; inc ptr -- oldcount
+OSInterlockedIncrement:
+.global OSInterlockedIncrement
+	mov  t0, [a0]
+	add  [a0], a1
+DLLInterlockedIncrementEnd:
+.global DLLInterlockedIncrementEnd
+	mov  a0, t0
+	ret
+
+; ptr -- acquired
+DLLTryAcquireHelp:
+.global DLLTryAcquireHelp
+	mov  t0, [a0]
+	cmp  t0, -1
+	ifnz jmp DLLTryAcquireHelpEndBadOut
+	mov  [a0], 0
+DLLTryAcquireHelpEnd:
+.global DLLTryAcquireHelpEnd
+	mov  a0, 1
+	ret
+
+DLLTryAcquireHelpEndBadOut:
+	mov  a0, 0
+	ret
+
+; shove this stuff in here because why not.
+
+; -- teb
+OSThreadCurrentTEB:
+.global OSThreadCurrentTEB
+	mov  a0, tp
+	ret
+
+; -- tid
+OSThreadCurrentTID:
+.global OSThreadCurrentTID
+	mov  a0, tp
+	add  tp, OSThreadEnvironmentBlock_ThreadID
+	mov  a0, [tp]
+	ret
+
+"

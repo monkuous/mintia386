@@ -1,0 +1,118 @@
+//
+// Implements the pageable process header.
+// It stores things that only need to be resident while the process has
+// runnable threads, such as the working set list and other information.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+fn MiProcessHeaderCreate { process -- ok }
+	fnsection "PAGE$text"
+
+	auto quotablock
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	PAGESIZE // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargeVM ok!
+
+	if (ok@)
+		return
+	end
+
+	1 // charge
+	quotablock@ // quotablock
+	MmQuotaBlockChargeWS ok!
+
+	if (ok@)
+		PAGESIZE // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeVM
+
+		return
+	end
+
+	auto vaddr
+	auto pteaddr
+
+	CANBLOCK // pri
+	1 // pagesneeded
+	MiPoolSpaceReserve ok! pteaddr! vaddr!
+
+	if (ok@)
+		PAGESIZE // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeVM
+
+		1 // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUnchargeWS
+
+		return
+	end
+
+	vaddr@ process@ PsProcess_MmHeader + !
+
+	ZEROMUST // pri
+	pteaddr@ // pteaddr
+	MiSystemPageAllocate drop
+end
+
+fn MiProcessHeaderDestroy { process -- }
+	fnsection "PAGE$text"
+
+	auto vaddr
+	process@ PsProcess_MmHeader + @ vaddr!
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	pteaddr@ MiSystemPageFree
+
+	1 // pages
+	pteaddr@ // pteaddr
+	MiPoolSpaceRelease
+
+	auto quotablock
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	PAGESIZE // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUnchargeVM
+
+	1 // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUnchargeWS
+end
+
+fn MiProcessHeaderReference { process -- }
+	process@ PsProcess_MmHeader + @ // vaddr
+	process@ PsProcess_MmHeader + @ MmVirtualtoPTEAddress // pteaddr
+	MiSystemPageIn drop
+end
+
+fn MiProcessHeaderDereference { process -- }
+	process@ PsProcess_MmHeader + @ MmVirtualtoPTEAddress MiSystemPageOut
+end

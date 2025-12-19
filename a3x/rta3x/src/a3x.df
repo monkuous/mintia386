@@ -1,0 +1,21 @@
+// if these were initialized to zero, they get put in bss, which might not be desirable
+
+var a3xCIPtr -1
+public a3xCIPtr
+
+var a3xFwctx -1
+public a3xFwctx
+
+var a3xMyDevice -1
+public a3xMyDevice
+
+extern Main { sz args -- ret }
+
+extern a3xReturn { code -- }
+
+fn a3xEntry { sz api devnode args -- ret }
+	api@ a3xCIPtr!
+	devnode@ a3xMyDevice!
+
+	sz@ args@ Main ret!
+end

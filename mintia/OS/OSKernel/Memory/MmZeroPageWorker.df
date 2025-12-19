@@ -1,0 +1,179 @@
+//
+// Implements the zero page worker thread.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+externptr ExOkToPageKernel
+
+fn MmZeroPageWorker { -- }
+	// The fate of the idle thread is to endlessly spin and check for page
+	// frames in the free list. If it finds any, it zeroes them out and places
+	// them on the zero list. If it doesn't, it halts the processor until next
+	// interrupt.
+
+	// First, indicate that it's okay to page the kernel.
+
+	1 ExOkToPageKernel!
+
+	while (1)
+		if (MiFreeListCount@ MiZeroingThreshold@ >=)
+			// More than 150 pages have accumulated on the free list.
+			// Zero them out and place them on the zeroed list.
+
+			MiZeroFreePages
+		end
+
+		HALCPUHalt
+	end
+end
+
+const ZEROCLUSTERMAX 8
+
+fn MiZeroFreePages { -- }
+	// Collect clusters of up to 8 free pages to zero at a time until our
+	// goals are met.
+
+	auto listhead
+	auto listtail
+	auto count
+	auto pfdbe
+	auto rs
+
+	MiFreeListCount@ count!
+
+	auto pooladdr
+	MiZeroingPage@ pooladdr!
+
+	auto pteaddr
+	pooladdr@ MmVirtualtoPTEAddress pteaddr!
+
+	while (count@)
+		auto clustermax
+		count@ ZEROCLUSTERMAX min clustermax!
+
+		auto clustersize
+		0 clustersize!
+
+		0 listhead!
+
+		while (clustersize@ clustermax@ <)
+			HALCPUInterruptDisable rs!
+
+			MiPageFreeListHead@ pfdbe!
+
+			if (pfdbe@ ~~)
+				rs@ HALCPUInterruptRestore
+
+				break
+			end
+
+			pfdbe@ MiPageFrameEntryFree_Next + @ MiPageFreeListHead!
+
+			1 MiFreeListCount -=
+			1 MmAvailablePageCount -=
+
+			rs@ HALCPUInterruptRestore
+
+			0 pfdbe@ MiPageFrameEntryFree_Next + !
+
+			if (listhead@ ~~)
+				pfdbe@ listhead!
+			end else
+				pfdbe@ listtail@ MiPageFrameEntryFree_Next + !
+			end
+
+			pfdbe@ listtail!
+
+			1 clustersize +=
+			1 count -=
+		end
+
+		if (listhead@ ~~)
+			break
+		end
+
+		// Zero out the list of pages.
+
+		listhead@ pfdbe!
+
+		while (pfdbe@)
+			// Map the page.
+
+			pfdbe@ MiPageFrameDatabase@ - MiPageFrameEntry_SIZEOF / PAGESHIFT << // phyaddr
+			PTE_V PTE_W | PTE_NC | // flags
+			pteaddr@ // pteaddr
+			MiPTEUpdate drop drop
+
+			// Zero it out.
+
+			pooladdr@ // ptr
+			PAGESIZE // size
+			0 // word
+			memset
+
+			// Get a new one and loop.
+
+			pfdbe@ MiPageFrameEntryFree_Next + @ pfdbe!
+		end
+
+#ifdef XRSTATION
+		// We mapped the pages noncached, so we have to flush the data cache.
+		// We do this once instead of continuously trashing the cache the whole
+		// time we zero out pages. The value of doing it this way should be
+		// carefully re-assessed when moving to MP systems, where this may do an
+		// IPI and/or kill multiple levels of cache.
+
+		HALDcacheExpunge
+#endif
+
+		// Place all the pages on the zeroed list at once.
+
+		HALCPUInterruptDisable rs!
+
+		MiPageZeroListHead@ listtail@ MiPageFrameEntryFree_Next + !
+		listhead@ MiPageZeroListHead!
+
+		clustersize@ MmAvailablePageCount +=
+		clustersize@ MiZeroListCount +=
+
+		rs@ HALCPUInterruptRestore
+
+		// Make sure that the page available events are signalled correctly.
+
+		if (MmAvailablePageCount@ MMNORMALTHRESH >=)
+			if (MiPageAvailableEvent KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+				0 // priboost
+				MiPageAvailableEvent // event
+				KeEventSignal
+			end
+		end elseif (MiMustSucceedEvent KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+			0 // priboost
+			MiMustSucceedEvent // event
+			KeEventSignal
+		end
+	end
+end

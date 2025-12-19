@@ -1,0 +1,21 @@
+#include "<inc>/const.h"
+
+fn abs { v -- absv }
+	v@ absv!
+
+	if (v@ z<)
+		0 v@ - absv!
+	end
+end
+
+fn max { n1 n2 -- maxv }
+	if (n2@ n1@ >) n2@ maxv! end else n1@ maxv! end
+end
+
+fn min { n1 n2 -- minv }
+	if (n2@ n1@ <) n2@ minv! end else n1@ minv! end
+end
+
+fn iserr { n -- err }
+	n@ z< err!
+end

@@ -1,0 +1,245 @@
+#include "<inc>/const.h"
+#include "<inc>/rt.h"
+
+table KConsoleDigits
+	'0' '1' '2' '3' '4' '5' '6' '7' '8' '9' 'a' 'b' 'c' 'd' 'e' 'f'
+endtable
+
+fn private Putx { c nx fd -- len }
+	1 c +=
+
+	if (nx@ 15 >)
+		auto a
+		nx@ 16 / a!
+
+		nx@ 16 a@ * - nx!
+		c@ a@ fd@ Putx c!
+	end
+
+	fd@ [nx@]KConsoleDigits@ FPutc
+
+	c@ len!
+end
+
+fn private Putn { c n fd -- len }
+	1 c +=
+
+	if (n@ 9 >)
+		auto a
+		n@ 10 / a!
+
+		n@ 10 a@ * - n!
+		c@ a@ fd@ Putn c!
+	end
+
+	fd@ [n@]KConsoleDigits@ FPutc
+
+	c@ len!
+end
+
+fn private Puti { n fd -- len }
+	auto c
+	0 c!
+
+	if (n@ z<)
+		fd@ '-' FPutc
+		1 c!
+	end
+
+	c@ n@ abs fd@ Putn len!
+end
+
+fn private Pad { fd num -- }
+	auto i
+	0 i!
+
+	while (i@ num@ <)
+		fd@ ' ' FPutc
+
+		1 i +=
+	end
+end
+
+fn private ZeroPad { c fd num pad base -- }
+	auto d
+	0 d!
+
+	if (num@ 0 ==)
+		1 d!
+	end else
+		while (num@)
+			1 d +=
+
+			base@ num /=
+		end
+	end
+
+	while (d@ pad@ <)
+		fd@ c@ FPutc
+
+		1 d +=
+	end
+end
+
+fn VFPrintf { argvt argcn fmt fd -- }
+	auto i
+	0 i!
+
+	auto sl
+	fmt@ strlen sl!
+
+	auto a
+	0 a!
+
+	auto fl
+
+	auto max
+	argcn@ WORD * max!
+
+	while (i@ sl@ <)
+		auto char
+		fmt@ i@ + gb char!
+		if (char@ '%' ~=)
+			fd@ char@ FPutc
+		end else
+			1 i +=
+			if (i@ sl@ >=)
+				return
+			end
+
+			auto rev
+			0 rev!
+
+			auto pad
+			0 pad!
+
+			fmt@ i@ + gb char!
+
+			if (char@ '-' ==)
+				1 rev!
+
+				1 i +=
+
+				fmt@ i@ + gb char!
+			end
+
+			auto zero
+			0 zero!
+
+			if (char@ '0' ==)
+				1 zero!
+
+				1 i +=
+
+				fmt@ i@ + gb char!
+			end
+
+			while (char@ '0' >= char@ '9' <= &&)
+				1 i +=
+
+				pad@ 10 * char@ '0' - + pad!
+
+				fmt@ i@ + gb char!
+			end
+
+			if (char@ '%' ==)
+				fd@ '%' FPutc
+				1 i +=
+				continue
+			end
+
+			if (a@ max@ >=)
+				fd@ '?' FPutc
+				1 i +=
+				continue
+			end
+
+			auto q
+			a@ argvt@ + @ q!
+
+			if (char@ 'd' ==)
+				if (zero@)
+					'0' fd@ q@ pad@ 10 ZeroPad
+					0 pad!
+				end elseif (rev@)
+					' ' fd@ q@ pad@ 10 ZeroPad
+					0 pad!
+				end
+
+				0 q@ fd@ Putn fl!
+
+				if (pad@)
+					if (fl@ pad@ <)
+						fd@ pad@ fl@ - Pad
+					end
+				end
+
+				4 a +=
+			end elseif (char@ 'x' ==)
+				if (zero@)
+					'0' fd@ q@ pad@ 16 ZeroPad
+					0 pad!
+				end elseif (rev@)
+					' ' fd@ q@ pad@ 16 ZeroPad
+					0 pad!
+				end
+
+				0 q@ fd@ Putx fl!
+
+				if (pad@)
+					if (fl@ pad@ <)
+						fd@ pad@ fl@ - Pad
+					end
+				end
+
+				4 a +=
+			end elseif (char@ 's' ==)
+				if (rev@ ~~)
+					fd@ q@ FPuts
+				end
+
+				if (pad@)
+					q@ strlen fl!
+
+					if (fl@ pad@ <)
+						fd@ pad@ fl@ - Pad
+					end
+				end
+
+				if (rev@)
+					fd@ q@ FPuts
+				end
+
+				4 a +=
+			end elseif (char@ 'l' ==)
+				fd@ q@ FPutc
+
+				if (pad@)
+					fd@ pad@ 1 - Pad
+				end
+
+				4 a +=
+			end elseif (char@ 'i' ==)
+				q@ fd@ Puti fl!
+
+				if (pad@)
+					if (fl@ pad@ <)
+						fd@ pad@ fl@ - Pad
+					end
+				end
+
+				4 a +=
+			end
+		end
+
+		1 i +=
+	end
+end
+
+fn Printf { ... fmt -- }
+	argv argc@ fmt@ VPrintf
+end
+
+fn FPrintf { ... fmt fd -- }
+	argv argc@ fmt@ fd@ VFPrintf
+end

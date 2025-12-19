@@ -1,0 +1,75 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "Cmd.h"
+
+var CmdInteractiveMode 0
+public CmdInteractiveMode
+
+fn (OSSignalHandler) SignalInterrupt { context signum -- }
+	// do nothing
+end
+
+fn CmdIgnoreSignals { -- }
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_INT // signum
+	OSSignalSetAction drop
+
+	OSSIGNALACTION_IGNORE // action
+	OSSIGNAL_QUIT // signum
+	OSSignalSetAction drop
+end
+
+fn CmdResetSignals { -- }
+	pointerof SignalInterrupt // action
+	OSSIGNAL_INT // signum
+	OSSignalSetAction drop
+
+	pointerof SignalInterrupt // action
+	OSSIGNAL_QUIT // signum
+	OSSignalSetAction drop
+end
+
+fn Main { ... -- ret }
+	auto pwd
+	auto ok
+	0 ok!
+
+	CmdResetSignals
+
+	1 CmdInteractiveMode!
+	OSGetStdIn CmdTokenStreamHandle!
+
+	while (1)
+		if (CmdInteractiveMode@)
+			"PWD" OSFindEnvironmentVariable ok! pwd! drop
+
+			if (ok@)
+				"?" pwd!
+			end else
+				pwd@ OSLastComponent pwd!
+			end
+
+			pwd@ "%s # " Printf
+			OSFlushLine
+		end
+
+		auto done
+		CmdDoNextStatement ok! done!
+
+		if (ok@)
+			if (ok@ STATUS_SIGNALLED ~=)
+				ok@ OSStatusGetName "cmd: CmdDoNextStatement: %s\n" OSError
+			end else
+				"\n" Printf
+				0 done!
+			end
+		end
+
+		if (done@ 1 ==)
+			0 ret!
+			return
+		end
+	end
+end

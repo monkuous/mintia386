@@ -1,0 +1,100 @@
+//
+// Implements dynamic mapping of physical MMIO ranges.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "MmInternal.h"
+
+// Maps IO regions into the same POOLSPACE used for page-aligned allocations.
+
+fn MmIORegionMap { cached length phyaddr -- vaddr ok }
+	fnsection "PAGE$text"
+
+	auto pagesneeded
+	length@ PAGEOFFSETMASK + PAGESHIFT >> pagesneeded!
+
+	auto pteaddr
+	CANBLOCK // pri
+	pagesneeded@ // pagesneeded
+	MiPoolSpaceReserve ok! pteaddr! vaddr!
+
+	if (ok@)
+		return
+	end
+
+	auto flags
+	PTE_V PTE_W | flags!
+
+	if (cached@ MMIO_NOCACHE ==)
+		PTE_NC flags |=
+	end elseif (cached@ MMIO_WRITECOMBINE ==)
+		PTE_WC flags |=
+	end
+
+	// map region
+
+	while (pagesneeded@)
+		phyaddr@ // phyaddr
+		flags@ // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		PAGESIZE phyaddr +=
+		PTESIZE pteaddr +=
+		1 pagesneeded -=
+	end
+end
+
+fn MmIORegionUnmap { length vaddr -- }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (vaddr@ POOLSPACE <)
+			vaddr@ "MmIOUnmapRegion: vaddr<POOLSPACE (0x%08x)\n" KeCrash
+		end
+	end
+
+	auto pages
+	length@ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	// unmap region
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto firstpteaddr
+	pteaddr@ firstpteaddr!
+
+	auto i
+	0 i!
+
+	while (i@ pages@ <)
+		0 // phyaddr
+		0 // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		PTESIZE pteaddr +=
+		1 i +=
+	end
+
+	// release pool space
+
+	pages@ // pages
+	firstpteaddr@ // pteaddr
+	MiPoolSpaceRelease
+end

@@ -1,0 +1,836 @@
+//
+// Implements the executive port object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "IPCInternal.h"
+
+fn (ObTypeOpenFunction) IPCiPortObjectOpen { access object process -- ok }
+	fnsection "PAGE$text"
+
+	// Don't allow opening the port object if it's not the owning process
+	// trying to open it.
+
+	0 ok!
+
+	if (process@ object@ IPCiPort_OwningProcess + @ ~=)
+		STATUS_PERMISSION_DENIED ok!
+	end
+end
+
+fn (ObTypeDeleteFunction) IPCiPortObjectDelete { object -- }
+	fnsection "PAGE$text"
+
+	auto ok
+	auto clienttable
+
+	auto ipl
+	0 IPCiGlobalLock drop ipl!
+
+	// It's time to delete this port object.
+	// Rundown all of its messages still out there in someone's queue.
+	// XXX we wouldn't have to do this if we allocated messages from a global
+	// zone, which would also allow us to simplify (i.e. speed up) the code
+	// elsewhere. This is in the TODO list for after the rewrite in TOWER.
+
+	auto msg
+
+	while (1)
+		object@ IPCiPort_SentListHead + @ msg!
+
+		if (msg@ ~~)
+			break
+		end
+
+		msg@ IPCiMessageDequeueRundown
+
+		if (msg@ IPCiKernelMessage_RundownPointer + @)
+			0 msg@ IPCiKernelMessage_RundownPointer + @ !
+		end else
+			msg@ IPCiMessageDequeue
+		end
+
+		msg@ IPCiMessageFree
+	end
+
+	if (object@ IPCiPort_Flags + @ IPCPORTFLAG_CLIENT &)
+		// it's a client, check if there's a server port still.
+
+		if (object@ IPCiPort_ServerPort + @)
+			// Send the disconnection message to the server port, but not if
+			// the connection was never completed to begin with.
+
+			if (object@ IPCiPort_Flags + @ IPCPORTFLAG_UNFINISHED_CONNECTION & ~~)
+				auto kdms
+				object@ IPCiPort_DisconnectionMessage + @ kdms!
+
+				object@ IPCiPort_ServerContextForClient + @ kdms@ IPCiKernelMessage_Header + OSMessageHeader_Context + !
+				OSPORT_MESSAGE_DISCONNECT kdms@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + sb
+				object@ IPCiPort_ClientID + @ kdms@ IPCiKernelMessage_Header + OSMessageHeader_ClientID + !
+
+				object@ IPCiPort_DisconnectionMessage + @ // msg
+				object@ IPCiPort_ServerPort + @ // portobject
+				IPCiPortSendMessage drop
+			end
+
+			// Remove our client ID from the server's client ID table.
+
+			object@ IPCiPort_ServerPort + @ IPCiPort_ClientTableHeader + @ clienttable!
+
+			object@ IPCiPort_ClientID + @ // handle
+			clienttable@ // handletable
+			0 // locked
+			ExHandleDelete ok! drop drop
+
+			if (DEBUGCHECKS)
+				if (ok@)
+					"IPCiPortObjectDelete: failed to delete handle (%i)\n" KeCrash
+				end
+			end
+		end
+	end else
+		object@ IPCiPort_ClientTableHeader + @ clienttable!
+
+		pointerof IPCiPortHandleDestroyFunction // func
+		clienttable@ // handletable
+		ExHandleTableDelete
+	end
+
+	// orphan all of the pending messages in my queue
+
+	while (1)
+		object@ IPCiPort_MessageListHead + @ msg!
+
+		if (msg@ ~~)
+			break
+		end
+
+		msg@ IPCiMessageDequeueRundown
+		msg@ IPCiMessageDequeue
+
+		if (msg@ IPCiKernelMessage_Object + @ ~~)
+			msg@ IPCiMessageFree
+		end
+	end
+
+	ipl@ IPCiGlobalUnlock
+
+	object@ IPCiPort_OwningProcess + @ ObObjectDereferenceByPointer drop
+
+	// destroy my zone
+
+	object@ IPCiPort_ZoneHeader + MmZoneEmpty
+
+	// uncharge quota for zone extensions
+
+	if (object@ IPCiPort_ZoneExtensionCharge + @)
+		object@ IPCiPort_ZoneExtensionCharge + @ // charge
+		object@ ObObjectQuotaBlock // quotablock
+		MmQuotaBlockUnchargePaged
+	end
+end
+
+fn (ExHandleEnumFunction) IPCiPortHandleDestroyFunction { entryptr handle handletable -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	auto clientport
+	entryptr@@ clientport!
+
+	0 clientport@ IPCiPort_ServerPort + !
+
+	while (1)
+		auto waiter
+		clientport@ IPCiPort_WaiterListHead + @ waiter!
+
+		if (waiter@ ~~)
+			break
+		end
+
+		-1 // rxmsg
+		waiter@ // waiter
+		clientport@ // portobject
+		IPCiPortWakeWaiter
+	end
+
+	if (clientport@ IPCiPort_DisconnectionMessage + @)
+		clientport@ IPCiPort_DisconnectionMessage + @ IPCiMessageFree
+	end
+end
+
+fn IPCPortCreateObject { flags maxlen serverport owningprocess permissions name -- portobject ok }
+	fnsection "PAGE$text"
+
+	if (maxlen@ 3 &)
+		STATUS_INVALID_ARGUMENT ok!
+
+		return
+	end
+
+	auto msgzonesize
+
+	if (serverport@)
+		serverport@ IPCiPort_UFlags + @ flags!
+		serverport@ IPCiPort_MaximumMessageBody + @ maxlen!
+
+		IPCiKernelMessage_SIZEOF maxlen@ +
+		IPCINITIALMESSAGES_CLIENT *
+		MMZONEOVERHEAD + msgzonesize!
+	end else
+		IPCiKernelMessage_SIZEOF maxlen@ +
+		IPCINITIALMESSAGES_SERVER *
+		MMZONEOVERHEAD + msgzonesize!
+	end
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	msgzonesize@ MmChargeBytesGet // pquotabias
+	IPCiPort_SIZEOF // bodysize
+	IPCPortObjectType@ // type
+	ObObjectCreate ok! portobject!
+
+	if (ok@)
+		return
+	end
+
+	0 portobject@ IPCiPort_MessageListHead + !
+	0 portobject@ IPCiPort_MessageListTail + !
+
+	0 portobject@ IPCiPort_QueueLength + !
+
+	0 portobject@ IPCiPort_SentListHead + !
+	0 portobject@ IPCiPort_SentListTail + !
+
+	0 portobject@ IPCiPort_WaiterListHead + !
+	0 portobject@ IPCiPort_WaiterListTail + !
+
+	0 portobject@ IPCiPort_Flags + !
+
+	flags@ portobject@ IPCiPort_UFlags + !
+
+	0 portobject@ IPCiPort_ServerContextForClient + !
+
+	OSPORT_CONID_FIRSTDYNAMIC portobject@ IPCiPort_NextConversationID + !
+
+	owningprocess@ portobject@ IPCiPort_OwningProcess + !
+
+	0 portobject@ IPCiPort_ZoneExtensionCharge + !
+
+	0 portobject@ IPCiPort_DisconnectionMessage + !
+
+	auto chunk
+	msgzonesize@ // bytes
+	'PoZn' // tag
+	PAGED // flags
+	MmAllocWithTag ok! chunk!
+
+	if (ok@)
+		portobject@ ObObjectDeallocate
+
+		return
+	end
+
+	msgzonesize@ // bytes
+	chunk@ // chunk
+	IPCiKernelMessage_SIZEOF maxlen@ + // blocksize
+	portobject@ IPCiPort_ZoneHeader + // zoneheader
+	MmZoneInitialize
+
+	auto clienttable
+
+	if (serverport@)
+		// this is a client port.
+
+		serverport@ portobject@ IPCiPort_ServerPort + !
+		0 portobject@ IPCiPort_ClientTableHeader + !
+
+		// provide a way to inform the server that a client is not consuming
+		// its messages before the server exhausts all of its pool quota.
+
+		64 portobject@ IPCiPort_MaximumQueueLength + !
+
+		serverport@ IPCiPort_ClientTableHeader + @ clienttable!
+
+		auto clientid
+		portobject@ // entryvalue
+		clienttable@ // handletable
+		0 // locked
+		ExHandleCreate ok! drop clientid!
+
+		if (ok@)
+			chunk@ MmFree
+
+			portobject@ ObObjectDeallocate
+
+			return
+		end
+
+		clientid@ portobject@ IPCiPort_ClientID + !
+
+		IPCPORTFLAG_CLIENT portobject@ IPCiPort_Flags + |=
+		IPCPORTFLAG_UNFINISHED_CONNECTION portobject@ IPCiPort_Flags + |=
+	end else
+		// this IS a server port.
+
+		0 portobject@ IPCiPort_ClientID + !
+
+		0 portobject@ IPCiPort_ServerPort + !
+
+		-1 portobject@ IPCiPort_MaximumQueueLength + !
+
+		portobject@ // context
+		owningprocess@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+		0 // entrysizelog
+		ExHandleTableCreate ok! clienttable!
+
+		if (ok@)
+			chunk@ MmFree
+
+			portobject@ ObObjectDeallocate
+
+			return
+		end
+
+		clienttable@ portobject@ IPCiPort_ClientTableHeader + !
+	end
+
+	maxlen@ portobject@ IPCiPort_MaximumMessageBody + !
+
+	// Reference our own process to avoid strange cases in referencing
+	// processes by client ID. This is fine since all of our handles are
+	// closed at termination time, not process object deletion time, so this
+	// reference is guaranteed to be removed when the port object is run down.
+
+	owningprocess@ ObObjectReferenceByPointer drop
+end
+
+fn IPCPortCreate { flags maxlen permissions name -- porthandle ok }
+	fnsection "PAGE$text"
+
+	auto portobject
+	flags@ // flags
+	maxlen@ // maxlen
+	0 // serverport
+	KeProcessCurrent // owningprocess
+	permissions@ // permissions
+	name@ // name
+	IPCPortCreateObject ok! portobject!
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL ACCESS_NOINHERIT | // access
+	portobject@ // object
+	KeProcessCurrent // process
+	ObObjectOpenProcess ok! porthandle!
+
+	if (ok@)
+		portobject@ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn IPCPortReferenceProcessByClientID { clientid portobject -- processobject ok }
+	fnsection "PAGE$text"
+
+	auto clienttable
+	portobject@ IPCiPort_ClientTableHeader + @ clienttable!
+
+	1 // alertable
+	clienttable@ // handletable
+	ExHandleTableLockShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto otherport
+	clientid@ // handle
+	clienttable@ // handletable
+	1 // locked
+	ExHandleTableLookupAndReferenceObject ok! otherport!
+
+	if (ok@)
+		clienttable@ ExHandleTableUnlock
+
+		if (ok@ STATUS_INVALID_HANDLE ==)
+			STATUS_NO_SUCH_CLIENT ok!
+		end
+
+		return
+	end
+
+	otherport@ IPCiPort_OwningProcess + @ processobject!
+	processobject@ ObObjectReferenceByPointer drop
+
+	clienttable@ ExHandleTableUnlock
+
+	otherport@ ObObjectDereferenceByPointer drop
+end
+
+fn IPCPortOpenProcessByClientID { access clientid porthandle -- processhandle ok }
+	fnsection "PAGE$text"
+
+	auto portobject
+	IPCPortObjectType@ // type
+	porthandle@ // handle
+	ObObjectReferenceByHandle ok! portobject! drop
+
+	if (ok@)
+		return
+	end
+
+	if (portobject@ IPCiPort_OwningProcess + @ KeThreadCurrent@ KeThread_Process + @ ~=)
+		portobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_PERMISSION_DENIED ok!
+
+		return
+	end
+
+	if (portobject@ IPCiPort_Flags + @ IPCPORTFLAG_CLIENT &)
+		portobject@ ObObjectDereferenceByPointer drop
+
+		STATUS_INVALID_OBJECT_TYPE ok!
+
+		return
+	end
+
+	auto processobject
+	clientid@ // clientid
+	portobject@ // portobject
+	IPCPortReferenceProcessByClientID ok! processobject!
+
+	portobject@ ObObjectDereferenceByPointer drop
+
+	if (ok@)
+		return
+	end
+
+	0 // nocheck
+	access@ // access
+	processobject@ // object
+	KeProcessCurrent // process
+	ObObjectOpenProcess ok! processhandle!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+	end
+end
+
+fn IPCiPortWakeWaiter { rxmsg waiter portobject -- }
+	fnsection "PAGE$text"
+
+	// store message pointer
+
+	rxmsg@ waiter@ IPCiThreadBlock_RXMessage + !
+	
+	if (rxmsg@ -1 ~=)
+		waiter@ IPCiThreadBlock_RXMessage + rxmsg@ IPCiKernelMessage_RundownPointer + !
+	end
+
+	// dequeue waiter
+
+	waiter@ // waiter
+	portobject@ // portobject
+	IPCiPortWaiterDequeue
+
+	// signal event
+
+	IPCBOOST // priboost
+	waiter@ IPCiThreadBlock_Event + // event
+	KeEventSignal
+end
+
+fn IPCiPortSendMessage { msg portobject -- ok }
+	fnsection "PAGE$text"
+
+	// add the message to the queue for the port object.
+	// if there are any waiters with a matching conversation ID, wake them.
+	// if the message type is OSPORT_MESSAGE_REPLY, the message can only go to
+	// someone waiting on that specific conversation ID. if it is any other,
+	// the message can only go to someone waiting on any message.
+	//
+	// caller should have verified that the destination port is connected to
+	// the source port. client source does this by grabbing ServerPort
+	// atomically with enqueuing the message. server source does this by
+	// carefully checking the client port's pointer count in a similar manner
+	// to how referencing a process by PID works. this must be atomic with
+	// calling this function i.e. IPL is raised to IPLDPC for the duration of
+	// the check and the operation of this function.
+
+	0 ok!
+
+	msg@ IPCiMessageEnqueueRundown
+
+	// wake up waiter
+
+	auto conid
+	msg@ IPCiKernelMessage_Header + OSMessageHeader_ConversationID + @ conid!
+
+	auto msgtype
+	msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + gb msgtype!
+
+	auto waiter
+	portobject@ IPCiPort_WaiterListHead + @ waiter!
+
+	while (waiter@)
+		auto wake
+		0 wake!
+
+		if (msgtype@ OSPORT_MESSAGE_REPLY ==)
+			if (waiter@ IPCiThreadBlock_WaitingConversationID + @ conid@ ==)
+				if (waiter@ IPCiThreadBlock_WaitingClientID + @ msg@ IPCiKernelMessage_Header + OSMessageHeader_ClientID + @ ==)
+					1 wake!
+				end
+			end
+		end elseif (waiter@ IPCiThreadBlock_WaitingConversationID + @ OSPORT_CONID_ANY ==)
+			1 wake!
+		end
+
+		if (wake@)
+			msg@ // rxmsg
+			waiter@ // waiter
+			portobject@ // portobject
+			IPCiPortWakeWaiter
+
+			return
+		end
+
+		waiter@ IPCiThreadBlock_WaiterNext + @ waiter!
+	end
+
+	// add message to message queue
+
+	if (portobject@ IPCiPort_QueueLength + @ portobject@ IPCiPort_MaximumQueueLength + @ >=)
+		// full. just ditch the message.
+
+		msg@ IPCiMessageDequeueRundown
+		msg@ IPCiMessageFree
+
+		STATUS_PORT_QUEUE_FULL ok!
+
+		return
+	end
+
+	1 portobject@ IPCiPort_QueueLength + +=
+
+	auto t
+	portobject@ IPCiPort_MessageListTail + @ t!
+
+	t@ msg@ IPCiKernelMessage_QueuePrev + !
+
+	if (t@ ~~)
+		msg@ portobject@ IPCiPort_MessageListHead + !
+	end else
+		msg@ t@ IPCiKernelMessage_QueueNext + !
+	end
+
+	msg@ portobject@ IPCiPort_MessageListTail + !
+
+	portobject@ msg@ IPCiKernelMessage_EnqueuedTo + !
+end
+
+fn IPCiPortReceiveMessage { ipl umsg mode clientid conid timeout portobject -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	auto msg
+	portobject@ IPCiPort_MessageListHead + @ msg!
+
+	while (msg@)
+		auto found
+		0 found!
+
+		if (conid@ OSPORT_CONID_ANY ==)
+			if (msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + gb OSPORT_MESSAGE_REPLY ~=)
+				1 found!
+			end
+		end elseif (msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + gb OSPORT_MESSAGE_REPLY ==)
+			if (msg@ IPCiKernelMessage_Header + OSMessageHeader_ConversationID + @ conid@ ==)
+				if (msg@ IPCiKernelMessage_Header + OSMessageHeader_ClientID + @ clientid@ ==)
+					1 found!
+				end
+			end
+		end
+
+		if (found@)
+			// dequeue message
+
+			msg@ IPCiMessageDequeue
+
+			break
+		end
+
+		msg@ IPCiKernelMessage_QueueNext + @ msg!
+	end
+
+	if (msg@ ~~)
+		// no matching message
+
+		if (timeout@ ~~)
+			// nonblocking
+
+			STATUS_NO_MESSAGE ok!
+
+			return
+		end
+
+		// build & enqueue a waiter block
+
+		auto waiter
+		KeThreadCurrent@ PsThread_IPCBlock + @ waiter!
+
+		if (DEBUGCHECKS)
+			if (waiter@ ~~)
+				"IPCiPortReceiveMessage: no ipcblock\n" KeCrash
+			end
+		end
+
+		conid@ waiter@ IPCiThreadBlock_WaitingConversationID + !
+		clientid@ waiter@ IPCiThreadBlock_WaitingClientID + !
+		0 waiter@ IPCiThreadBlock_RXMessage + !
+
+		0 waiter@ IPCiThreadBlock_WaiterNext + !
+
+		waiter@ // waiter
+		portobject@ // portobject
+		IPCiPortWaiterEnqueue
+
+		// NOTE: event should already be initialized and cleared
+
+		ipl@ IPCiGlobalUnlock
+
+		mode@ // waitmode
+		0 // alertable
+		timeout@ // timeout
+		waiter@ IPCiThreadBlock_Event + // object
+		KeThreadWaitForObject ok!
+
+		0 IPCiGlobalLock drop ipl!
+
+		waiter@ IPCiThreadBlock_RXMessage + @ msg!
+
+		if (msg@ ~~)
+			// we were awoken before the message could be received.
+			// our waiter block is still enqueued so remove it.
+
+			waiter@ // waiter
+			portobject@ // portobject
+			IPCiPortWaiterDequeue
+
+			return
+		end elseif (msg@ -1 ==)
+			// the other port disconnected. our waiter block is not enqueued,
+			// do not remove it.
+
+			STATUS_PORT_DISCONNECTED ok!
+
+			return
+		end
+
+		// the message was received successfully.
+		// ignore any status code we got from waiting on the event.
+
+		0 ok!
+	end
+
+	// remove this message from rundown list since its in our custody now
+
+	msg@ IPCiMessageDequeueRundown
+
+	auto msgport
+	msg@ IPCiKernelMessage_OriginatingPort + @ msgport!
+
+	// reference any passed object
+
+	auto object
+	msg@ IPCiKernelMessage_Object + @ object!
+
+	if (object@)
+		msg@ IPCiKernelMessage_Object + @ ObObjectReferenceByPointer drop
+		0 msg@ IPCiKernelMessage_Object + !
+	end elseif (msg@ IPCiKernelMessage_Header + OSMessageHeader_TypeB + gb OSPORT_MESSAGE_IOCOMPLETE ~=)
+		OSNONE msg@ IPCiKernelMessage_Header + OSMessageHeader_Handle + !
+	end
+
+	if (object@)
+		// open object in our handle table and save the handle in the message
+
+		auto handle
+		1 // nocheck
+		msg@ IPCiKernelMessage_Header + OSMessageHeader_Access + @ // access
+		object@ // object
+		KeProcessCurrent // process
+		ObObjectOpenProcess ok! handle!
+
+		handle@ msg@ IPCiKernelMessage_Header + OSMessageHeader_Handle + !
+
+		if (ok@)
+			// failed to open the object
+			object@ ObObjectDereferenceByPointer drop
+		end
+	end
+
+	if (ok@ ~~)
+		// opening the object worked, copy contents
+
+		if (mode@ USERMODE ==)
+			umsg@ // dest
+			msg@ IPCiKernelMessage_Header + // src
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi OSMessageHeader_SIZEOF + // sz
+			KeSafeCopyOut ok!
+
+			if (ok@)
+				if (object@)
+					// failed to copy, close the object
+					handle@ ObObjectClose drop
+				end
+			end
+		end else
+			umsg@ // dest
+			msg@ IPCiKernelMessage_Header + // src
+			msg@ IPCiKernelMessage_Header + OSMessageHeader_LengthI + gi OSMessageHeader_SIZEOF + // sz
+			memcpy
+		end
+	end
+
+	if (object@ ~~)
+		// free to message zone. don't free if there's a passed object because
+		// the synchronous IPC call will free the message instead.
+
+		msg@ IPCiMessageFree
+	end
+end
+
+fn IPCiPortWaiterEnqueue { waiter portobject -- }
+	fnsection "PAGE$text"
+
+	// protected by queue lock.
+
+	auto t
+	portobject@ IPCiPort_WaiterListTail + @ t!
+
+	t@ waiter@ IPCiThreadBlock_WaiterPrev + !
+
+	if (t@ ~~)
+		waiter@ portobject@ IPCiPort_WaiterListHead + !
+	end else
+		waiter@ t@ IPCiThreadBlock_WaiterNext + !
+	end
+
+	waiter@ portobject@ IPCiPort_WaiterListTail + !
+end
+
+fn IPCiPortWaiterDequeue { waiter portobject -- }
+	fnsection "PAGE$text"
+
+	// protected by queue lock.
+
+	auto ls
+	auto ns
+
+	waiter@ IPCiThreadBlock_WaiterPrev + @ ls!
+	waiter@ IPCiThreadBlock_WaiterNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ IPCiThreadBlock_WaiterNext + !
+	end else
+		ns@ portobject@ IPCiPort_WaiterListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ IPCiThreadBlock_WaiterPrev + !
+	end else
+		ls@ portobject@ IPCiPort_WaiterListTail + !
+	end
+end
+
+fn IPCiThreadBlockCreate { -- ok }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (KeThreadCurrent@ PsThread_IPCBlock + @)
+			"IPCiThreadBlockCreate: thread already has IPC block\n" KeCrash
+		end
+	end
+
+	IPCiThreadBlock_SIZEOF MmChargeBytesGet // charge
+	KeThreadCurrent@ KeThread_Process + @ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockCharge ok!
+
+	if (ok@)
+		return
+	end
+
+	// the IPC block can't be paged since it contains a KeEvent.
+
+	auto ipcblock
+	IPCiThreadBlock_SIZEOF // bytes
+	'IPCt' // tag
+	CANBLOCK // flags
+	MmAllocWithTag ok! ipcblock!
+
+	if (ok@)
+		IPCiThreadBlock_SIZEOF MmChargeBytesGet // charge
+		KeThreadCurrent@ KeThread_Process + @ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+		MmQuotaBlockUncharge
+
+		return
+	end
+
+	0 ipcblock@ IPCiThreadBlock_WaiterNext + !
+	0 ipcblock@ IPCiThreadBlock_WaiterPrev + !
+
+	0 ipcblock@ IPCiThreadBlock_WaitingConversationID + !
+	0 ipcblock@ IPCiThreadBlock_WaitingClientID + !
+
+	0 ipcblock@ IPCiThreadBlock_RXMessage + !
+
+	0 // signaled
+	OSEVENT_SYNCH // type
+	"IPCWaiterEvent" // name
+	ipcblock@ IPCiThreadBlock_Event + // event
+	KeEventInitialize
+
+	ipcblock@ KeThreadCurrent@ PsThread_IPCBlock + !
+end
+
+fn IPCThreadBlockFree { thread -- }
+	fnsection "PAGE$text"
+
+	thread@ PsThread_IPCBlock + @ MmFree
+
+	IPCiThreadBlock_SIZEOF MmChargeBytesGet // charge
+	thread@ KeThread_Process + @ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockUncharge
+end

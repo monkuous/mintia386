@@ -1,0 +1,117 @@
+//
+// Implements the console device object.
+// Behaves similarly to a unix-like TTY.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALArgs.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Console.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<ll>/OSDLL/OSConsoleControl.h"
+
+#include "CoDuplex.h"
+
+fn CoConsoleRemoveProcess { process -- ok }
+	// process createdelete lock must be held.
+	// console's process list is guarded with IPL synch.
+
+	auto consoleobject
+	process@ PsProcess_ConsoleObject + @ consoleobject!
+
+	if (consoleobject@ ~~)
+		STATUS_NO_CONSOLE ok!
+
+		return
+	end
+
+	auto duplex
+	consoleobject@ IODevice_Extension + @ duplex!
+
+	0 ok!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto ls
+	process@ PsProcess_ConsoleListPrev + @ ls!
+
+	auto ns
+	process@ PsProcess_ConsoleListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ PsProcess_ConsoleListNext + !
+	end else
+		ns@ duplex@ CoDuplex_ProcessListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ PsProcess_ConsoleListPrev + !
+	end
+
+	0 process@ PsProcess_ConsoleObject + !
+
+	rs@ HALCPUInterruptRestore
+
+	consoleobject@ ObObjectDereferenceByPointer drop
+end
+
+fn CoConsoleInsertProcess { process consoleobject -- ok }
+	// process createdelete lock must be held.
+	// console's process list is guarded with IPL synch.
+
+	if (process@ PsProcess_ConsoleObject + @)
+		STATUS_HAS_CONSOLE ok!
+
+		return
+	end
+
+	consoleobject@ process@ PsProcess_ConsoleObject + !
+
+	auto duplex
+	consoleobject@ IODevice_Extension + @ duplex!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto h
+	duplex@ CoDuplex_ProcessListHead + @ h!
+
+	if (h@ ~~)
+		0 process@ PsProcess_ConsoleListNext + !
+		0 process@ PsProcess_ConsoleListPrev + !
+
+		process@ duplex@ CoDuplex_ProcessListHead + !
+	end else
+		0 process@ PsProcess_ConsoleListPrev + !
+
+		h@ process@ PsProcess_ConsoleListNext + !
+		process@ h@ PsProcess_ConsoleListPrev + !
+		process@ duplex@ CoDuplex_ProcessListHead + !
+	end
+
+	rs@ HALCPUInterruptRestore
+
+	consoleobject@ ObObjectReferenceByPointer drop
+end

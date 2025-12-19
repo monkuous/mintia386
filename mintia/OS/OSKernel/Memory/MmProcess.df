@@ -1,0 +1,652 @@
+//
+// Implements memory manager support for the executive process object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALRTC.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+buffer MmSystemProcessHeader PAGESIZE
+
+fn MmProcessInitialize { sectionobject process -- ok }
+	fnsection "PAGE$text"
+
+	// initialize virtual memory related fields
+
+	auto pagedarea
+	process@ PsProcess_PagedArea + @ pagedarea!
+
+	0 pagedarea@ PsProcessPaged_MappedMMIOCount + !
+
+	0 process@ PsProcess_PageFaultCount + !
+	0 process@ PsProcess_ReFaultCount + !
+
+	pagedarea@ PsProcessPaged_VadTree + ExAvlTreeInitialize
+
+	0 process@ PsProcess_PinnedPageCount + !
+
+	0 process@ PsProcess_TrimListNext + !
+	0 process@ PsProcess_TrimListPrev + !
+
+	"VADListMutex" // name
+	KERNELMODE // mode
+	process@ PsProcess_VADListMutex + // mutex
+	KeMutexInitialize
+
+	"MappingMutex" // name
+	KERNELMODE // mode
+	process@ PsProcess_MappingMutex + // mutex
+	KeMutexInitialize
+
+	// size is 64 assuming a 32-bit address space, but this entire method of
+	// keeping track of page table commit will have to change with a 64-bit
+	// port anyway.
+
+	pagedarea@ PsProcessPaged_CommittedPageTablesBitmap + // ptr
+	64 // size
+	0 // word
+	memset
+
+	0 pagedarea@ PsProcessPaged_CommittedPageTablesCount + !
+
+	0 pagedarea@ PsProcessPaged_PTECountTableListHead + !
+
+	if (PsSystemProcess@ ~~)
+		MmSystemProcessHeader process@ PsProcess_MmHeader + !
+		HALPlatformKernelPageDirectory@ process@ KeProcess_PageDirectory + !
+	end else
+		process@ MiProcessHeaderCreate ok!
+
+		if (ok@)
+			return
+		end
+
+		process@ MiPageDirectoryAlloc ok!
+
+		if (ok@)
+			process@ MiProcessHeaderDestroy
+
+			return
+		end
+	end
+
+	process@ MiWorkingSetListInitialize ok!
+
+	if (ok@)
+		process@ MmProcessDelete
+
+		return
+	end
+
+	if (PsSystemProcess@ ~~)
+		// thats enough for the system process
+
+		return
+	end
+
+	auto okc
+
+	auto info
+	PsOSDLLInformation info!
+
+	// create mappings for OSDLL and PEB section
+
+	// map text section
+	info@ PsOSDLLInfo_TextSize + @ // length
+	info@ PsOSDLLInfo_TextVAddr + @ // startva
+	info@ PsOSDLLInfo_TextOffset + @ // sectionoffset
+	PsOSDLLFileObject@ // sectionobject
+	process@ // processobject
+	PAGEACCESS_READ PAGEACCESS_EXEC | // pageprotection
+	OSMAPFLAG_FIXEDADDRESS // flags
+	MmMapViewProcessObject ok! drop
+
+	if (ok@)
+		process@ MiWorkingSetListFree
+		process@ MiProcessUnchargePageTables
+
+		process@ MmProcessDelete
+
+		return
+	end
+
+	// map data section
+	info@ PsOSDLLInfo_DataSize + @ // length
+	info@ PsOSDLLInfo_DataVAddr + @ // startva
+	info@ PsOSDLLInfo_DataOffset + @ // sectionoffset
+	PsOSDLLFileObject@ // sectionobject
+	process@ // processobject
+	PAGEACCESS_READ PAGEACCESS_WRITECOPY | // pageprotection
+	OSMAPFLAG_FIXEDADDRESS // flags
+	MmMapViewProcessObject ok! drop
+
+	if (ok@)
+		// me when no goto
+
+		info@ PsOSDLLInfo_TextSize + @ // length
+		info@ PsOSDLLInfo_TextVAddr + @ // vaddr
+		process@ // processobject
+		MmUnmapViewProcess okc!
+
+		if (DEBUGCHECKS)
+			if (okc@)
+				okc@ "MmProcessInitialize: couldn't unmap 1 (%i)\n" KeCrash
+			end
+		end
+
+		process@ MiWorkingSetListFree
+		process@ MiProcessUnchargePageTables
+
+		process@ MmProcessDelete
+
+		return
+	end
+
+	// map bss section
+	info@ PsOSDLLInfo_BSSSize + @ // length
+	info@ PsOSDLLInfo_BSSVAddr + @ // startva
+	process@ // processobject
+	PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+	OSMAPFLAG_FIXEDADDRESS // flags
+	MmAllocateProcessObject ok! drop
+
+	if (ok@)
+		info@ PsOSDLLInfo_TextSize + @ // length
+		info@ PsOSDLLInfo_TextVAddr + @ // vaddr
+		process@ // processobject
+		MmUnmapViewProcess okc!
+
+		if (DEBUGCHECKS)
+			if (okc@)
+				okc@ "MmProcessInitialize: couldn't unmap 4 (%i)\n" KeCrash
+			end
+		end
+
+		info@ PsOSDLLInfo_DataSize + @ // length
+		info@ PsOSDLLInfo_DataVAddr + @ // vaddr
+		process@ // processobject
+		MmUnmapViewProcess okc!
+
+		if (DEBUGCHECKS)
+			if (okc@)
+				okc@ "MmProcessInitialize: couldn't unmap 5 (%i)\n" KeCrash
+			end
+		end
+
+		process@ MiWorkingSetListFree
+		process@ MiProcessUnchargePageTables
+
+		process@ MmProcessDelete
+
+		return
+	end
+
+	if (sectionobject@)
+		// map PEB
+		OSPEBSIZE // length
+		OSPEB // startva
+		0 // sectionoffset
+		sectionobject@ // sectionobject
+		process@ // processobject
+		PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+		OSMAPFLAG_FIXEDADDRESS // flags
+		MmMapViewProcessObject ok! drop
+
+		if (ok@)
+			info@ PsOSDLLInfo_TextSize + @ // length
+			info@ PsOSDLLInfo_TextVAddr + @ // vaddr
+			process@ // processobject
+			MmUnmapViewProcess okc!
+
+			if (DEBUGCHECKS)
+				if (okc@)
+					okc@ "MmProcessInitialize: couldn't unmap 6 (%i)\n" KeCrash
+				end
+			end
+
+			info@ PsOSDLLInfo_DataSize + @ // length
+			info@ PsOSDLLInfo_DataVAddr + @ // vaddr
+			process@ // processobject
+			MmUnmapViewProcess okc!
+
+			if (DEBUGCHECKS)
+				if (okc@)
+					okc@ "MmProcessInitialize: couldn't unmap 7 (%i)\n" KeCrash
+				end
+			end
+
+			info@ PsOSDLLInfo_BSSSize + @ // length
+			info@ PsOSDLLInfo_BSSVAddr + @ // vaddr
+			process@ // processobject
+			MmUnmapViewProcess okc!
+
+			if (DEBUGCHECKS)
+				if (okc@)
+					okc@ "MmProcessInitialize: couldn't unmap 8 (%i)\n" KeCrash
+				end
+			end
+
+			process@ MiWorkingSetListFree
+			process@ MiProcessUnchargePageTables
+
+			process@ MmProcessDelete
+
+			return
+		end
+	end
+end
+
+fn MiProcessPTECountGet { pri vaddr process -- ptect ok }
+	fnsection "PAGE$text"
+
+	// assumes VAD list locked
+
+	0 ok!
+
+	auto ptn
+	vaddr@ PERPAGETABLESHIFT >> MMPTECOUNTSPERTABLE / ptn!
+
+	process@ PsProcess_PagedArea + @ PsProcessPaged_PTECountTableListHead + @ ptect!
+
+	while (ptect@)
+		if (ptect@ MiPTECountTableHeader_Number + @ ptn@ ==)
+			break
+		end
+
+		ptect@ MiPTECountTableHeader_Next + @ ptect!
+	end
+
+	if (ptect@ ~~)
+		// create
+
+		MiPTECountTableHeader_SIZEOF MMPTECOUNTTABLESIZE + // bytes
+		'MmPC' // tag
+		pri@ CANBLOCK | // flags
+		MmAllocWithTag ok! ptect!
+
+		if (ok@)
+			return
+		end
+
+		process@ PsProcess_PagedArea + @ PsProcessPaged_PTECountTableListHead + @ ptect@ MiPTECountTableHeader_Next + !
+		ptn@ ptect@ MiPTECountTableHeader_Number + !
+
+		ptect@ process@ PsProcess_PagedArea + @ PsProcessPaged_PTECountTableListHead + !
+
+		ptect@ MiPTECountTableHeader_SIZEOF + // ptr
+		MMPTECOUNTTABLESIZE // size
+		0 // word
+		memset
+	end
+
+	ptect@ MiPTECountTableHeader_SIZEOF +
+	vaddr@ PERPAGETABLESHIFT >> MMPTECOUNTSPERTABLE % 1 << +
+	ptect!
+end
+
+fn MmProcessPTECountDestroy { process -- }
+	fnsection "PAGE$text"
+
+	auto ptect
+	process@ PsProcess_PagedArea + @ PsProcessPaged_PTECountTableListHead + @ ptect!
+
+	while (ptect@)
+		auto nptect
+		ptect@ MiPTECountTableHeader_Next + @ nptect!
+
+		ptect@ MmFree
+
+		nptect@ ptect!
+	end
+end
+
+fn MmProcessUninitialize { process -- }
+	fnsection "PAGE$text"
+
+	// Unmap all of the process's mappings. After this, the process is still
+	// attachable and has a fully consistent virtual memory state; its
+	// address space and other user-controlled things are just emptied. This
+	// is done as a separate step from deletion, where the rest of its virtual
+	// memory state is destroyed, so that the memory for this process is freed
+	// as early as possible upon its death; a hanging handle for the process
+	// object won't keep its entire address space alive. New mappings can't be
+	// created after this because we are holding the createdelete lock, and
+	// the process was previously marked terminated (with that lock held),
+	// which will cause all future remote mappings to fail.
+
+	KeThreadCurrent@ KeThreadIgnoreKill drop
+
+	auto ipl
+	0 // try
+	process@ // process
+	KeProcessAttach drop ipl!
+
+	// Lock the VAD list to synchronize against remote unmapping.
+
+	0 // alertable
+	process@ // processobject
+	MmVADListLock drop
+
+	// Unmap all of the VADs. This is done by unmapping the root of the VAD
+	// tree until the tree is empty (i.e. the root becomes null).
+
+	auto vad
+	process@ PsProcess_PagedArea + @
+	PsProcessPaged_VadTree + ExAvlTree_Root + ExAvlTreeNode_RightChild + @ vad!
+
+	while (vad@)
+		MiVAD_Parent vad -=
+
+		vad@ // vad
+		process@ // processobject
+		MiVADUnmap
+
+		process@ PsProcess_PagedArea + @
+		PsProcessPaged_VadTree + ExAvlTree_Root + ExAvlTreeNode_RightChild + @ vad!
+	end
+
+	if (DEBUGCHECKS)
+		if (process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @)
+			"MmProcessUninitialize: unmapped all VADs yet working set size non-zero\n" KeCrash
+		end
+	end
+
+	// We don't have to worry about synchronization with the working set
+	// trimmer here since our working set is now guaranteed to contain no
+	// pages. Thus, it doesn't need to grab any locks other than that guarding
+	// the working set itself.
+
+	process@ MmProcessPTECountDestroy
+
+	process@ MiProcessUnchargePageTables
+
+	process@ MiWorkingSetListFree
+
+	process@ MmVADListUnlock
+
+	ipl@ KeProcessDetach
+
+	KeThreadCurrent@ KeThreadAcceptKill drop
+end
+
+fn MmProcessDelete { process -- }
+	fnsection "PAGE$text"
+
+	// Destroy the rest of the process's virtual memory state.
+
+	process@ MiPageDirectoryDestroy
+	process@ MiProcessHeaderDestroy
+end
+
+fn MiProcessSwapOut { process -- }
+	// Completely purge the process's working set.
+
+	// NOTE:
+	// The process is guaranteed not to be undergoing deletion right now,
+	// since in order to get here it must have at least one thread that is
+	// alive and in a USERMODE wait, i.e. not deleting the process. If it
+	// awakes while we're doing this, we've already set the process's memory
+	// state to OUTSWAPPED, so it will be enqueued instead of being readied
+	// immediately.
+
+	// Lock the VAD list to synchronize against remote unmapping.
+
+	0 // alertable
+	process@ // processobject
+	MmVADListLock drop
+
+	// We use KeAddressSpaceSwitch instead of KeProcessAttach because we don't
+	// want to be blocked and enqueued waiting for inswap, since we ARE the
+	// guy who does the process swapping. By getting here, we know the page
+	// directory and such are still resident. The only reason we set the
+	// process field in our thread struct is so that the correct ASID is used
+	// to flush these pages in the architecture-specific layers.
+
+	process@ KeThreadCurrent@ KeThread_Process + !
+	process@ KeAddressSpaceSwitch
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	process@ MiWorkingSetSwapOut
+
+	ipl@ KeIPLLower
+
+	PsSystemProcess@ KeThreadCurrent@ KeThread_Process + !
+	PsSystemProcess@ KeAddressSpaceSwitch
+
+	process@ MmVADListUnlock
+
+	// Dereference the page directory so it can get swapped out.
+
+	process@ MiProcessHeaderDereference
+	process@ MiPageDirectoryDereference
+end
+
+fn MiProcessSwapIn { process -- }
+	// make the page directory resident again if it was swapped out.
+
+	process@ MiPageDirectoryReference
+	process@ MiProcessHeaderReference
+end
+
+fn MiProcessChargePageTables { startva endva process -- ok }
+	fnsection "PAGE$text"
+
+	// charge VM quota for page tables.
+	// assumes the caller has the VAD list mutex held.
+	// currently this will never get uncharged until the process exits.
+
+	// page tables are "stickier" than other pages so we charge kernel heap
+	// quota too to reflect that, as we do for all pages whose swapout is
+	// conditional on some relatively extraordinary circumstance (kernel stack,
+	// etc)
+
+	auto firstpt
+	startva@ PERPAGETABLESHIFT >> firstpt!
+
+	auto lastpt
+	endva@ PERPAGETABLESHIFT >> lastpt!
+
+	auto pagedarea
+	process@ PsProcess_PagedArea + @ pagedarea!
+
+	auto bmp
+	pagedarea@ PsProcessPaged_CommittedPageTablesBitmap + bmp!
+
+	auto quotablock
+	pagedarea@ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	0 ok!
+
+	while (firstpt@ lastpt@ <=)
+		if (bmp@ firstpt@ 3 >> + gb 1 firstpt@ 7 & << & ~~)
+			// bit not set, set & charge page
+
+			PAGESIZE // quota
+			quotablock@ // quotablock
+			MmQuotaBlockChargeVM ok!
+
+			if (ok@)
+				return
+			end
+
+			bmp@ firstpt@ 3 >> + gb 1 firstpt@ 7 & << |
+			bmp@ firstpt@ 3 >> + sb
+
+			1 pagedarea@ PsProcessPaged_CommittedPageTablesCount + +=
+		end
+
+		1 firstpt +=
+	end 
+end
+
+fn MiProcessUnchargePageTables { process -- }
+	fnsection "PAGE$text"
+
+	// uncharge quota for all the page tables the process committed in its
+	// lifetime.
+
+	auto pagedarea
+	process@ PsProcess_PagedArea + @ pagedarea!
+
+	pagedarea@ PsProcessPaged_CommittedPageTablesCount + @ PAGESHIFT << // quota
+	pagedarea@ PsProcessPaged_QuotaBlock + @ // quotablock
+	MmQuotaBlockUnchargeVM
+
+	pagedarea@ PsProcessPaged_CommittedPageTablesBitmap + // ptr
+	64 // size
+	0 // word
+	memset
+
+	0 pagedarea@ PsProcessPaged_CommittedPageTablesCount + !
+end
+
+fn MmProcessQuery { query process -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (process@ KeProcess_MemoryStateB + gb PROCESSSTATE_RESIDENT ~=)
+		0 query@ OSProcessInformation_WorkingSetSize + !
+	end else
+		process@ PsProcess_MmHeader + @ MiProcessHeader_WorkingSetSize + @ query@ OSProcessInformation_WorkingSetSize + !
+	end
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn MmThreadInitialize { thread -- ok }
+	fnsection "PAGE$text"
+
+	auto process
+	thread@ KeThread_Process + @ process!
+
+	0 thread@ PsThread_StackHasGuardPage + !
+
+	// allocate TEB
+
+	auto uteb
+	OSThreadEnvironmentBlock_SIZEOF // length
+	HEAPSTART // startva
+	process@ // processobject
+	ACCESS_READ ACCESS_WRITE | // pageprotection
+	0 // flags
+	MmAllocateProcessObject ok! uteb!
+
+	if (ok@)
+		return
+	end
+
+	// allocate guard page for stack
+
+	auto ustackbottom
+	OSPAGESIZE // length
+	USTACKS // startva
+	process@ // processobject
+	0 // pageprotection
+	0 // flags
+	MmAllocateProcessObject ok! ustackbottom!
+
+	while (1)
+		if (ok@ ~~)
+			// try to allocate the stack right after the guard page
+
+			USTACKSZ // length
+			ustackbottom@ OSPAGESIZE + // startva
+			process@ // processobject
+			ACCESS_READ ACCESS_WRITE | // pageprotection
+			OSMAPFLAG_FIXEDADDRESS // flags
+			MmAllocateProcessObject ok! drop
+
+			if (ok@)
+				// didn't work. deallocate guard page and retry anywhere
+
+				OSPAGESIZE // length
+				ustackbottom@ // vaddr
+				process@ // processobject
+				MmUnmapViewProcess drop
+
+				continue
+			end
+
+			1 thread@ PsThread_StackHasGuardPage + !
+
+			OSPAGESIZE ustackbottom +=
+		end else
+			// something broke, just allocate the stack anywhere
+
+			USTACKSZ // length
+			USTACKS // startva
+			process@ // processobject
+			ACCESS_READ ACCESS_WRITE | // pageprotection
+			0 // flags
+			MmAllocateProcessObject ok! ustackbottom!
+		end
+
+		break
+	end
+
+	if (ok@)
+		// failed, deallocate TEB
+
+		OSThreadEnvironmentBlock_SIZEOF // length
+		uteb@ // vaddr
+		process@ // processobject
+		MmUnmapViewProcess drop
+
+		return
+	end
+
+	ustackbottom@ thread@ PsThread_StackBottom + !
+	ustackbottom@ USTACKSZ + thread@ PsThread_StackTop + !
+
+	uteb@ thread@ PsThread_UTEB + !
+end
+
+fn MmThreadUninitialize { thread -- }
+	fnsection "PAGE$text"
+
+	auto process
+	thread@ KeThread_Process + @ process!
+
+	// deallocate TEB
+	OSThreadEnvironmentBlock_SIZEOF // length
+	thread@ PsThread_UTEB + @ // vaddr
+	process@ // processobject
+	MmUnmapViewProcess drop
+
+	// unmap usermode stack
+
+	if (thread@ PsThread_StackHasGuardPage + @)
+		PAGESIZE // length
+		thread@ PsThread_StackBottom + @ PAGESIZE - // vaddr
+		process@ // processobject
+		MmUnmapViewProcess drop
+	end
+
+	USTACKSZ // length
+	thread@ PsThread_StackBottom + @ // vaddr
+	process@ // processobject
+	MmUnmapViewProcess drop
+end

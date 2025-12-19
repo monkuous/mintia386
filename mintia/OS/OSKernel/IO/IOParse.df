@@ -1,0 +1,231 @@
+//
+// Implements the object manager parse routine for device and file objects.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+fn (ObTypeParseFunction) IOParse { flags path initialobject process -- reparsepath object ok }
+	fnsection "PAGE$text"
+
+	0 reparsepath!
+
+	auto type
+	initialobject@ ObObjectType type!
+
+	auto fcb
+	auto mount
+	auto parsefunc
+
+	if (type@ IODeviceTypeObject@ ==)
+		0 // locked
+		0 // failmounted
+		initialobject@ // deviceobject
+		IODeviceReferenceAttached ok! initialobject!
+
+		if (ok@)
+			return
+		end
+
+		// we now have an extra reference to the initialobject that we must be
+		// sure to release.
+
+		initialobject@ IODevice_FileControlBlock + @ fcb!
+
+		if (path@ gb ~~)
+			// no remaining path means we are opening the device itself.
+			// create a file object for the device.
+
+			// TODO return an error if this is a disk image proxy,
+			// since this would be a bit of a nonsensical operation;
+			// caller should open the disk image by its actual
+			// path.
+
+			flags@ // flags
+			initialobject@ // deviceobject
+			IODeviceCreateFileObject ok! object!
+		end else
+			path@ // openedpath
+			flags@ // flags
+			0 // permissions
+			0 // fcb
+			IOFileCreateObject ok! object!
+
+			if (ok@)
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				return
+			end
+
+			// remaining path, call mounted filesystem (if any) to resolve it
+
+			// we only need to do this check here, where we're
+			// going from a device object to a file object on the filesystem,
+			// and not below, where we're going from a file object to a file
+			// object, because the ref operation implied by having that file
+			// object precludes nasty stuff from happening anyway.
+
+			auto fcbp
+			fcb@ IOFileControlBlock_Paged + @ fcbp!
+
+			1 // alertable
+			fcb@ // fcb
+			IOFileControlBlockLockShared ok!
+
+			if (ok@)
+				object@ ObObjectDeallocate
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				return
+			end
+
+			if (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ==)
+				fcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_Parse + @ parsefunc!
+
+				object@ // fileobject
+				0 // initialfcb
+				process@ // process
+				parsefunc@ IODispatchParseFunction ok! reparsepath!
+
+				fcb@ IOFileControlBlockUnlock
+
+				if (ok@)
+					object@ ObObjectDeallocate
+				end
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				return
+			end
+
+			if (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_BLOCKDEVICE ~=)
+				fcb@ IOFileControlBlockUnlock
+
+				object@ ObObjectDeallocate
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				STATUS_NOT_SUPPORTED ok!
+
+				return
+			end
+
+			auto fsdevobj
+			fcbp@ IOFileControlBlockPaged_DeviceObject + @ fsdevobj!
+
+			fsdevobj@ IODevice_RelevantMount + @ mount!
+
+			if (mount@ ~~)
+				fcb@ IOFileControlBlockUnlock
+
+				object@ ObObjectDeallocate
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				STATUS_NOT_A_DIRECTORY ok!
+
+				return
+			end
+
+			auto rootfcb
+			mount@ IOMount_RootFCB + @ rootfcb!
+
+			rootfcb@ IOFileControlBlock_Paged + @ fcbp!
+
+			if (fcbp@ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+				fcb@ IOFileControlBlockUnlock
+
+				object@ ObObjectDeallocate
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				STATUS_NOT_A_DIRECTORY ok!
+
+				return
+			end
+
+			rootfcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_Parse + @ parsefunc!
+
+			if (parsefunc@ ~~)
+				fcb@ IOFileControlBlockUnlock
+
+				object@ ObObjectDeallocate
+
+				initialobject@ ObObjectDereferenceByPointer drop
+
+				STATUS_NOT_A_DIRECTORY ok!
+
+				return
+			end
+
+			object@ // fileobject
+			rootfcb@ // initialfcb
+			process@ // process
+			parsefunc@ IODispatchParseFunction ok! reparsepath!
+
+			if (ok@)
+				object@ ObObjectDeallocate
+			end
+
+			fcb@ IOFileControlBlockUnlock
+		end
+
+		initialobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end elseif (type@ IOFileTypeObject@ ==)
+		// we need to call into the filesystem whether there is remaining path
+		// or not, in order to open this new file object correctly
+
+		initialobject@ IOFile_FileControlBlock + @ fcb!
+
+		fcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_Parse + @ parsefunc!
+
+		if (parsefunc@ ~~)
+			STATUS_NOT_A_DIRECTORY ok!
+
+			return
+		end
+
+		path@ // openedpath
+		flags@ // flags
+		0 // permissions
+		0 // fcb
+		IOFileCreateObject ok! object!
+
+		if (ok@)
+			return
+		end
+
+		object@ // fileobject
+		fcb@ // initialfcb
+		process@ // process
+		parsefunc@ IODispatchParseFunction ok! reparsepath!
+	end elseif (DEBUGCHECKS)
+		"IOParse: unknown type\n" KeCrash
+	end
+end

@@ -1,0 +1,1276 @@
+//
+// Implements the system page fault handler.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALInterrupt.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+var MmPageFaultCount 0
+public MmPageFaultCount
+
+fn MmPageFault { writing badaddr trapframe -- handled }
+	if (DEBUGCHECKS)
+		if (KeThreadCurrent@ KeThread_PriorityB + gb PRIORITY_IDLE ==)
+			// The idle thread must never block. This is an assumption made in
+			// the thread dispatcher.
+
+			"MmPageFault: idle thread took a page fault\n" KeCrash
+		end
+	end
+
+	if (KeIPLCurrentGet IPLDPC >=)
+		// For synchronization and anti-deadlock reasons, page faults are only
+		// allowed at <=IPLAPC. Immediately return to the architecture-
+		// -specific handler with a status indicating that the page fault
+		// wasn't handled.
+
+		0 handled!
+
+		return
+	end
+
+	auto signal
+	0 signal!
+
+	auto process
+	KeProcessCurrent process!
+
+	auto kernelmapping
+	0 kernelmapping!
+
+	// Determine some of the obvious cases for where the faulting address
+	// lies in the address space.
+
+	if (badaddr@ PAGESIZE <)
+		// The zeroth page is always forbidden to make nullptr references more
+		// easily caught and debugged.
+
+		OSSIGNAL_SEGV signal!
+	end else
+		// Check whose fault this is.
+
+		if (trapframe@ HALCPUIsUserTrapFrame)
+			// The trapframe indicates the fault occurred in usermode.
+
+			if (badaddr@ MMHIGHESTUSERADDRESS >)
+				// The address was outside of userspace, and this was a user
+				// fault, so send OSSIGNAL_SEGV.
+
+				OSSIGNAL_SEGV signal!
+			end
+		end elseif (badaddr@ MMLOWESTSYSTEMADDRESS >=)
+			// The trapframe indicates the fault occurred in kernel mode, and
+			// the address was in kernel space. This may still be a fault on
+			// "behalf" of a user process if it occurred within the linear
+			// page table mapping, so check that here.
+
+			if (badaddr@ PAGETABLE < badaddr@ SYSPAGETABLE >= ||)
+				// The address is either lower or greater than the user page
+				// table mapping, so this is a true bona fide kernel fault, on
+				// either paged pool or paged kernel code.
+
+				PsSystemProcess@ process!
+				1 kernelmapping!
+			end
+		end
+	end
+
+	if (signal@ ~~)
+		// It's too hard to deal with the faulting thread being killed within
+		// the page fault handling code, so ignore all termination and
+		// signals.
+
+		// Raise IPL to IPLAPC in order to prevent the delivery of completion
+		// APCs while handling this page fault.
+
+		auto ipl
+		IPLAPC KeIPLRaise ipl!
+
+		STATUS_REFAULT signal!
+
+		0 // alertable
+		process@ // processobject
+		MmVADListLock drop
+
+		while (signal@ STATUS_REFAULT ==)
+			if (process@ PsSystemProcess@ ==
+				KeThreadCurrent@ KeThread_PriorityB + gb PRIORITY_LOWREALTIME >= ||)
+
+				if (process@ PsProcess_ReFaultCount + @ 0xFFF & 0x300 ==)
+					// If this thread has refaulted more than 10 times, then
+					// the process is probably stuck in a situation where its
+					// working set has become a revolving door of death. If we
+					// don't sleep and allow the working set trimmer to do some
+					// work, it may be stuck in this situation forever. NOTE that
+					// this is a very rare occurrence and only happens with
+					// realtime priority threads (whose priority is greater than
+					// that of the working set trimmer) in situations of prolonged
+					// extreme memory pressure.
+
+					process@ MmVADListUnlock
+
+					ipl@ KeIPLLower
+
+					100 // ms
+					KERNELMODE // waitmode
+					0 // alertable
+					KeThreadSleep drop
+
+					IPLAPC KeIPLRaise ipl!
+
+					0 // alertable
+					process@ // processobject
+					MmVADListLock drop
+				end
+			end
+
+			1 process@ PsProcess_ReFaultCount + +=
+
+			// Call MiSatisfyFault to handle the fault. It may return a status
+			// of STATUS_REFAULT instead of a signal value, which indicates we
+			// need to loop and try the whole fault again. We could simply
+			// return all the way back out of the page fault and fault again,
+			// but instead we avoid the overhead of exception handling, and
+			// can also avoid the overhead of re-locking the VAD list mutex.
+			// This is useful for several reasons:
+			//
+			//  o The page was invalid, and this was a write fault. The page
+			//    was made valid, but not writable, and to avoid the overhead
+			//    of a second dirty fault, we just loop here.
+			//
+			//  o There was a "collided fault", in which we faulted on the
+			//    exact same page as another thread in this process, or as
+			//    another thread in the system (if faulting on system space),
+			//    and had to block on the first thread completing the I/O.
+			//    There's no immediately decent way to hold any certainty on
+			//    the state of the PTE after that occurs without repeating all
+			//    of this processing, so that's what we do.
+			//
+			//  o Something forced us to block for some other reason, which
+			//    has invalidated all of the crunching we did on the vm
+			//    structures, so we have to repeat all of that (the above is
+			//    one case of this).
+			//
+			//  o Any other reason that appears (non-exhaustive list).
+
+			kernelmapping@ // kernelmapping
+			writing@ // writing
+			badaddr@ // vaddr
+			MiSatisfyFault signal!
+		end
+
+		process@ MmVADListUnlock
+
+		ipl@ KeIPLLower
+	end
+
+	if (signal@ STATUS_FAULT_ERROR ==)
+		// A system error happened. Tell the upper level code that the page
+		// fault turned nasty and cause a system crash.
+
+		0 handled!
+	end elseif (signal@)
+		// The page fault was handled and it was determined that the address
+		// was not mapped. Send a signal to the process, or cause an early
+		// return from KeSafeCopy*.
+
+		1 handled!
+
+		if (trapframe@ HALCPUIsUserTrapFrame)
+			// The trapframe indicates that this fault occurred in usermode,
+			// so send the signal.
+
+			if (signal@ z<)
+				// the signal is actually a status code.
+				// stash the status code where the thread can find it and send
+				// an OSSIGNAL_IOERR.
+
+				signal@ KeThreadCurrent@ PsThread_FileCreationPermissions + !
+
+				OSSIGNAL_IOERR signal!
+			end else
+				// the signal is a segfault. indicate to the thread whether it
+				// is a read or write fault.
+
+				if (writing@)
+					STATUS_FAULT_WRITE KeThreadCurrent@ PsThread_FileCreationPermissions + !
+				end else
+					STATUS_FAULT KeThreadCurrent@ PsThread_FileCreationPermissions + !
+				end
+			end
+
+			if (signal@ OSSIGNAL_KILL ==)
+				// The signal was OSSIGNAL_KILL, so send it to the entire
+				// process instead of just the handling thread.
+
+				OSSIGNAL_KILL // signal
+				KeProcessCurrent // process
+				KeProcessSignal drop
+			end else
+				// Send it to the handling (current) thread.
+
+				signal@ // signal
+				KeThreadCurrent@ // thread
+				KeThreadSignal drop
+			end
+		end else
+			// The trapframe indicates that the fault occurred in kernel mode,
+			// so cause a return from KeSafeCopy*.
+
+			auto abort
+			KeThreadCurrent@ KeThread_SafeAccessAbort + @ abort!
+
+			if (abort@ ~~)
+				// There was no abort routine, meaning this was a spurious
+				// fault somewhere wacky. Tell the upper level code about this
+				// and cause a system crash.
+
+				0 handled!
+			end else
+				// We thought this might happen. Redirect the trapframe to
+				// cause a direct return from the KeSafeCopy* with an error
+				// status.
+
+				if (signal@ z>)
+					if (writing@)
+						STATUS_FAULT_WRITE // ok
+						abort@ // abort
+						trapframe@ // tf
+						HALCPUTrapFrameAbort
+					end else
+						STATUS_FAULT // ok
+						abort@ // abort
+						trapframe@ // tf
+						HALCPUTrapFrameAbort
+					end
+				end else
+					signal@ // ok
+					abort@ // abort
+					trapframe@ // tf
+					HALCPUTrapFrameAbort
+				end
+			end
+		end
+	end else
+		1 MmPageFaultCount KeInterlockedIncrement drop
+
+		// The page fault was handled successfully.
+
+		1 handled!
+	end
+end
+
+fn MmThrottle { -- }
+	// Determine whether to throttle the thread as punishment for creating too
+	// many modified pages. This helps prevent the system from becoming
+	// inundated with modified pages, which are unreclaimable until they are
+	// written out to their backing store.
+
+	if (IOPageFileCount@ ~~)
+		// There is no pagefile, so this is probably early boot and there's
+		// nowhere for these modified pages to go anyway. Don't throttle or we
+		// might be here forever.
+
+		return
+	end
+
+	if (KeThreadCurrent@ PsThread_MemoryPrivilegedCount + @)
+		return
+	end
+
+	auto process
+	KeProcessCurrent process!
+
+	auto phdr
+	process@ PsProcess_MmHeader + @ phdr!
+
+	if (phdr@ MiProcessHeader_ModifiedPageCount + @ MMMODIFIEDPAGETHROTTLE >=)
+		// The current process has generated more than its guaranteed
+		// count of modified pages.
+
+		if (MmAvailablePageCount@ PAGESHIFT << 512 1024 * <)
+			// There are fewer than 512KB of available pages.
+
+			if (MmModifiedPageCount@ MmModifiedPageMaximum@ 50 + >)
+				// The modified page list is 50 above the maximum.
+
+				if (KeThreadCurrent@ KeThread_PriorityB + gb PRIORITY_RESPONSIVE >=)
+					50 // ms
+					KERNELMODE // waitmode
+					0 // alertable
+					KeThreadSleep drop
+				end else
+					500 // ms
+					KERNELMODE // waitmode
+					0 // alertable
+					KeThreadSleep drop
+				end
+
+				// This thread has paid its toll of blood for its sins, so
+				// reset the modified page count to allow another round of
+				// modified page generation.
+
+				0 phdr@ MiProcessHeader_ModifiedPageCount + !
+			end
+		end
+	end
+end
+
+fn MiSatisfyFault { kernelmapping writing vaddr -- signal }
+	0 signal!
+
+	auto ok
+	auto pteaddr
+	auto flags
+	auto pfdbe
+	auto wsleptr
+	auto wsli
+	auto ptpfdbe
+	auto process
+	auto rs
+
+	0 ok!
+
+	if (kernelmapping@ ~~)
+		// This fault is on behalf of a user process.
+
+		KeProcessCurrent process!
+
+		// Throttle the thread if needed.
+
+		MmThrottle
+
+		// Pin the corresponding PTE into the process's working set so that it
+		// is guaranteed to be present for the duration of fault handling.
+		// This is necessary because the page tables themselves are demand-
+		// -paged within a linear mapping.
+
+		vaddr@ MiPTEPin pteaddr! ptpfdbe!
+
+		if (ptpfdbe@ ~~)
+			-1 ok!
+		end
+	end else
+		// This fault is on behalf of the system. System page tables cannot be
+		// paged, so we don't pin the PTE.
+
+		PsSystemProcess@ process!
+
+		0 ptpfdbe!
+
+		vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+		if (vaddr@ VIEWSPACE >= vaddr@ VIEWSPACEEND < &&)
+			MmThrottle
+		end
+	end
+
+	// Raise IPL to block out page reclamation, working set trimming, etc. and
+	// examine the PTE.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (ok@ ~~)
+		pteaddr@ // pteaddr
+		MiPTEInterpret ok! flags! drop
+
+		if (ok@ ~~)
+			// Lower IPL since the PTE is valid.
+
+			ipl@ KeIPLLower
+
+			// The PTE flags indicate it is valid, so this is either a write
+			// fault or something else.
+
+			if (flags@ PTE_W &)
+				// The PTE is already writable, so there is definitely nothing
+				// else we need to do.
+
+				if (ptpfdbe@)
+					vaddr@ ptpfdbe@ MiPTEUnpin
+				end
+
+				return
+			end elseif (writing@)
+				// The PTE is not writable, and this is a write fault, so call
+				// MiWriteFault.
+
+				pteaddr@ // pteaddr
+				vaddr@ // vaddr
+				process@ // process
+				MiWriteFault signal!
+
+				if (ptpfdbe@)
+					vaddr@ ptpfdbe@ MiPTEUnpin
+				end
+
+				return
+			end else
+				// The PTE is valid, and this wasn't a write fault, so there's
+				// no work necessary. Just return.
+
+				if (ptpfdbe@)
+					vaddr@ ptpfdbe@ MiPTEUnpin
+				end
+
+				return
+			end
+		end else
+			// Capture the contents of the PTE into the flags variable.
+			// IPL IS STILL RAISED HERE.
+
+			pteaddr@@ flags!
+
+			if (flags@ MiPTEIsZero)
+				// The PTE is zero, which means this is a shared mapping or
+				// a private mapping that has never been faulted on before.
+				// This requires the long path through MiNormalFault.
+
+				ipl@ KeIPLLower
+			end else
+				// This is a TRANSITION or INSWAP private anon page. The first
+				// state occurs when a private page is trimmed from a process
+				// working set and is placed on either the standby or modified
+				// list. The second state occurs when a private page that was
+				// in the first state has been cleaned and reclaimed.
+				//
+				// TRANSITION PTEs can also occur when a page is currently
+				// being read in by another thread. When this happens, this is
+				// called a "collided" fault and we have to wait for the first
+				// thread to finish reading it in. This can appear for either
+				// shared or private pages (if another thread in this process
+				// is the first in the system to read that shared page).
+
+				// Wait for a page to be available to avoid starving the
+				// system.
+
+				auto waited
+				process@ // process
+				CANBLOCK // priority
+				MmPageWait drop waited!
+
+				if (waited@)
+					// MmPageWait dropped IPL and waited, so back out of the
+					// page fault with a STATUS_REFAULT since anything could
+					// have changed while we were blocked.
+
+					ipl@ KeIPLLower
+
+					if (ptpfdbe@)
+						vaddr@ ptpfdbe@ MiPTEUnpin
+					end
+
+					STATUS_REFAULT signal!
+
+					return
+				end
+
+				// At this point we now have a guarantee from the system that
+				// we can allocate one (and only one) page frame without
+				// blocking this thread or starving the system to death.
+
+				// Allocate a working set entry to track this virtual page.
+
+				process@ // process
+				MiWorkingSetEntryReserve ok! wsleptr! wsli!
+
+				if (ok@)
+					// Failed to acquire a working set entry. Back out of the
+					// page fault with an OSSIGNAL_KILL.
+
+					ipl@ KeIPLLower
+
+					if (ptpfdbe@)
+						vaddr@ ptpfdbe@ MiPTEUnpin
+					end
+
+					OSSIGNAL_KILL signal!
+
+					return
+				end
+
+				// Call MiAnonymousPageReferenceByPTE to crunch on the PTE and
+				// hopefully give us a valid one.
+
+				if (kernelmapping@)
+					PTE_KERNEL_DEMANDZERO // dzpte
+					MMEVICTFLAG_PRIVATE // evictflag
+					ptpfdbe@ // refpfdbe
+					process@ // process
+					SYSTEMSPACE // pri
+					vaddr@ // vaddr
+					pteaddr@ // pteaddr
+					-1 // localpteaddr
+					MiAnonymousPageReferenceByPTE ok! pfdbe!
+				end else
+					-1 // dzpte
+					MMEVICTFLAG_PRIVATE // evictflag
+					ptpfdbe@ // refpfdbe
+					process@ // process
+					0 // pri
+					vaddr@ // vaddr
+					pteaddr@ // pteaddr
+					-1 // localpteaddr
+					MiAnonymousPageReferenceByPTE ok! pfdbe!
+				end
+
+				if (ok@)
+					// There was an abnormal status of some kind (such as a
+					// STATUS_REFAULT), so free the working set entry.
+
+					wsli@ // wsli
+					wsleptr@ // wsleptr
+					process@ // process
+					MiWorkingSetEntryFree
+				end else
+					// We successfully made the PTE valid, so insert this
+					// virtual page into the working set.
+
+					vaddr@ PAGENUMBERMASK & // vaddr
+					wsleptr@ // wsleptr
+					process@ // process
+					MiWorkingSetEntryInsert
+				end
+
+				ipl@ KeIPLLower
+
+				if (ptpfdbe@)
+					vaddr@ ptpfdbe@ MiPTEUnpin
+				end
+
+				if (ok@)
+					ok@ signal!
+				end elseif (writing@)
+					// We made the PTE valid, but we didn't process the dirty
+					// bit, so refault since this is a write fault. This is an
+					// optimization to avoid multiple trips through the
+					// exception handler when there's a dirty fault right
+					// after faulting a page in.
+
+					STATUS_REFAULT signal!
+				end
+
+				return
+			end
+		end
+	end else
+		ipl@ KeIPLLower
+	end
+
+	if (kernelmapping@)
+		if (vaddr@ VIEWSPACE < vaddr@ POOLSPACE POOLSIZE + >= ||)
+			// This kernel fault lays outside POOLSPACE and we've determined
+			// above that the PTE wasn't pre-built (i.e. paged code or pool).
+			// This is an error.
+
+			STATUS_FAULT_ERROR signal!
+
+			return
+		end
+	end
+
+	// We've determined that the PTE is either zero or doesn't exist, so go
+	// forth and either create a private page or locate a shared page
+	// depending on what kind of mapping this is.
+
+	vaddr@ // vaddr
+	process@ // process
+	MiNormalFault signal!
+
+	if (ptpfdbe@)
+		vaddr@ ptpfdbe@ MiPTEUnpin
+	end
+
+	if (signal@ ~~)
+		if (writing@)
+			// We made the PTE valid, but we didn't process the dirty
+			// bit, so refault since this is a write fault. This is an
+			// optimization to avoid multiple trips through the
+			// exception handler when there's a dirty fault right
+			// after faulting a page in.
+
+			STATUS_REFAULT signal!
+		end
+	end
+end
+
+fn MiFaultParameters { vaddr process -- offset object vad ok }
+	// Look up the VAD that maps the given virtual address and capture some
+	// important information out of it.
+
+	vaddr@ // vaddr
+	0 // length
+	0 // mustbestart
+	process@ // processobject
+	MiVADFind ok! vad!
+
+	if (ok@)
+		return
+	end
+
+	if (vaddr@ vad@ MiVAD_FurthestExtentMapped + @ >)
+		vaddr@ PAGENUMBERMASK & vad@ MiVAD_FurthestExtentMapped + !
+	end
+
+	vad@ MiVAD_MappedObject + @ object!
+	vaddr@ vad@ MiVAD_StartVA + @ - vad@ MiVAD_OffsetInSection + @ + offset!
+end
+
+fn MiNormalFault { vaddr process -- signal }
+	0 signal!
+
+	auto offset
+	auto object
+	auto vad
+	auto flags
+	auto pteaddr
+	auto wsli
+	auto wsleptr
+
+	auto kernelmapping
+	process@ PsSystemProcess@ == kernelmapping!
+
+	auto cache
+	vaddr@ VIEWSPACE >= vaddr@ VIEWSPACEEND < && cache!
+
+	auto capturedfcb
+
+	if (cache@)
+		// This address lies within the viewcache space. Since this space
+		// consists of equally sized regions tiled across about 8MB, we can
+		// use a very efficient direct array lookup to figure out what file is
+		// mapped here.
+		//
+		// This structure is not actually a VAD, it is a viewcache BCB.
+
+		[vaddr@ VIEWSPACE - FILEVIEWSHIFT >>]MmBufferMappings@ vad!
+
+		if (vad@ ~~)
+			// No file is mapped here. Cause a system crash since this isn't
+			// something that can happen if everything is working correctly.
+
+			STATUS_FAULT_ERROR signal!
+
+			return
+		end
+
+		-1 object!
+		vad@ VcBuffer_FileControlBlock + @ capturedfcb!
+		vaddr@ vad@ VcBuffer_WindowAddress + @ - vad@ VcBuffer_FileOffset + @ + offset!
+		MMVADFLAG_FILE flags!
+
+		0 signal!
+	end else
+		// This address doesn't lie within the viewcache space, so it must be
+		// mapped by a VAD. Look that up now.
+
+		vaddr@ // vaddr
+		process@ // process
+		MiFaultParameters signal! vad! object! offset!
+
+		if (signal@)
+			// No VAD found, cause a segfault.
+
+			OSSIGNAL_SEGV signal!
+
+			return
+		end
+
+		if (vad@ MiVAD_PageProtection + @ ~~)
+			// The VAD maps a guard page, cause a segfault.
+
+			OSSIGNAL_SEGV signal!
+
+			return
+		end
+
+		vad@ MiVAD_Flags + @ flags!
+
+		if (flags@ MMVADFLAG_FILE &)
+			object@ IOFile_FileControlBlock + @ capturedfcb!
+
+			if (capturedfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_CHARDEVICE ==)
+				// This is a mapped character device, so do special processing
+				// for that in MiSatisfyCharFault.
+
+				vaddr@ // vaddr
+				process@ // process
+				object@ // fileobject
+				offset@ // offset
+				vad@ // vad
+				MiSatisfyCharFault signal!
+
+				return
+			end
+		end
+	end
+
+	if (kernelmapping@ ~~)
+		// This is a user mapping, so increment the PTE count on the page
+		// table (and maybe create it if it doesn't exist).
+
+		vaddr@ MiPTECreate signal! pteaddr!
+
+		if (signal@)
+			OSSIGNAL_KILL signal!
+
+			return
+		end
+	end else
+		// This is a system fault. The system page tables are created at boot
+		// and shared among the user processes (to map the higher half), so we
+		// don't need to call MiPTECreate since they're permanent and already
+		// exist.
+
+		vaddr@ MmVirtualtoPTEAddress pteaddr!
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	// Wait for a page to be available to avoid starving the
+	// system.
+
+	auto waited
+	process@ // process
+	CANBLOCK // priority
+	MmPageWait drop waited!
+
+	if (waited@)
+		// MmPageWait dropped IPL and waited, so back out of the
+		// page fault with a STATUS_REFAULT since anything could
+		// have changed while we were blocked.
+
+		ipl@ KeIPLLower
+
+		if (kernelmapping@ ~~)
+			1 // deref
+			pteaddr@ // pteaddr
+			MiPTEDelete
+		end
+
+		STATUS_REFAULT signal!
+
+		return
+	end
+
+	// At this point we now have a guarantee from the system that
+	// we can allocate one (and only one) page frame without
+	// blocking this thread or starving the system to death.
+
+	// Allocate a working set entry to track this virtual page.
+
+	process@ MiWorkingSetEntryReserve signal! wsleptr! wsli!
+
+	if (signal@)
+		// Failed to acquire a working set entry. Back out of the
+		// page fault with an OSSIGNAL_KILL.
+
+		ipl@ KeIPLLower
+
+		if (kernelmapping@ ~~)
+			1 // deref
+			pteaddr@ // pteaddr
+			MiPTEDelete
+		end
+
+		OSSIGNAL_KILL signal!
+
+		return
+	end
+
+	if (object@ ~~)
+		// There's no associated mapped object, so this must be a private anon
+		// page fault.
+
+		process@ // process
+		vaddr@ // vaddr
+		pteaddr@ // pteaddr
+		MiSatisfyPrivatePageFault signal!
+	end elseif (flags@ MMVADFLAG_FILE &)
+		// There's a file object, so this is a shared file page fault.
+
+		process@ // process
+		capturedfcb@ // fcb
+		offset@ // offset
+		pteaddr@ // pteaddr
+		MiSatisfyFileFault signal!
+	end else
+		// There's a section object, so this is a shared anon page fault.
+
+		vaddr@ // vaddr
+		process@ // process
+		object@ // section
+		offset@ // offset
+		pteaddr@ // pteaddr
+		MiSatisfyAnonFault signal!
+	end
+
+	if (signal@)
+		// There was an abnormal status of some kind (such as a
+		// STATUS_REFAULT), so free the working set entry.
+
+		wsli@ // wsli
+		wsleptr@ // wsleptr
+		process@ // process
+		MiWorkingSetEntryFree
+	end else
+		// Make the PTE valid and insert this virtual page into the working
+		// set.
+
+		vaddr@ PAGENUMBERMASK & // vaddr
+		wsleptr@ // wsleptr
+		process@ // process
+		MiWorkingSetEntryInsert
+	end
+
+	ipl@ KeIPLLower
+
+	if (signal@)
+		// Something abnormal happened so delete the PTE we just created.
+		// (aka, decrement the PTE count on the page table).
+
+		if (kernelmapping@ ~~)
+			1 // deref
+			pteaddr@ // pteaddr
+			MiPTEDelete
+		end
+
+		return
+	end
+end
+
+fn MiSatisfyCharFault { vaddr process fileobject offset vad -- ok }
+	// Satisfy a mapped character device fault. This is the codepath visited
+	// by i.e. framebuffer mappings that are accessed for the first time.
+
+	auto fcb
+	fileobject@ IOFile_FileControlBlock + @ fcb!
+
+	// Capture the GetPageAddress IO dispatch function from the FCB.
+
+	auto getpagefunc
+	fcb@ IOFileControlBlock_DispatchTable + @ IODispatchTable_GetPageAddress + @ getpagefunc!
+
+	if (DEBUGCHECKS)
+		if (getpagefunc@ ~~)
+			"MiSatisfyCharFault: no GetPageAddress\n" KeCrash
+		end
+	end
+
+	// Call the GetPageAddress function to acquire the physical address at
+	// this offset.
+
+	auto phyaddr
+	offset@ // offset
+	fcb@ // fcb
+	getpagefunc@ IODispatchGetPageAddressFunction ok! phyaddr!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			ok@ "MiSatisfyCharFault: failed to get page address (%i)\n" KeCrash
+		end
+	end
+
+	// Build the platform-independent PTE flags to map this page with.
+
+	auto flags
+	PTE_V flags!
+
+	if (vad@ MiVAD_PageProtection + @ PAGEACCESS_WRITE &)
+		PTE_W flags |=
+	end
+
+	if (vad@ MiVAD_PageProtection + @ PAGEACCESS_NONCACHED &)
+		PTE_NC flags |=
+	end
+
+	// Create the PTE and map this page in. Character device pages are not
+	// tracked in the process working set and won't be unmapped until the
+	// entire region is explicitly unmapped.
+
+	if (process@ PsSystemProcess@ ~=)
+		auto pteaddr
+		vaddr@ // vaddr
+		MiPTECreate ok! pteaddr!
+
+		if (ok@)
+			return
+		end
+	end else
+		vaddr@ // vaddr
+		MmVirtualtoPTEAddress pteaddr!
+	end
+
+	phyaddr@ // phyaddr
+	flags@ // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate drop drop
+end
+
+fn MiSatisfyFileFault { process fcb offset pteaddr -- ok }
+	// This is a shared file page fault. Call into the page cache to acquire
+	// a physical address for this file page frame.
+
+	auto kflags
+	0 kflags!
+
+	if (process@ PsSystemProcess@ ==)
+		IOKFLAG_SYSSPC kflags |=
+	end
+
+	auto pfdbe
+	pteaddr@ // localpteaddr
+	0 // flags
+	kflags@ // kflags
+	offset@ PAGENUMBERMASK & // offset
+	fcb@ // fcb
+	IOCachePageRead ok! pfdbe!
+
+	if (ok@)
+		return
+	end
+
+	if (process@ PsSystemProcess@ ==)
+		// Shared system pages are assumed to be from the viewcache.
+
+		1 MmViewCachePageCount +=
+	end
+
+	pfdbe@ MmPFDBEToPhysicalAddress // phyaddr
+	PTE_V // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate drop drop
+end
+
+fn MiSatisfyAnonFault { vaddr process section offset pteaddr -- ok }
+	// This is a shared anonymous page fault. Call into the section object
+	// support code to acquire a physical address for this anon page frame.
+
+	auto pri
+	0 pri!
+
+	if (process@ PsSystemProcess@ ==)
+		SYSTEMSPACE pri!
+	end
+
+	auto pfdbe
+	pteaddr@ // localpteaddr
+	pri@ // pri
+	offset@ // sectionoffset
+	section@ // sectionobject
+	MiSectionPageGet ok! pfdbe!
+
+	if (ok@)
+		return
+	end
+
+	if (process@ PsSystemProcess@ ==)
+		// Shared system pages are assumed to be from the viewcache.
+
+		1 MmViewCachePageCount +=
+	end
+
+	pfdbe@ MmPFDBEToPhysicalAddress // phyaddr
+	PTE_V // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate drop drop
+end
+
+fn MiSatisfyPrivatePageFault { process vaddr pteaddr -- ok }
+	// This is a private page fault. Call MiAnonymousPageReferenceByPTE.
+
+	SWAPPTE_DEMANDZERO // dzpte
+	MMEVICTFLAG_PRIVATE // evictflag
+	0 // refpfdbe
+	process@ // process
+	0 // pri
+	vaddr@ // vaddr
+	pteaddr@ // pteaddr
+	0 // localpteaddr
+	MiAnonymousPageReferenceByPTE ok! drop
+end
+
+fn MiWriteFault { pteaddr vaddr process -- signal }
+	// A write fault has occurred to a PTE that was valid but did not allow
+	// writes.
+	//
+	// This is one of the following:
+	// - Copy-On-Write fault
+	// - Dirty fault
+	// - Access violation
+	//
+	// We have to find out which one.
+
+	0 signal!
+
+	auto vad
+	0 vad!
+
+	auto pageprot
+	0 pageprot!
+
+	// Determine the characteristics of this address.
+
+	if (process@ PsSystemProcess@ ==)
+		// This is a kernel fault, so determine if it's in the viewcache.
+
+		if (vaddr@ VIEWSPACE >= vaddr@ VIEWSPACEEND < &&)
+			// It is the viewcache. We already know the properties of the page
+			// so we don't need to look up the VAD list or lock that mutex.
+			// Guaranteed not to be mapped COW; since that makes no sense,
+			// so this must be a dirty fault.
+
+			0 // checked
+			pteaddr@ // pteaddr
+			MiDirtyFault signal!
+
+			return
+		end
+	end
+
+	// First check if this is a private page in order to determine if we
+	// need to look up the VAD or not. Private PTEs are "sticky" so we can
+	// determine this regardless of trimming.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto phyaddr
+	auto ok
+
+	pteaddr@ // pteaddr
+	MiPTEInterpret ok! drop phyaddr!
+
+	if (ok@)
+		// The page became invalid between the checks in MiSatisfyFault and
+		// now, so REFAULT.
+
+		ipl@ KeIPLLower
+
+		STATUS_REFAULT signal!
+
+		return
+	end
+
+	auto pfdbe
+	phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+	if (pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE &)
+		// Must be a dirty fault on a private page.
+		// Pass the PFDBE since we captured that already and call it at
+		// elevated IPL to stop the PTE from becoming invalid.
+
+		1 // checked
+		pteaddr@ // pteaddr
+		MiDirtyFault signal!
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	ipl@ KeIPLLower
+
+	// We have to look up the VAD at lower IPL since they're allocated from
+	// paged pool.
+
+	vaddr@ // vaddr
+	process@ // process
+	MiFaultParameters ok! vad! drop drop
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			// shouldn't be possible since PTE was valid before and we've had
+			// the VAD list locked.
+
+			ok@ "MiWriteFault: failed to look up VAD (%i)\n" KeCrash
+		end
+
+		if (vad@ MiVAD_PageProtection + @ ~~)
+			"MiWriteFault: VAD was guard region\n" KeCrash
+		end
+	end
+
+	vad@ MiVAD_PageProtection + @ pageprot!
+
+	if (pageprot@ PAGEACCESS_WRITECOPY &)
+		// copy on write fault
+
+		vad@ // vad
+		pteaddr@ // pteaddr
+		vaddr@ // vaddr
+		process@ // process
+		MiCopyOnWriteFault signal!
+
+		return
+	end elseif (pageprot@ PAGEACCESS_WRITE & ~~)
+		// access violation
+
+		OSSIGNAL_SEGV signal!
+
+		return
+	end else
+		// dirty fault
+
+		0 // checked
+		pteaddr@ // pteaddr
+		MiDirtyFault signal!
+
+		return
+	end
+
+	// UNREACHABLE
+end
+
+fn MiCopyOnWriteFault { vad pteaddr vaddr process -- signal }
+	auto ok
+	auto pfdbe
+	auto cowpfdbe
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	// Re-check the PTE with raised IPL, since it may have
+	// been trimmed since we decided it was valid. We know that it's the same
+	// PTE if it's still valid, and hasn't been switched out with something
+	// else, because the VAD list mutex is held during all such events.
+
+	auto phyaddr
+	pteaddr@ // pteaddr
+	MiPTEInterpret ok! drop phyaddr!
+
+	if (ok@)
+		// The PTE became invalid again, so REFAULT.
+
+		ipl@ KeIPLLower
+
+		STATUS_REFAULT signal!
+
+		return
+	end
+
+	phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+	// COW, allocate a page frame and copy the old page frame into it.
+
+	auto waited
+	process@ // process
+	CANBLOCK // priority
+	MmPageWait drop waited!
+
+	if (waited@)
+		ipl@ KeIPLLower
+
+		STATUS_REFAULT signal!
+
+		return
+	end
+
+	pteaddr@ // pte
+	FREEFIRST // pri
+	MiAnonymousPageGet drop cowpfdbe!
+
+	if (process@ PsSystemProcess@ ==)
+		SWAPPTE_DEMANDZERO PTE_TLBHACK | cowpfdbe@ MiPageFrameEntryAnonymous_SwapPTE + |=
+	end
+
+	cowpfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE | MMEVICTFLAG_MODIFIED |
+	cowpfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + sb
+
+	cowpfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + @ MmVirtualToPhysical
+	cowpfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + !
+
+	process@ cowpfdbe@ MiPageFrameEntryAnonymous_Process + !
+	vaddr@ cowpfdbe@ MiPageFrameEntryAnonymous_VirtualAddress + !
+
+	// Map the COW page into the thread's quickpage so we can perform
+	// the copy. We copy directly from userspace here since we know the
+	// PTE is valid.
+
+	auto cowaddr
+	cowpfdbe@ MmPFDBEToPhysicalAddress cowaddr!
+
+	auto copyaddr
+	cowaddr@ MiMapQuickPage copyaddr!
+
+	copyaddr@ // dest
+	vaddr@ PAGENUMBERMASK & // src
+	PAGESIZE // size
+	memcpy
+
+	copyaddr@ MiUnmapQuickPage
+
+	// Update the PTE to point to the new COW page.
+
+	cowaddr@ // phyaddr
+	PTE_V PTE_W | // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate drop drop
+
+	// We COW'd over top of the old page frame and no longer have it
+	// mapped, so dereference it.
+
+	pfdbe@ MmEvictablePageDereference drop
+
+	ipl@ KeIPLLower
+
+	0 signal!
+
+	1 vad@ MiVAD_COWCount + +=
+end
+
+fn MiDirtyFault { checked pteaddr -- signal }
+	auto ipl
+
+	if (checked@ ~~)
+		IPLDPC KeIPLRaise ipl!
+
+		auto ok
+		pteaddr@ // pteaddr
+		MiPTEInterpret ok! drop drop
+
+		if (ok@)
+			// The PTE became invalid again, so REFAULT.
+
+			ipl@ KeIPLLower
+
+			STATUS_REFAULT signal!
+
+			return
+		end
+	end
+
+	pteaddr@ MiPTESetDirty
+
+	if (checked@ ~~)
+		ipl@ KeIPLLower
+	end
+
+	0 signal!
+end

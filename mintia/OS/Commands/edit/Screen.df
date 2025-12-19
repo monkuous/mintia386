@@ -1,0 +1,510 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "Edit.h"
+
+// manages a cached screen line buffer
+
+var ScreenLineTable 0
+public ScreenLineTable
+
+var ScreenHeight 0
+public ScreenHeight
+
+var ScreenCursorX 0
+public ScreenCursorX
+
+var ScreenCursorY 0
+public ScreenCursorY
+
+var ScreenCursorPosition 0 // position within the file
+public ScreenCursorPosition
+
+var ScreenLinePosition 0 // line start position
+public ScreenLinePosition
+
+var ScreenStartPosition 0
+public ScreenStartPosition
+
+var ScreenScrollUnit 0
+
+fn ScreenInit { -- }
+	TermHeight@ SCREENMARGIN - ScreenHeight!
+
+	auto ok
+	ScreenHeight@ ScreenLine_SIZEOF * OSHeapAllocate ok! ScreenLineTable!
+
+	if (ok@)
+		ok@ OSStatusGetName "edit: couldn't create screen line table: %s\n" OSError
+	end
+
+	ScreenHeight@ 3 / ScreenScrollUnit!
+	2 ScreenScrollUnit *=
+
+	if (ScreenScrollUnit@ ~~)
+		1 ScreenScrollUnit!
+	end
+
+	ScreenLineTable@ // ptr
+	ScreenHeight@ ScreenLine_SIZEOF * // size
+	0 // word
+	memset
+
+	ScreenPopulate
+end
+
+fn ScreenLineOverflowCheck { offset line -- overflow }
+	auto buffer
+	EditorBuffer@ buffer!
+
+	auto endchar
+	if (line@ ScreenLine_Length + @ ~~)
+		0 endchar!
+	end else
+		line@ ScreenLine_Offset + @ line@ ScreenLine_Length + @ 1 - + buffer@ BufferGetChar drop endchar!
+	end
+
+	if (endchar@ '\n' ==)
+		offset@ line@ ScreenLine_Length + @ >= overflow!
+	end else
+		offset@ line@ ScreenLine_Length + @ > overflow!
+	end
+end
+
+fn ScreenLineLastChar { line -- endchar }
+	auto buffer
+	EditorBuffer@ buffer!
+
+	if (line@ ScreenLine_Length + @ ~~)
+		0 endchar!
+	end else
+		line@ ScreenLine_Offset + @ line@ ScreenLine_Length + @ 1 - + buffer@ BufferGetChar drop endchar!
+	end
+end
+
+fn ScreenNavigateX { right -- update }
+	auto oldslp
+	ScreenLinePosition@ oldslp!
+
+	if (right@)
+		1 ScreenLinePosition +=
+		1 ScreenCursorPosition +=
+	end else
+		1 ScreenLinePosition -=
+		1 ScreenCursorPosition -=
+	end
+
+	0 update!
+
+	if (ScreenLinePosition@ -1 ==)
+		1 ScreenCursorPosition +=
+		0 ScreenLinePosition!
+
+		0 1 ScreenNavigateY update!
+	end else
+		auto line
+		ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + line!
+
+		if (ScreenLinePosition@ line@ ScreenLineOverflowCheck)
+			1 ScreenCursorPosition -=
+			1 ScreenLinePosition -=
+
+			1 1 ScreenNavigateY update!
+		end else
+			ScreenLinePosition@ TermWidth@ % ScreenCursorX!
+
+			if (ScreenLinePosition@ TermWidth@ / oldslp@ TermWidth@ / ~=)
+				ScreenCursorY@ ScreenCursorY@ DrawScreen
+			end
+
+			1 update!
+		end
+	end
+end
+
+fn ScreenNavigateY { down cancellinepos -- update }
+	0 update!
+
+	auto curline
+	ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+
+	auto oldsy
+	ScreenCursorY@ oldsy!
+
+	auto newline
+
+	if (down@)
+		1 ScreenCursorY +=
+
+		if (ScreenCursorY@ ScreenHeight@ >=)
+			1 ScreenCursorY -=
+			ScreenScrollDown update!
+			return
+		end
+
+		ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + newline!
+
+		if (curline@ ScreenLineLastChar '\n' ~=)
+			// EOF
+			1 ScreenCursorY -=
+			return
+		end
+	end else
+		if (ScreenCursorY@ ~~)
+			ScreenScrollUp update!
+			return
+		end
+		
+		1 ScreenCursorY -=
+		ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + newline!
+	end
+
+	if (ScreenLinePosition@ TermWidth@ >=)
+		oldsy@ oldsy@ DrawScreen
+	end
+
+	if (down@)
+		curline@ ScreenLine_Length + @ ScreenCursorPosition +=
+
+		if (newline@ ScreenLine_Length + @ ~~)
+			1 cancellinepos!
+		end
+	end else
+		newline@ ScreenLine_Length + @ ScreenCursorPosition -=
+	end
+
+	if (cancellinepos@)
+		ScreenLinePosition@ ScreenCursorPosition -=
+		0 ScreenLinePosition!
+		0 ScreenCursorX!
+
+		if (down@ ~~)
+			if (newline@ ScreenLineLastChar '\n' ==)
+				newline@ ScreenLine_Length + @ 1 - ScreenCursorPosition +=
+				newline@ ScreenLine_Length + @ 1 - ScreenLinePosition!
+			end else
+				newline@ ScreenLine_Length + @ ScreenCursorPosition +=
+				newline@ ScreenLine_Length + @ ScreenLinePosition!
+			end
+
+			ScreenLinePosition@ TermWidth@ % ScreenCursorX!
+		end
+	end else
+		if (ScreenLinePosition@ newline@ ScreenLineOverflowCheck)
+			auto diff
+			ScreenLinePosition@ newline@ ScreenLine_Length + @ - 1 + diff!
+
+			newline@ ScreenLine_Length + @ 1 - ScreenLinePosition!
+			diff@ ScreenCursorPosition -=
+
+			ScreenLinePosition@ TermWidth@ % ScreenCursorX!
+		end
+	end
+
+	if (ScreenCursorPosition@ z<)
+		ScreenCursorPosition@ "edit: I am bad at math %i\n" OSError
+	end
+
+	if (ScreenLinePosition@ TermWidth@ >=)
+		ScreenCursorY@ ScreenCursorY@ DrawScreen
+	end
+
+	1 update!
+end
+
+fn ScreenScrollDown { -- update }
+	0 update!
+
+	auto buffer
+	EditorBuffer@ buffer!
+
+	auto curline
+	ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+
+	if (curline@ ScreenLine_Length + @ ScreenCursorPosition@ ScreenLinePosition@ - + buffer@ Buffer_Size + @ >=)
+		return
+	end
+
+	auto off
+	curline@ ScreenLine_Length + @ off!
+
+	ScreenLinePosition@ ScreenCursorPosition -=
+	0 ScreenLinePosition!
+	0 ScreenCursorX!
+
+	auto scrolledlines
+	auto scrolledchars
+
+	ScreenScrollUnit@ ScreenSeekStartPositionDown scrolledchars!
+
+	ScreenPopulate
+
+	off@ ScreenCursorPosition +=
+	ScreenHeight@ ScreenScrollUnit@ - ScreenCursorY!
+
+	0 ScreenHeight@ 1 - DrawScreen
+
+	1 update!
+end
+
+fn ScreenScrollUp { -- update }
+	0 update!
+
+	auto curline
+	ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+
+	if (curline@ ScreenLine_Length + @ ScreenCursorPosition@ ScreenLinePosition@ - >=)
+		return
+	end
+
+	auto off
+	curline@ ScreenLine_Length + @ off!
+
+	ScreenLinePosition@ ScreenCursorPosition -=
+	0 ScreenLinePosition!
+	0 ScreenCursorX!
+
+	auto scrolledlines
+	auto scrolledchars
+
+	ScreenScrollUnit@ ScreenSeekStartPositionUp scrolledchars!
+
+	ScreenPopulate
+
+	ScreenScrollUnit@ 1 - ScreenCursorY!
+	ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + ScreenLine_Length + @ ScreenCursorPosition -=
+
+	0 ScreenHeight@ 1 - DrawScreen
+
+	1 update!
+end
+
+fn ScreenBackspace { -- update }
+	0 update!
+
+	if (ScreenCursorPosition@ ~~)
+		return
+	end
+
+	auto curpos
+	ScreenCursorPosition@ curpos!
+
+	1 update!
+
+	0 ScreenNavigateX drop
+
+	auto c
+	curpos@ EditorBuffer@ BufferDeleteCharacter c!
+
+	if (c@ '\n' ==)
+		ScreenPopulate
+		ScreenCursorY@ ScreenHeight@ 1 - DrawScreen
+	end else
+		auto curline
+		ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+		1 curline@ ScreenLine_Length + -=
+
+		auto rows
+		ScreenHeight@ ScreenCursorY@ - 1 - rows!
+
+		ScreenLine_SIZEOF curline +=
+
+		while (rows@)
+			1 curline@ ScreenLine_Offset + -=
+
+			ScreenLine_SIZEOF curline +=
+			1 rows -=
+		end
+
+		ScreenCursorY@ ScreenCursorY@ DrawScreen
+	end
+end
+
+fn ScreenLineKill { -- update }
+	0 update!
+
+	if (ScreenCursorPosition@ ~~)
+		return
+	end
+
+	if (ScreenLinePosition@ ~~)
+		return
+	end
+
+	auto linepos
+	ScreenLinePosition@ linepos!
+
+	1 update!
+
+	while (ScreenLinePosition@)
+		auto curpos
+		ScreenCursorPosition@ curpos!
+
+		0 ScreenNavigateX drop
+		curpos@ EditorBuffer@ BufferDeleteCharacter drop
+	end
+
+	auto curline
+	ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+	linepos@ curline@ ScreenLine_Length + -=
+
+	auto rows
+	ScreenHeight@ ScreenCursorY@ - 1 - rows!
+
+	ScreenLine_SIZEOF curline +=
+
+	while (rows@)
+		linepos@ curline@ ScreenLine_Offset + -=
+
+		ScreenLine_SIZEOF curline +=
+		1 rows -=
+	end
+
+	ScreenCursorY@ ScreenCursorY@ DrawScreen
+end
+
+fn ScreenInsert { c -- update }
+	1 update!
+
+	c@ ScreenCursorPosition@ EditorBuffer@ BufferInsertCharacter
+
+	if (c@ '\n' ==)
+		ScreenPopulate
+		ScreenCursorY@ ScreenHeight@ 1 - DrawScreen
+	end else
+		auto curline
+		ScreenLineTable@ ScreenCursorY@ ScreenLine_SIZEOF * + curline!
+		1 curline@ ScreenLine_Length + +=
+
+		auto rows
+		ScreenHeight@ ScreenCursorY@ - 1 - rows!
+
+		ScreenLine_SIZEOF curline +=
+
+		while (rows@)
+			1 curline@ ScreenLine_Offset + +=
+
+			ScreenLine_SIZEOF curline +=
+			1 rows -=
+		end
+
+		ScreenCursorY@ ScreenCursorY@ DrawScreen
+	end
+
+	1 ScreenNavigateX drop
+end
+
+fn ScreenSeekStartPositionUp { rows -- scrolledchars }
+	auto pos
+	ScreenStartPosition@ pos!
+
+	auto buffer
+	EditorBuffer@ buffer!
+
+	1 rows +=
+
+	0 scrolledchars!
+
+	while (rows@)
+		if (pos@ ~~)
+			break
+		end
+
+		1 pos -=
+		1 scrolledchars +=
+
+		auto char
+		pos@ buffer@ BufferGetChar drop char!
+
+		if (char@ '\n' ==)
+			1 rows -=
+		end
+	end
+
+	if (rows@ ~~)
+		1 pos +=
+		1 scrolledchars -=
+	end
+
+	pos@ ScreenStartPosition!
+end
+
+fn ScreenSeekStartPositionDown { rows -- scrolledchars }
+	0 scrolledchars!
+
+	auto line
+	ScreenLineTable@ line!
+
+	while (rows@)
+		line@ ScreenLine_Length + @ scrolledchars +=
+
+		ScreenLine_SIZEOF line +=
+		1 rows -=
+	end
+
+	scrolledchars@ ScreenStartPosition +=
+end
+
+fn ScreenPopulate { -- }
+	auto rows
+	ScreenHeight@ rows!
+
+	auto line
+	ScreenLineTable@ line!
+
+	auto pos
+	ScreenStartPosition@ pos!
+
+	auto buffer
+	EditorBuffer@ buffer!
+
+	auto startofline
+	auto runlength
+
+	while (rows@)
+		1 startofline!
+		0 runlength!
+
+		auto ok
+		0 ok!
+
+		while (1)
+			if (startofline@)
+				pos@ line@ ScreenLine_Offset + !
+				0 startofline!
+			end
+
+			auto char
+			pos@ buffer@ BufferGetChar ok! char!
+
+			if (ok@)
+				break
+			end
+
+			1 runlength +=
+
+			1 pos +=
+
+			if (char@ '\n' ==)
+				break
+			end
+		end
+
+		runlength@ line@ ScreenLine_Length + !
+
+		1 rows -=
+		ScreenLine_SIZEOF line +=
+
+		if (ok@)
+			break
+		end
+	end
+
+	if (rows@)
+		line@ // ptr
+		rows@ ScreenLine_SIZEOF * // size
+		0 // word
+		memset
+	end
+end

@@ -1,0 +1,156 @@
+//
+// Entrypoint of all userspace processes.
+// Initializes the process image and all of its dynamically-linked friends.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSEnvironment.h"
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSModule.h"
+#include "<ll>/OSDLL/OSProcess.h"
+#include "<ll>/OSDLL/OSFastMutex.h"
+
+#include "OSDLL.h"
+
+extern DLLMainTrampoline { entry argvt argcn -- }
+
+var DLLProcessInit 1
+public DLLProcessInit
+
+var DLLComponentsInitialized 0
+public DLLComponentsInitialized
+
+buffer DLLStdIoFastMutex OSFastMutex_SIZEOF
+public DLLStdIoFastMutex
+
+fn DLLMainHL { -- }
+	// initialize the process image by mapping its sections into the address
+	// space and dynamically linking it if necessary.
+
+	// SystemInit.exe is a special case where no image file name is given in
+	// the PEB.
+
+	auto ok
+
+	auto imagepath
+	OSPEB OSPEBs_Parameters + @ imagepath!
+
+	auto initial
+	0 initial!
+
+	if (imagepath@ ~~)
+		// this is SystemInit.exe
+
+		1 initial!
+
+		OSPEB OSPEBs_Parameters + 4 + imagepath!
+		imagepath@ OSPEB OSPEBs_Parameters + !
+
+		imagepath@ // dest
+		"/mintia/SystemInit.exe" // src
+		strcpy
+
+		1 OSPEB OSPEBs_ParameterCount + !
+
+		OSNONE OSPEB OSPEBs_StdIn + !
+		OSNONE OSPEB OSPEBs_StdOut + !
+		OSNONE OSPEB OSPEBs_StdErr + !
+
+		// initialize current directory as /
+
+		OSNONE OSPEB OSPEBs_CurrentDirectory + !
+
+		OSNONE OSPEB OSPEBs_UserObjectDirectory + !
+	end else
+		// inherit signal actions
+
+		OSThreadCurrentTEB OSThreadEnvironmentBlock_SignalActions + // dest
+		OSPEB OSPEBs_InitialSignalActions + // src
+		32 4 * // sz
+		memcpy
+	end
+
+	if (OSPEB OSPEBs_StdIn + @ OSNONE ==)
+		DLLNOSTREAM OSPEB OSPEBs_StdIn + !
+	end
+
+	if (OSPEB OSPEBs_StdOut + @ OSNONE ==)
+		DLLNOSTREAM OSPEB OSPEBs_StdOut + !
+		DLLNOSTREAM DLLStdOutStream!
+	end
+
+	if (OSPEB OSPEBs_StdErr + @ OSNONE ==)
+		DLLNOSTREAM OSPEB OSPEBs_StdErr + !
+	end
+
+	OSPEB OSPEBs_StdIn + @ DLLStdInStream!
+	OSPEB OSPEBs_StdOut + @ DLLStdOutStream!
+	OSPEB OSPEBs_StdErr + @ DLLStdErrStream!
+
+	DLLFastMutexInit
+
+	"DLLStdIoFastMutex" // name
+	DLLStdIoFastMutex // fastmutex
+	OSFastMutexInitialize
+
+	DLLHeapInit
+	DLLStreamInit
+	DLLModuleInit
+
+	if (initial@)
+		"/" // env
+		"PWD" // name
+		OSSetEnvironmentVariable drop
+	end
+
+	1 DLLComponentsInitialized!
+
+	// load process image
+
+	auto imgdll
+	OSMODULELOAD_MAINIMAGE // flags
+	imagepath@ // name
+	OSModuleLoad ok! imgdll!
+
+	if (ok@)
+		ok@ // activationstatus
+		OSProcessSignalActivation drop
+
+		-1 OSExit
+	end
+
+	auto address
+	"Main" // name
+	imgdll@ // dll
+	OSGetSymbolAddress ok! address!
+
+	if (ok@)
+		ok@ OSStatusGetName
+		imagepath@
+		"LINK ERROR: %s: couldn't find Main symbol: %s\n" OSGetStdErr FPrintf
+
+		STATUS_BAD_EXECUTABLE // activationstatus
+		OSProcessSignalActivation drop
+
+		-1 OSExit
+	end
+
+	0 // activationstatus
+	OSProcessSignalActivation drop
+
+	0 DLLProcessInit!
+
+	address@ // entry
+	OSPEB OSPEBs_Parameters + // argvt
+	OSPEB OSPEBs_ParameterCount + @ // argcn
+	DLLMainTrampoline
+
+	imagepath@ "OSDLL: %s: DLLMainTrampoline returned\n" OSError
+end

@@ -1,0 +1,747 @@
+//
+// Implements directory management for the AisixFS driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "AisixFS.h"
+
+fn AFSDirectoryAllocateEntry { fcb -- dirent bcb ok }
+	fnsection "PAGE$text"
+
+	// FCB is locked by caller
+
+	if (DEBUGCHECKS)
+		if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+			// should have been caught by the IO system code
+			"AFSDirectoryAllocateEntry: not a directory\n" KeCrash
+		end
+	end
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto byteoff
+	0 byteoff!
+
+	auto bytesize
+	fcb@ IOFileControlBlock_SizeInBytes + @ bytesize!
+
+	auto pageno
+	byteoff@ FILEVIEWSHIFT >> pageno!
+
+	auto curpageno
+	-1 curpageno!
+
+	auto found
+
+	0 bcb!
+
+	while (byteoff@ bytesize@ <)
+		if (pageno@ curpageno@ ~=)
+			// must read in a new page
+
+			if (bcb@)
+				bcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			byteoff@ FILEVIEWNUMBERMASK & // offset
+			fcb@ // fcb
+			VcFileControlBlockMapAndPin ok! bcb! dirent!
+
+			if (ok@)
+				return
+			end
+
+			byteoff@ FILEVIEWOFFSETMASK & dirent +=
+
+			pageno@ curpageno!
+		end
+
+		if (dirent@ AFSDirEnt_INum + @ ~~)
+			// found a free dirent
+			0 ok!
+			return
+		end
+
+		AFSDirEnt_SIZEOF dirent +=
+		AFSDirEnt_SIZEOF byteoff +=
+		byteoff@ FILEVIEWSHIFT >> pageno!
+	end
+
+	if (bcb@)
+		bcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	// no existing free entries -- try to allocate a new one.
+
+	bytesize@ AFSDirEnt_SIZEOF + // newsize
+	1 // zero
+	0 // flags
+	fcb@ // fcb
+	AFSTruncate ok!
+
+	if (ok@)
+		return
+	end
+
+	bytesize@ FILEVIEWNUMBERMASK & // offset
+	fcb@ // fcb
+	VcFileControlBlockMapAndPin ok! bcb! dirent!
+
+	if (ok@)
+		return
+	end
+
+	bytesize@ FILEVIEWOFFSETMASK & dirent +=
+
+	if (DEBUGCHECKS)
+		if (dirent@ AFSDirEnt_INum + @)
+			"AFSDirectoryAllocateEntry: fresh dirent had inum\n" KeCrash
+		end
+	end
+end
+
+fn AFSDirectoryGetEntry { seek afsdirent fcb -- nextseek ok }
+	fnsection "PAGE$text"
+
+	// FCB is locked by caller
+
+	if (DEBUGCHECKS)
+		if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+			// should have been caught by the IO system
+
+			"AFSDirectoryGetEntry: not a directory\n" KeCrash
+		end
+	end
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto byteoff
+	seek@ AFSDirEnt_SIZEOF * byteoff!
+
+	auto bytesize
+	fcb@ IOFileControlBlock_SizeInBytes + @ bytesize!
+
+	auto pageno
+	byteoff@ FILEVIEWSHIFT >> pageno!
+
+	auto curpageno
+	-1 curpageno!
+
+	auto bcb
+	0 bcb!
+
+	auto data
+
+	while (byteoff@ bytesize@ <)
+		if (pageno@ curpageno@ ~=)
+			// must read in a new page
+
+			if (bcb@)
+				bcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			byteoff@ FILEVIEWNUMBERMASK & // offset
+			fcb@ // fcb
+			VcFileControlBlockMapAndPin ok! bcb! data!
+
+			if (ok@)
+				return
+			end
+
+			byteoff@ FILEVIEWOFFSETMASK & data +=
+
+			pageno@ curpageno!
+		end
+
+		if (data@ AFSDirEnt_INum + @)
+			// found a dirent
+
+			afsdirent@ AFSDirEnt_name + // dest
+			data@ AFSDirEnt_name + // src
+			59 // max
+			strncpy
+
+			data@ AFSDirEnt_INum + @ afsdirent@ AFSDirEnt_INum + !
+
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			0 ok!
+
+			seek@ 1 + nextseek!
+
+			return
+		end
+
+		AFSDirEnt_SIZEOF data +=
+		AFSDirEnt_SIZEOF byteoff +=
+		byteoff@ FILEVIEWSHIFT >> pageno!
+		1 seek +=
+	end
+
+	if (bcb@)
+		bcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	seek@ nextseek!
+	STATUS_END_OF_FILE ok!
+end
+
+fn (IODispatchReadDirectoryFunction) AFSReadDirectory { count seek dirent fcb lastmode -- nextseek readcount ok }
+	fnsection "PAGE$text"
+
+	0 readcount!
+
+	if (fcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+		fcb@ IOFileControlBlockCacheCheck ok! drop
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto afsdirent
+	AFSDirEnt_SIZEOF alloc afsdirent!
+
+	seek@ nextseek!
+
+	1 // alertable
+	fcb@ // fcb
+	IOFileControlBlockLockShared ok!
+
+	if (ok@)
+		return
+	end
+
+	while (count@)
+		nextseek@ // seek
+		afsdirent@ // afsdirent
+		fcb@ // fcb
+		AFSDirectoryGetEntry ok! nextseek!
+
+		if (ok@)
+			if (ok@ STATUS_END_OF_FILE == readcount@ &&)
+				// at least one dirent was read, so report this as successful
+
+				0 ok!
+			end
+
+			break
+		end
+
+		if (lastmode@ KERNELMODE ==)
+			dirent@ OSDirectoryEntry_Name + // dest
+			afsdirent@ AFSDirEnt_name + // src
+			63 // max
+			strncpy
+		end else
+			dirent@ OSDirectoryEntry_Name + // dest
+			afsdirent@ AFSDirEnt_name + // src
+			63 // max
+			KeSafeStringCopyOut ok!
+
+			if (ok@)
+				break
+			end
+		end
+
+		OSDirectoryEntry_SIZEOF dirent +=
+		1 readcount +=
+		1 count -=
+	end
+
+	fcb@ IOFileControlBlockUnlock
+end
+
+fn AFSDirectoryFindEntry { name dirfcb -- dirent bcb ok }
+	fnsection "PAGE$text"
+
+	if (DEBUGCHECKS)
+		if (dirfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+			// should have been caught by the IO system code
+			"AFSDirectoryFindEntry: not a directory\n" KeCrash
+		end
+	end
+
+	auto mount
+	dirfcb@ FSFileControlBlockGetMount mount!
+
+	auto byteoff
+	0 byteoff!
+
+	auto bytesize
+	dirfcb@ IOFileControlBlock_SizeInBytes + @ bytesize!
+
+	auto pageno
+	byteoff@ FILEVIEWSHIFT >> pageno!
+
+	auto curpageno
+	-1 curpageno!
+
+	0 bcb!
+
+	while (byteoff@ bytesize@ <)
+		if (pageno@ curpageno@ ~=)
+			// must read in a new page
+
+			if (bcb@)
+				bcb@ VcBufferDecrementMapAndUnpin
+			end
+
+			byteoff@ FILEVIEWNUMBERMASK & // offset
+			dirfcb@ // fcb
+			VcFileControlBlockMapAndPin ok! bcb! dirent!
+
+			if (ok@)
+				return
+			end
+
+			byteoff@ FILEVIEWOFFSETMASK & dirent +=
+
+			pageno@ curpageno!
+		end
+
+		if (dirent@ AFSDirEnt_INum + @)
+			if (name@ -1 ==)
+				// just checking for any valid entry
+
+				bcb@ VcBufferDecrementMapAndUnpin
+
+				0 ok!
+
+				return
+			end
+
+			if (dirent@ AFSDirEnt_name + name@ strcmp)
+				// found it!
+
+				0 ok!
+
+				return
+			end
+		end
+
+		AFSDirEnt_SIZEOF dirent +=
+		AFSDirEnt_SIZEOF byteoff +=
+		byteoff@ FILEVIEWSHIFT >> pageno!
+	end
+
+	if (bcb@)
+		bcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	STATUS_NOT_FOUND ok!
+end
+
+fn AFSDirectoryCheckForCycle { testfcb searchfcb mount -- ok }
+	fnsection "PAGE$text"
+
+	auto iparent
+
+	auto fcbdata
+	searchfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	0 iparent!
+
+	searchfcb@ AFSFCBReference
+
+	0 ok!
+
+	while (searchfcb@ testfcb@ ~=)
+		if (fcbdata@ AFSFCBData_IParent + @ iparent@ ==)
+			// found the root directory. no cycles.
+			searchfcb@ AFSFCBDereference
+
+			return
+		end
+
+		fcbdata@ AFSFCBData_IParent + @ iparent!
+
+		auto nextfcb
+		0 // flags
+		iparent@  // inum
+		mount@ // mount
+		AFSFCBRead ok! nextfcb!
+
+		searchfcb@ AFSFCBDereference
+
+		if (ok@)
+			return
+		end
+
+		nextfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+		nextfcb@ searchfcb!
+	end
+
+	searchfcb@ AFSFCBDereference
+
+	STATUS_FORBIDDEN_OPERATION ok!
+end
+
+fn (IODispatchUnlinkFunction) AFSUnlink { name dirfcb -- ok }
+	fnsection "PAGE$text"
+
+	if (dirfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+		dirfcb@ IOFileControlBlockCacheCheck ok! drop
+
+		if (ok@)
+			return
+		end
+	end
+
+	name@ AFSVerifyName ok!
+
+	if (ok@)
+		if (ok@ STATUS_ALREADY_EXISTS ==)
+			STATUS_FORBIDDEN_OPERATION ok!
+		end
+
+		return
+	end
+
+	auto mount
+	dirfcb@ FSFileControlBlockGetMount mount!
+
+	1 mount@ AFSTreeLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto bcb
+	auto dirent
+
+	name@ // name
+	dirfcb@ // dirfcb
+	AFSDirectoryFindEntry ok! bcb! dirent!
+
+	if (ok@)
+		mount@ AFSTreeUnlock
+
+		return
+	end
+
+	auto fcb
+	0 // flags
+	dirent@ AFSDirEnt_INum + @  // inum
+	mount@ // mount
+	AFSFCBRead ok! fcb!
+
+	if (ok@)
+		bcb@ VcBufferDecrementMapAndUnpin
+
+		mount@ AFSTreeUnlock
+
+		return
+	end
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Flags + @ IOFCBFLAG_SYSTEMFILE &)
+		fcb@ AFSFCBDereference
+
+		bcb@ VcBufferDecrementMapAndUnpin
+
+		mount@ AFSTreeUnlock
+
+		STATUS_FORBIDDEN_OPERATION ok!
+
+		return
+	end
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ==)
+		if (fcbdata@ AFSFCBData_References + @ 1 >)
+			// unlinking directories is forbidden if anyone could possibly
+			// add new entries to it afterwards.
+
+			fcb@ AFSFCBDereference
+
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			mount@ AFSTreeUnlock
+
+			STATUS_FILE_BUSY ok!
+
+			return
+		end
+
+		// we're unlinking a directory, ensure that it is empty first
+
+		-1 // name
+		fcb@ // dirfcb
+		AFSDirectoryFindEntry ok! drop drop
+
+		if (ok@ STATUS_NOT_FOUND ~=)
+			fcb@ AFSFCBDereference
+
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			mount@ AFSTreeUnlock
+
+			if (ok@ ~~)
+				STATUS_IS_A_DIRECTORY ok!
+			end
+
+			return
+		end
+	end
+
+	0 // alertable
+	dirfcb@ // fcb
+	IOFileControlBlockLock drop
+
+	// free the directory entry
+	0 dirent@ AFSDirEnt_INum + !
+
+	dirfcb@ IOFileControlBlockUnlock
+
+	bcb@ VcBufferDirty
+	bcb@ VcBufferDecrementMapAndUnpin
+
+	AFSFILEFLAG_DELETE fcbdata@ AFSFCBData_Flags + |=
+
+	fcb@ AFSFCBDereference
+
+	mount@ AFSTreeUnlock
+
+	0 ok!
+end
+
+fn (IODispatchRenameFunction) AFSRename { srcname srcfcb destname destfcb -- ok }
+	fnsection "PAGE$text"
+
+	if (srcfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+		srcfcb@ IOFileControlBlockCacheCheck ok! drop
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (destfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+		destfcb@ IOFileControlBlockCacheCheck ok! drop
+
+		if (ok@)
+			return
+		end
+	end
+
+	auto mount
+	srcfcb@ FSFileControlBlockGetMount mount!
+
+	if (destfcb@ FSFileControlBlockGetMount mount@ ~=)
+		STATUS_CROSS_VOLUME ok!
+
+		return
+	end
+
+	srcname@ AFSVerifyName ok!
+
+	if (ok@)
+		if (ok@ STATUS_ALREADY_EXISTS ==)
+			STATUS_FORBIDDEN_OPERATION ok!
+		end
+
+		return
+	end
+
+	destname@ AFSVerifyName ok!
+
+	if (ok@)
+		return
+	end
+
+	// we avoid having to lock either FCB (which would result in awful lock
+	// ordering issues) by holding the tree lock to block out other renames,
+	// deletions, and creations, and carefully updating the dirents in such a
+	// way that the people who lock the FCB shared never see a half-formed
+	// dirent.
+
+	1 mount@ AFSTreeLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto srcbcb
+	auto srcdirent
+
+	srcname@ // name
+	srcfcb@ // dirfcb
+	AFSDirectoryFindEntry ok! srcbcb! srcdirent!
+
+	if (ok@)
+		mount@ AFSTreeUnlock
+
+		return
+	end
+
+	if (srcfcb@ destfcb@ ==)
+		if (srcname@ destname@ strcmp)
+			srcbcb@ VcBufferDecrementMapAndUnpin
+
+			mount@ AFSTreeUnlock
+
+			0 ok!
+
+			return
+		end
+	end
+
+	auto destbcb
+	auto destdirent
+
+	// check to make sure the desired name isn't present in the destination
+	// directory.
+
+	destname@ // destname
+	destfcb@ // dirfcb
+	AFSDirectoryFindEntry ok! destbcb! destdirent!
+
+	if (ok@ STATUS_NOT_FOUND ~=)
+		srcbcb@ VcBufferDecrementMapAndUnpin
+
+		if (ok@ ~~)
+			destbcb@ VcBufferDecrementMapAndUnpin
+
+			STATUS_ALREADY_EXISTS ok!
+		end
+
+		mount@ AFSTreeUnlock
+
+		return
+	end
+
+	auto inum
+	srcdirent@ AFSDirEnt_INum + @ inum!
+
+	auto filefcb
+	0 // flags
+	inum@ // inum
+	mount@ // mount
+	AFSFCBRead ok! filefcb!
+
+	if (ok@)
+		srcbcb@ VcBufferDecrementMapAndUnpin
+
+		mount@ AFSTreeUnlock
+
+		return
+	end
+
+	auto changeddir
+	0 changeddir!
+
+	if (srcfcb@ destfcb@ ~=)
+		auto filetype
+		filefcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ filetype!
+
+		if (filetype@ OSFILETYPE_DIRECTORY ==)
+			// make sure it won't create a cycle by walking from the
+			// destination directory up to the root directory, and seeing if
+			// the source appears along the way. if it does, this operation
+			// would create a cycle.
+
+			filefcb@ // testfcb
+			destfcb@ // searchfcb
+			mount@ // mount
+			AFSDirectoryCheckForCycle ok!
+
+			if (ok@)
+				filefcb@ AFSFCBDereference
+
+				srcbcb@ VcBufferDecrementMapAndUnpin
+
+				mount@ AFSTreeUnlock
+
+				return
+			end
+
+			1 changeddir!
+		end
+
+		destfcb@ AFSDirectoryAllocateEntry ok! destbcb! destdirent!
+
+		if (ok@)
+			filefcb@ AFSFCBDereference
+
+			srcbcb@ VcBufferDecrementMapAndUnpin
+
+			mount@ AFSTreeUnlock
+
+			return
+		end
+
+		// move the directory entry over by invalidating the old one and updating
+		// the new one.
+
+		0 // alertable
+		srcfcb@ // fcb
+		IOFileControlBlockLock drop
+
+		0 srcdirent@ AFSDirEnt_INum + !
+
+		srcfcb@ IOFileControlBlockUnlock
+	end else
+		srcdirent@ destdirent!
+	end
+
+	0 // alertable
+	destfcb@ // fcb
+	IOFileControlBlockLock drop
+
+	destdirent@ AFSDirEnt_name + // dest
+	destname@ // src
+	strcpy
+
+	inum@ destdirent@ AFSDirEnt_INum + !
+
+	destfcb@ IOFileControlBlockUnlock
+
+	srcbcb@ VcBufferDirty
+
+	if (srcfcb@ destfcb@ ~=)
+		destbcb@ VcBufferDirty
+		destbcb@ VcBufferDecrementMapAndUnpin
+	end
+
+	if (changeddir@)
+		auto fcbdata
+		filefcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+		destfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_INum + @
+		fcbdata@ AFSFCBData_IParent + !
+
+		filefcb@ AFSINodeUpdate
+	end
+
+	filefcb@ AFSFCBDereference
+
+	srcbcb@ VcBufferDecrementMapAndUnpin
+
+	mount@ AFSTreeUnlock
+end

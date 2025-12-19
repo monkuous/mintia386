@@ -1,0 +1,798 @@
+//
+// Implements management routines for the executive job object.
+//
+// lock ordering is createdelete -> hierarchy -> job
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "PsInternal.h"
+
+var PsiJobObjectType 0
+
+buffer PsiJobHierarchyMutex KeMutex_SIZEOF
+
+struct PsiJob
+	4 RootJob
+
+	4 ParentJob
+	4 NextJob
+	4 PrevJob
+
+	4 SubJobListHead
+
+	4 ProcessListHead
+
+	// counts both processes and sub-jobs. job termination signalling occurs
+	// when this count transitions to zero due to process exit.
+
+	4 ActiveCount
+
+	KeEvent_SIZEOF TerminationEvent
+
+	1 DepthB
+	1 FlagsB
+	1 SignalOnCloseB
+	1 TerminatedB
+
+	1 CleanedUpB
+	1 Reserved1B
+	1 Reserved2B
+	1 Reserved3B
+endstruct
+
+const PSMAXJOBDEPTH 10
+
+rosection "INIT$text"
+
+fn PsiJobInit { -- }
+	fnsection "INIT$text"
+
+	auto type
+	auto ok
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	// create Job type
+
+	"Job" typeinit@ ObTypeInitializer_Name + !
+	'JobO' typeinit@ ObTypeInitializer_Tag + !
+	0 typeinit@ ObTypeInitializer_BodySize + !
+	OSTYPE_JOB typeinit@ ObTypeInitializer_TypeIdentifier + !
+	pointerof PsiJobObjectDelete typeinit@ ObTypeInitializer_DeleteFunction + !
+	pointerof PsiJobObjectClose typeinit@ ObTypeInitializer_CloseFunction + !
+	PsiJob_TerminationEvent typeinit@ ObTypeInitializer_WaitOffset + !
+	typeinit@ ObTypeCreate ok! type!
+
+	if (ok@)
+		ok@ "PsiJobInit: couldn't create Job type (%i)\n" KeCrash
+	end
+
+	type@ PsiJobObjectType!
+
+rosection "text"
+
+	"PsiJobHierarchyMutex" // name
+	KERNELMODE // mode
+	PsiJobHierarchyMutex // mutex
+	KeMutexInitialize
+end
+
+fn PsiJobHierarchyLock { alertable -- ok }
+	fnsection "PAGE$text"
+
+	KERNELMODE // waitmode
+	alertable@ // alertable
+	OSWAIT_TIMEOUTINFINITE // timeout
+	PsiJobHierarchyMutex // object
+	KeThreadWaitForObject ok!
+end
+
+fn PsiJobHierarchyUnlock { -- }
+	fnsection "PAGE$text"
+
+	0 // abandon
+	PsiJobHierarchyMutex // mutex
+	KeMutexRelease drop
+end
+
+fn (ObTypeCloseFunction) PsiJobObjectClose { lasthandlecount access object process -- }
+	fnsection "PAGE$text"
+
+	if (lasthandlecount@ 1 ~=)
+		return
+	end
+
+	if (object@ PsiJob_SignalOnCloseB + gb ~~)
+		return
+	end
+
+	// signal all of the processes in the job.
+
+	0 PsiJobHierarchyLock drop
+
+	1 // propagate
+	object@ PsiJob_SignalOnCloseB + gb // signal
+	object@ // jobobject
+	PsiJobSignalObject
+
+	PsiJobHierarchyUnlock
+end
+
+fn PsiJobSignalObject { propagate signal jobobject -- }
+	fnsection "PAGE$text"
+
+	// assumes hierarchy lock is held.
+
+	if (signal@ OSSIGNAL_KILL ==)
+		1 jobobject@ PsiJob_TerminatedB + sb
+	end
+
+	auto process
+	jobobject@ PsiJob_ProcessListHead + @ process!
+
+	while (process@)
+		signal@ // signal
+		process@ // process
+		KeProcessSignal drop
+
+		process@ PsProcess_PagedArea + @ PsProcessPaged_JobListNext + @ process!
+	end
+
+	if (propagate@)
+		// This is recursive, but don't worry, infinite recursion is avoided
+		// by the PSMAXJOBDEPTH.
+
+		auto subjob
+		jobobject@ PsiJob_SubJobListHead + @ subjob!
+
+		while (subjob@)
+			1 // propagate
+			signal@ // signal
+			subjob@ // jobobject
+			PsiJobSignalObject
+
+			subjob@ PsiJob_NextJob + @ subjob!
+		end
+	end
+end
+
+fn (ObTypeDeleteFunction) PsiJobObjectDelete { object -- }
+	fnsection "PAGE$text"
+
+	// there are no more processes in this job or handles open to the job
+	// object. this means the termination event has already been signaled, the
+	// subprocess list is empty, and the subjob list is empty. this means that
+	// we just need to remove this job from its parent.
+
+	auto parentjobobject
+	object@ PsiJob_ParentJob + @ parentjobobject!
+
+	if (parentjobobject@ ~~)
+		// no parent job
+
+		return
+	end
+
+	0 PsiJobHierarchyLock drop
+
+	if (object@ PsiJob_CleanedUpB + gb ~~)
+		// we didn't terminate in the normal way, so we need to unbias the
+		// ActiveCount of the parent job now.
+
+		parentjobobject@ PsiJobDecrementActiveCount
+	end
+
+	auto ls
+	object@ PsiJob_PrevJob + @ ls!
+
+	auto ns
+	object@ PsiJob_NextJob + @ ns!
+
+	if (ls@)
+		ns@ ls@ PsiJob_NextJob + !
+	end else
+		ns@ parentjobobject@ PsiJob_SubJobListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ PsiJob_PrevJob + !
+	end
+
+	PsiJobHierarchyUnlock
+
+	parentjobobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsiJobInherit { destprocessobject srcprocessobject -- ok }
+	fnsection "PAGE$text"
+
+	1 // alertable
+	srcprocessobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		return
+	end
+
+	auto jobobject
+	srcprocessobject@ PsProcess_PagedArea + @ PsProcessPaged_Job + @ jobobject!
+
+	if (jobobject@)
+		jobobject@ ObObjectReferenceByPointer drop
+	end
+
+	srcprocessobject@ PsProcessCreateDeleteUnlock
+
+	if (jobobject@ ~~)
+		return
+	end
+
+	destprocessobject@ // processobject
+	jobobject@ // jobobject
+	PsiJobAddProcess ok!
+
+	jobobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsJobCreateObject { parentjobobject signalonclose flags permissions name -- jobobject ok }
+	fnsection "PAGE$text"
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	0 // pquotabias
+	PsiJob_SIZEOF // bodysize
+	PsiJobObjectType@ // type
+	ObObjectCreate ok! jobobject!
+
+	if (ok@)
+		return
+	end
+
+	0 // signaled
+	OSEVENT_NOTIF // type
+	"PsiJobTerminationEvent" // name
+	jobobject@ PsiJob_TerminationEvent + // event
+	KeEventInitialize
+
+	flags@ jobobject@ PsiJob_FlagsB + sb
+
+	0 jobobject@ PsiJob_ProcessListHead + !
+	0 jobobject@ PsiJob_SubJobListHead + !
+
+	0 jobobject@ PsiJob_NextJob + !
+	0 jobobject@ PsiJob_PrevJob + !
+	0 jobobject@ PsiJob_ParentJob + !
+
+	0 jobobject@ PsiJob_ActiveCount + !
+	0 jobobject@ PsiJob_TerminatedB + sb
+	0 jobobject@ PsiJob_CleanedUpB + sb
+
+	signalonclose@ jobobject@ PsiJob_SignalOnCloseB + sb
+
+	jobobject@ jobobject@ PsiJob_RootJob + !
+
+	1 jobobject@ PsiJob_DepthB + sb
+
+	if (parentjobobject@ ~~)
+		// try to inherit job from current process.
+
+		auto curproc
+		KeProcessCurrent curproc!
+
+		curproc@ PsProcess_PagedArea + @ PsProcessPaged_Job + @ parentjobobject!
+
+		if (parentjobobject@ ~~)
+			// current process has no job, nothing to inherit.
+
+			return
+		end
+
+		1 PsiJobHierarchyLock ok!
+
+		if (ok@)
+			jobobject@ ObObjectDeallocate
+
+			return
+		end
+
+		curproc@ PsProcess_PagedArea + @ PsProcessPaged_Job + @ parentjobobject!
+
+		if (parentjobobject@ ~~)
+			PsiJobHierarchyUnlock
+
+			// current process has no job anymore.
+
+			return
+		end
+	end else
+		1 PsiJobHierarchyLock ok!
+
+		if (ok@)
+			jobobject@ ObObjectDeallocate
+
+			return
+		end
+	end
+
+	if (parentjobobject@ PsiJob_TerminatedB + gb)
+		PsiJobHierarchyUnlock
+
+		jobobject@ ObObjectDeallocate
+
+		STATUS_JOB_IS_TERMINATED ok!
+
+		return
+	end
+
+	if (parentjobobject@ PsiJob_DepthB + gb PSMAXJOBDEPTH >=)
+		PsiJobHierarchyUnlock
+
+		jobobject@ ObObjectDeallocate
+
+		STATUS_JOB_DEPTH ok!
+
+		return
+	end
+
+	// add to head of parent job list.
+
+	parentjobobject@ jobobject@ PsiJob_ParentJob + !
+
+	auto h
+	parentjobobject@ PsiJob_SubJobListHead + @ h!
+
+	h@ jobobject@ PsiJob_NextJob + !
+
+	if (h@)
+		jobobject@ h@ PsiJob_PrevJob + !
+	end
+
+	jobobject@ parentjobobject@ PsiJob_SubJobListHead + !
+
+	// inherit the root job pointer to indicate that this job object is part
+	// of this tree.
+
+	parentjobobject@ PsiJob_RootJob + @ jobobject@ PsiJob_RootJob + !
+	parentjobobject@ PsiJob_DepthB + gb 1 + jobobject@ PsiJob_DepthB + sb
+
+	1 parentjobobject@ PsiJob_ActiveCount + +=
+
+	PsiJobHierarchyUnlock
+
+	// reference parent job object.
+
+	parentjobobject@ ObObjectReferenceByPointer drop
+end
+
+fn PsiJobIndicateProcessExit { processobject -- }
+	fnsection "PAGE$text"
+
+	// process createdelete lock is held (or is irrelevant, i.e. process
+	// object deletion).
+
+	0 PsiJobHierarchyLock drop
+
+	0 // toancestor
+	processobject@ // processobject
+	PsiJobRemoveProcess drop
+
+	PsiJobHierarchyUnlock
+end
+
+fn PsiJobDecrementActiveCount { jobobject -- }
+	fnsection "PAGE$text"
+
+	// assumes hierarchy lock is held.
+
+	auto oldcount
+	jobobject@ PsiJob_ActiveCount + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ ~~)
+			"PsiJobDecrementActiveCount: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - jobobject@ PsiJob_ActiveCount + !
+
+	if (oldcount@ 1 ==)
+		// active count transitioned to zero.
+		// do termination processing.
+
+		1 jobobject@ PsiJob_TerminatedB + sb
+
+		// signal termination event
+
+		0 // priboost
+		jobobject@ PsiJob_TerminationEvent + // event
+		KeEventSignal
+
+		if (jobobject@ PsiJob_CleanedUpB + gb ~~)
+			1 jobobject@ PsiJob_CleanedUpB + sb
+
+			if (jobobject@ PsiJob_ParentJob + @)
+				jobobject@ PsiJob_ParentJob + @ PsiJobDecrementActiveCount
+			end
+		end
+	end
+end
+
+fn PsiJobRemoveProcess { toancestor processobject -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	auto paged
+	processobject@ PsProcess_PagedArea + @ paged!
+
+	// assumes process createdelete lock and hierarchy lock are held.
+	// if toancestor is nonzero, and the process's job has a parent job, the
+	// process will be automatically reassigned to that job.
+
+	auto jobobject
+	paged@ PsProcessPaged_Job + @ jobobject!
+
+	if (jobobject@ ~~)
+		STATUS_PROCESS_NO_JOB ok!
+
+		return
+	end
+
+	if (toancestor@)
+		if (jobobject@ PsiJob_ParentJob + @ ~~)
+			STATUS_PROCESS_NO_JOB ok!
+
+			return
+		end
+	end
+
+	// remove the process from the job's process list
+
+	auto ls
+	paged@ PsProcessPaged_JobListPrev + @ ls!
+
+	auto ns
+	paged@ PsProcessPaged_JobListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ PsProcess_PagedArea + @ PsProcessPaged_JobListNext + !
+	end else
+		ns@ jobobject@ PsiJob_ProcessListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ PsProcess_PagedArea + @ PsProcessPaged_JobListPrev + !
+	end
+
+	0 paged@ PsProcessPaged_Job + !
+	0 paged@ PsProcessPaged_JobListNext + !
+	0 paged@ PsProcessPaged_JobListPrev + !
+
+	if (toancestor@)
+		// move to parent job of old job object, if any.
+
+		if (jobobject@ PsiJob_ParentJob + @)
+			processobject@ // processobject
+			jobobject@ PsiJob_ParentJob + @ // jobobject
+			PsiJobAddProcess ok!
+		end
+	end
+
+	jobobject@ PsiJobDecrementActiveCount
+
+	jobobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsiJobAddProcess { processobject jobobject -- ok }
+	fnsection "PAGE$text"
+
+	// assumes process createdelete lock is held and checked.
+
+	0 ok!
+
+	if (jobobject@ PsiJob_TerminatedB + gb)
+		STATUS_JOB_IS_TERMINATED ok!
+
+		return
+	end
+
+	auto paged
+	processobject@ PsProcess_PagedArea + @ paged!
+
+	auto currentjob
+	paged@ PsProcessPaged_Job + @ currentjob!
+
+	if (currentjob@ jobobject@ ==)
+		// no change, nothing to do
+
+		return
+	end
+
+	0 PsiJobHierarchyLock drop
+
+	if (currentjob@)
+		// the process already has a job. check if its job is related to the
+		// requested job, and fail the request if it isn't.
+		// this is to prevent break-out from job hierarchy.
+
+		if (currentjob@ PsiJob_RootJob + @ jobobject@ PsiJob_RootJob + @ ~=)
+			PsiJobHierarchyUnlock
+
+			STATUS_PROCESS_HAS_JOB ok!
+
+			return
+		end
+
+		// remove the process from its job object now, before we lock the new
+		// job. otherwise we will get an arbitrary lock ordering.
+
+		0 // toancestor
+		processobject@ // processobject
+		PsiJobRemoveProcess drop
+	end
+
+	// double check if job terminated since that might have changed since we
+	// locked it.
+
+	if (jobobject@ PsiJob_TerminatedB + gb)
+		PsiJobHierarchyUnlock
+
+		STATUS_JOB_IS_TERMINATED ok!
+
+		return
+	end
+
+	// add process to new job object.
+	// add to head of job process list.
+
+	auto h
+	jobobject@ PsiJob_ProcessListHead + @ h!
+
+	h@ paged@ PsProcessPaged_JobListNext + !
+
+	if (h@)
+		processobject@ h@ PsProcess_PagedArea + @ PsProcessPaged_JobListPrev + !
+	end
+
+	processobject@ jobobject@ PsiJob_ProcessListHead + !
+
+	jobobject@ paged@ PsProcessPaged_Job + !
+
+	1 jobobject@ PsiJob_ActiveCount + +=
+
+	PsiJobHierarchyUnlock
+
+	// reference the job object.
+
+	jobobject@ ObObjectReferenceByPointer drop
+end
+
+fn PsJobCreate { parentjobhandle signalonclose flags permissions name -- jobhandle ok }
+	fnsection "PAGE$text"
+
+	auto parentjobobject
+	0 parentjobobject!
+
+	auto access
+
+	if (parentjobhandle@ OSNONE ~=)
+		PsiJobObjectType@ // type
+		parentjobhandle@ // handle
+		ObObjectReferenceByHandle ok! parentjobobject! access!
+
+		if (ok@)
+			return
+		end
+
+		access@ ACCESS_WRITE SeCheckAccess ok!
+
+		if (ok@)
+			parentjobobject@ ObObjectDereferenceByPointer drop
+
+			return
+		end
+	end
+
+	auto jobobject
+	parentjobobject@ // parentjobobject
+	signalonclose@ // signalonclose
+	flags@ // flags
+	permissions@ // permissions
+	name@ // name
+	PsJobCreateObject ok! jobobject!
+
+	if (parentjobobject@)
+		parentjobobject@ ObObjectDereferenceByPointer drop
+	end
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	jobobject@ // object
+	ObObjectOpen ok! jobhandle!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+end
+
+fn PsJobAddProcess { processhandle jobhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto jobobject
+	auto access
+
+	PsiJobObjectType@ // type
+	jobhandle@ // handle
+	ObObjectReferenceByHandle ok! jobobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	auto processobject
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // needsthread
+	processobject@ // processobject
+	PsProcessCreateDeleteAcquireCheck ok!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	processobject@ // processobject
+	jobobject@ // jobobject
+	PsiJobAddProcess ok!
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	processobject@ ObObjectDereferenceByPointer drop
+	jobobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsJobRemoveProcess { processhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto processobject
+	auto access
+
+	PsProcessObjectType@ // type
+	processhandle@ // handle
+	ObObjectReferenceByHandle ok! processobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_WRITE SeCheckAccess ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // alertable
+	processobject@ // processobject
+	PsProcessCreateDeleteLock ok!
+
+	if (ok@)
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 PsiJobHierarchyLock ok!
+
+	if (ok@)
+		processobject@ PsProcessCreateDeleteUnlock
+
+		processobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 // toancestor
+	processobject@ // processobject
+	PsiJobRemoveProcess ok!
+
+	PsiJobHierarchyUnlock
+
+	processobject@ PsProcessCreateDeleteUnlock
+
+	processobject@ ObObjectDereferenceByPointer drop
+end
+
+fn PsJobSignal { propagate signal jobhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto jobobject
+	auto access
+
+	PsiJobObjectType@ // type
+	jobhandle@ // handle
+	ObObjectReferenceByHandle ok! jobobject! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	1 PsiJobHierarchyLock ok!
+
+	if (ok@)
+		jobobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	propagate@ // propagate
+	signal@ // signal
+	jobobject@ // jobobject
+	PsiJobSignalObject
+
+	PsiJobHierarchyUnlock
+
+	jobobject@ ObObjectDereferenceByPointer drop
+end

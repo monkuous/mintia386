@@ -1,0 +1,810 @@
+//
+// Implements executive object management routines.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "ObInternal.h"
+
+fn ObObjectTableCreate { quotablock process -- handletable ok }
+	fnsection "PAGE$text"
+
+	process@ // context
+	quotablock@ // quotablock
+	OBHANDLEENTRYSIZELOG // entrysizelog
+	ExHandleTableCreate ok! handletable!
+end
+
+fn ObObjectClose { handle -- ok }
+	fnsection "PAGE$text"
+
+	handle@
+	KeProcessCurrent
+	ObObjectCloseProcess ok!
+end
+
+fn ObObjectCloseProcess { handle process -- ok }
+	fnsection "PAGE$text"
+
+	auto handletable
+	process@ PsProcess_PagedArea + @ PsProcessPaged_HandleTable + @ handletable!
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC >=)
+			"ObObjectCloseProcess: ipl >= IPLDPC\n" KeCrash
+		end
+
+		if (handletable@ ~~)
+			"ObObjectCloseProcess: process has no handle table\n" KeCrash
+		end
+	end
+
+	OSHANDLEBITS handle >>=
+
+	auto object
+	auto entryptr
+
+	1 // alertable
+	handletable@ // handletable
+	ExHandleTableLock ok!
+
+	if (ok@)
+		return
+	end
+
+	handle@ // handle
+	handletable@ // handletable
+	1 // locked
+	ExHandleDelete ok! object! entryptr!
+
+	if (ok@)
+		handletable@ ExHandleTableUnlock
+
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (object@ ~~)
+			"ObObjectCloseProcess: object was null\n" KeCrash
+		end
+	end
+
+	auto access
+	entryptr@ ObiObjectTableEntry_Access + @ access!
+
+	// object directory race condition avoided because other threads in this
+	// process can no longer access this handle. unlocking is safe.
+	handletable@ ExHandleTableUnlock
+
+	auto oldcount
+	object@ ObiObjectHandleCountDecrement oldcount!
+
+	auto type
+	object@ ObObjectType type!
+
+	if (type@)
+		auto closefunc
+		type@ ObiType_CloseFunction + @ closefunc!
+
+		if (closefunc@)
+			oldcount@ // lasthandlecount
+			access@ // access
+			object@ // object
+			process@ // process
+			closefunc@ ObTypeCloseFunction
+		end
+	end
+
+	object@ ObObjectDereferenceByPointer drop
+end
+
+fn ObObjectOpen { nocheck access object -- handle ok }
+	fnsection "PAGE$text"
+
+	nocheck@ // nocheck
+	access@ // access
+	object@ // object
+	KeProcessCurrent // process
+	ObObjectOpenProcess ok! handle!
+end
+
+fn ObObjectOpenProcess { nocheck access object process -- handle ok }
+	fnsection "PAGE$text"
+
+	auto handletable
+	process@ PsProcess_PagedArea + @ PsProcessPaged_HandleTable + @ handletable!
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC >=)
+			"ObObjectOpenProcess: ipl >= IPLDPC\n" KeCrash
+		end
+
+		if (handletable@ ~~)
+			"ObObjectOpenProcess: process has no handle table\n" KeCrash
+		end
+	end
+
+	auto npheader
+	object@ ObObjectNonpagedHeader npheader!
+
+	auto pheader
+	object@ ObObjectPagedHeader pheader!
+
+	auto type
+	npheader@ ObiNonpagedHeader_TypeObject + @ type!
+
+	auto flags
+	pheader@ ObiPagedHeader_Flags + @ flags!
+
+	1 // alertable
+	handletable@ // handletable
+	ExHandleTableLock ok!
+
+	if (ok@)
+		return
+	end
+
+	if (nocheck@ ~~)
+		access@ // access
+		object@ // object
+		KeProcessCurrent // process
+		SeCheckAccessObjectUserX ok!
+
+		if (ok@)
+			handletable@ ExHandleTableUnlock
+
+			return
+		end
+	end
+
+	auto entryptr
+	object@ // entryvalue
+	handletable@ // handletable
+	1 // locked
+	ExHandleCreate ok! entryptr! handle!
+
+	if (ok@)
+		handletable@ ExHandleTableUnlock
+
+		return
+	end
+
+	access@ entryptr@ ObiObjectTableEntry_Access + !
+
+	if (type@)
+		auto openfunc
+		type@ ObiType_OpenFunction + @ openfunc!
+
+		if (openfunc@)
+			access@ // access
+			object@ // object
+			process@ // process
+			openfunc@ ObTypeOpenFunction ok!
+
+			if (ok@)
+				handle@ // handle
+				handletable@ // handletable
+				1 // locked
+				ExHandleDelete access! drop drop
+
+				if (DEBUGCHECKS)
+					if (access@)
+						"ObObjectOpenProcess: failed to delete handle\n" KeCrash
+					end
+				end
+
+				handletable@ ExHandleTableUnlock
+
+				return
+			end
+		end
+	end
+
+	object@ ObiObjectHandleCountIncrement drop
+
+	handletable@ ExHandleTableUnlock
+
+	OSHANDLEBITS handle <<=
+end
+
+fn ObObjectReferenceByHandle { type handle -- access object ok }
+	fnsection "PAGE$text"
+
+	if (handle@ OSCURRENTPROCESS ==)
+		if (type@)
+			if (type@ PsProcessObjectType@ ~=)
+				STATUS_INVALID_OBJECT_TYPE ok!
+
+				return
+			end
+		end
+
+		0 ok!
+
+		KeProcessCurrent object!
+		ACCESS_ALL access!
+		object@ ObObjectReferenceByPointer drop
+		return
+	end elseif (handle@ OSCURRENTTHREAD ==)
+		if (type@)
+			if (type@ PsThreadObjectType@ ~=)
+				STATUS_INVALID_OBJECT_TYPE ok!
+
+				return
+			end
+		end
+
+		0 ok!
+
+		KeThreadCurrent@ object!
+		ACCESS_ALL access!
+		object@ ObObjectReferenceByPointer drop
+		return
+	end
+
+	type@ // type
+	handle@ // handle
+	KeProcessCurrent // process
+	ObObjectReferenceByHandleProcess ok! object! access!
+end
+
+fn ObObjectReferenceByHandleProcess { type handle process -- access object ok }
+	fnsection "PAGE$text"
+
+	auto handletable
+	process@ PsProcess_PagedArea + @ PsProcessPaged_HandleTable + @ handletable!
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC >=)
+			"ObObjectReferenceByHandleProcess: ipl >= IPLDPC\n" KeCrash
+		end
+
+		if (handletable@ ~~)
+			"ObObjectReferenceByHandleProcess: process has no handle table\n" KeCrash
+		end
+	end
+
+	OSHANDLEBITS handle >>=
+
+	1 // alertable
+	handletable@ // handletable
+	ExHandleTableLockShared ok!
+
+	if (ok@)
+		return
+	end
+
+	auto entryptr
+	handle@ // handle
+	handletable@ // handletable
+	1 // locked
+	ExHandleLookup ok! entryptr!
+
+	if (ok@)
+		handletable@ ExHandleTableUnlock
+
+		return
+	end
+
+	entryptr@ ObiObjectTableEntry_Object + @ object!
+	entryptr@ ObiObjectTableEntry_Access + @ access!
+
+	if (type@)
+		if (object@ ObObjectType type@ ~=)
+			handletable@ ExHandleTableUnlock
+
+			STATUS_INVALID_OBJECT_TYPE ok!
+
+			return
+		end
+	end
+
+	object@ ObObjectReferenceByPointer drop
+
+	handletable@ ExHandleTableUnlock
+end
+
+fn ObiObjectHandleCountIncrement { object -- oldcount }
+	1 // increment
+	object@ ObiCommonHeader_SIZEOF -
+	ObiCommonHeader_NonpagedHeader + @
+	ObiNonpagedHeader_HandleCount + // ptr
+	KeInterlockedIncrement oldcount!
+end
+
+fn ObiObjectHandleCountDecrement { object -- oldcount }
+	auto npheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	-1 npheader@ ObiNonpagedHeader_HandleCount + KeInterlockedIncrement oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"ObiObjectHandleCountDecrement: attempt to decrement below 0\n" KeCrash
+		end
+	end
+
+	if (oldcount@ 1 ==)
+		if (object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_DirectoryObject + @)
+			0 ObRootDirectoryLock drop
+
+			// locking the root directory successfully serializes this case
+			// because it is also acquired during any attempt to open an
+			// object via namespace path, which is the ONLY time the object
+			// can be acquired by name.
+
+			// test the handle count again to make sure it's still 0.
+
+			if (npheader@ ObiNonpagedHeader_HandleCount + @ 0 ==)
+				if (object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_DirectoryObject + @)
+					if (object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_Flags + @ OBFLAGS_PERMANENT & ~~)
+						1 // locked
+						object@ // object
+						ObDirectoryRemoveByPointer drop
+					end
+				end
+			end
+
+			ObRootDirectoryUnlock
+		end
+	end
+end
+
+fn ObObjectReferenceByPointer { object -- oldcount }
+	auto npheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	npheader@ ObiNonpagedHeader_PointerCount + @ oldcount!
+
+	oldcount@ 1 + npheader@ ObiNonpagedHeader_PointerCount + !
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn ObObjectDereferenceByPointer { object -- oldcount }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC >)
+			"ObObjectDereferenceByPointer: ipl > IPLDPC\n" KeCrash
+		end
+	end
+
+	auto npheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	npheader@ ObiNonpagedHeader_PointerCount + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ 0 ==)
+			"ObObjectDereferenceByPointer: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - npheader@ ObiNonpagedHeader_PointerCount + !
+
+	// the following comment applied to a field that no longer exists. the
+	// current check involves just checking if the PointerCount is 0.
+	//
+	// atomically mark the object deleted -- this is useful for locking
+	// out auxiliary methods of acquiring an object pointer i.e. taking a
+	// process object by its PID. these aren't dangerous because the
+	// assumption is that the object type's deletion routine will
+	// eliminate that method of acquisition, i.e. delete the PID,
+	// between now and the object's final deallocation. whatever routine
+	// performs this acquisition needs to check this value BEFORE it
+	// references the object by pointer, otherwise everything will
+	// explode. locking considerations can be complex.
+
+	rs@ HALCPUInterruptRestore
+
+	auto ok
+
+	if (oldcount@ 1 ==)
+		// just decremented the pointer count to zero. delete the object
+
+		if (KeIPLCurrentGet IPLLOW ==)
+			if (DEBUGCHECKS)
+				if (object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_DirectoryObject + @)
+					"ObObjectDereferenceByPointer: object was still linked into a directory\n" KeCrash
+				end
+			end
+
+			// delete immediately
+
+			// make sure to ignore weird wait effects etc due to having been
+			// nuked. these are undesirable while doing something like
+			// cleaning up a dead object.
+
+			KeThreadCurrent@ KeThreadIgnoreKill drop
+
+			object@ ObObjectFree ok!
+
+			if (DEBUGCHECKS)
+				if (ok@)
+					"ObObjectDereferenceByPointer: failed to free object\n" KeCrash
+				end
+			end
+
+			KeThreadCurrent@ KeThreadAcceptKill drop
+		end else
+			// can't delete objects at >IPLLOW, queue it to the reaper
+
+			object@ // object
+			npheader@ // npheader
+			ObReaperEnqueue
+		end
+	end
+end
+
+fn ObReaperEnqueue { object npheader -- }
+	// enqueue the object to the object reaper worker.
+	// the handle and pointer counts are both known to be zero, so we can
+	// overlay them with the object pointer and the Next link respectively.
+
+	object@ npheader@ ObiNonpagedHeader_HandleCount + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	ObReaperListHead@ npheader@ ObiNonpagedHeader_PointerCount + !
+	npheader@ ObReaperListHead!
+
+	rs@ HALCPUInterruptRestore
+
+	0 // priboost
+	PsReaperEvent // event
+	KeEventSignal
+end
+
+fn ObReaperPop { -- object }
+	auto npheader
+	ObReaperListHead@ npheader!
+
+	npheader@ ObiNonpagedHeader_PointerCount + @ ObReaperListHead!
+	npheader@ ObiNonpagedHeader_HandleCount + @ object!
+
+	0 npheader@ ObiNonpagedHeader_PointerCount + !
+	0 npheader@ ObiNonpagedHeader_HandleCount + !
+end
+
+fn ObObjectNonpagedHeader { object -- npheader }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ npheader!
+end
+
+fn ObObjectPagedHeader { object -- pheader }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+end
+
+fn ObObjectReferences { object -- refs }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_PointerCount + @ refs!
+end
+
+fn ObObjectName { object -- name }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_Name + @ name!
+end
+
+fn ObObjectType { object -- type }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_TypeObject + @ type!
+end
+
+fn ObObjectUIDGID { object -- uid gid }
+	auto pheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+
+	pheader@ ObiPagedHeader_UID + @ uid!
+	pheader@ ObiPagedHeader_GID + @ gid!
+end
+
+fn ObObjectPermissions { object -- permissions }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ ObiPagedHeader_Permissions + @ permissions!
+end
+
+fn ObObjectQuotaBlock { object -- quotablock }
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ ObiNonpagedHeader_QuotaBlock + @ quotablock!
+end
+
+fn ObObjectQueryObject { object query -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	query@ // ptr
+	OSObjectQuery_SIZEOF // size
+	0 // word
+	memset
+
+	ObiCommonHeader_SIZEOF object -=
+
+	auto npheader
+	object@ ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	auto pheader
+	object@ ObiCommonHeader_PagedHeader + @ pheader!
+
+	auto typeobj
+	npheader@ ObiNonpagedHeader_TypeObject + @ typeobj!
+
+	if (typeobj@)
+		query@ OSObjectQuery_TypeName + // dest
+		typeobj@ ObiCommonHeader_SIZEOF - ObiCommonHeader_Name + @ // src
+		strcpy
+
+		typeobj@ ObiType_TypeIdentifier + @ query@ OSObjectQuery_TypeIdentifier + !
+	end else
+		0 query@ OSObjectQuery_TypeName + sb
+		0 query@ OSObjectQuery_TypeIdentifier + !
+	end
+
+	auto name
+	object@ ObiCommonHeader_Name + @ name!
+
+	if (name@)
+		query@ OSObjectQuery_Name + // dest
+		name@ // src
+		strcpy
+	end else
+		0 query@ OSObjectQuery_Name + sb
+	end
+
+	npheader@ ObiNonpagedHeader_HandleCount + @ query@ OSObjectQuery_HandleCount + !
+	npheader@ ObiNonpagedHeader_PointerCount + @ query@ OSObjectQuery_PointerCount + !
+
+	pheader@ ObiPagedHeader_Permissions + @ query@ OSObjectQuery_Permissions + !
+
+	pheader@ ObiPagedHeader_UID + @ query@ OSObjectQuery_UID + !
+	pheader@ ObiPagedHeader_GID + @ query@ OSObjectQuery_GID + !
+end
+
+fn ObObjectQuery { objecthandle query -- ok }
+	fnsection "PAGE$text"
+
+	auto object
+
+	0 // type
+	objecthandle@ // handle
+	ObObjectReferenceByHandle ok! object! drop
+
+	if (ok@)
+		return
+	end
+
+	object@ // object
+	query@ // query
+	ObObjectQueryObject ok!
+
+	object@ ObObjectDereferenceByPointer drop
+end
+
+fn ObObjectSetUID { uid object -- }
+	auto pheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+
+	uid@ pheader@ ObiPagedHeader_UID + !
+end
+
+fn ObObjectSetGID { gid object -- }
+	auto pheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+
+	gid@ pheader@ ObiPagedHeader_GID + !
+end
+
+fn ObObjectSetUIDGIDPermissions { uid gid permissions object -- }
+	fnsection "PAGE$text"
+
+	auto pheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+
+	if (uid@ -1 ~=)
+		uid@ pheader@ ObiPagedHeader_UID + !
+	end
+
+	if (gid@ -1 ~=)
+		gid@ pheader@ ObiPagedHeader_GID + !
+	end
+
+	if (permissions@ -1 ~=)
+		permissions@ pheader@ ObiPagedHeader_Permissions + !
+	end
+end
+
+fn ObSetSecurityObject { uid gid permissions object -- ok }
+	fnsection "PAGE$text"
+
+	auto typeobj
+	object@ ObObjectType typeobj!
+
+	auto pheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_PagedHeader + @ pheader!
+
+	if (typeobj@ ObiType_SetSecurityFunction + @)
+		auto nuid
+
+		if (uid@ -1 ==)
+			-1 nuid!
+		end else
+			uid@ ACCESS_SET_ONLY_EID ~ & nuid!
+		end
+
+		auto ngid
+
+		if (gid@ -1 ==)
+			-1 ngid!
+		end else
+			gid@ ACCESS_SET_ONLY_EID ~ & ngid!
+		end
+
+		nuid@ // uid
+		ngid@ // gid
+		permissions@ // permissions
+		object@ // object
+		typeobj@ ObiType_SetSecurityFunction + @ ObTypeSetSecurityFunction ok!
+
+		if (ok@)
+			return
+		end
+	end
+
+	if (uid@ -1 ~=)
+		if (uid@ ACCESS_SET_ONLY_EID & ~~)
+			uid@ pheader@ ObiPagedHeader_UID + !
+		end
+	end
+
+	if (gid@ -1 ~=)
+		if (gid@ ACCESS_SET_ONLY_EID & ~~)
+			gid@ pheader@ ObiPagedHeader_GID + !
+		end
+	end
+
+	if (permissions@ -1 ~=)
+		permissions@ pheader@ ObiPagedHeader_Permissions + !
+	end
+
+	0 ok!
+end
+
+fn ObSetSecurity { uid gid permissions handle -- ok }
+	fnsection "PAGE$text"
+
+	if (permissions@ -1 ~=)
+		ACCESS_ALL_ALL permissions &=
+	end
+
+	auto notadmin
+	SeAmIAdmin notadmin!
+
+	if (notadmin@)
+		// not an admin
+
+		auto process
+		KeProcessCurrent process!
+
+		if (uid@ -1 ~=)
+			// changing UID
+
+			if (process@ PsProcess_PagedArea + @ PsProcessPaged_UID + @ uid@ ~=)
+				// not setting to the same UID, forbidden
+
+				STATUS_FORBIDDEN_OPERATION ok!
+
+				return
+			end
+		end
+
+		if (gid@ -1 ~=)
+			// changing GID
+
+			if (process@ PsProcess_PagedArea + @ PsProcessPaged_GID + @ gid@ ~=)
+				// not setting to the same GID, forbidden
+
+				STATUS_FORBIDDEN_OPERATION ok!
+
+				return
+			end
+		end
+	end
+
+	auto object
+	auto access
+
+	0 // type
+	handle@ // handle
+	ObObjectReferenceByHandle ok! object! access!
+
+	if (ok@)
+		return
+	end
+
+	if (notadmin@)
+		if (object@ ObObjectPagedHeader ObiPagedHeader_UID + @
+			process@ PsProcess_PagedArea + @ PsProcessPaged_UID + @ ~=)
+
+			// not the owner of the object, forbidden
+			
+			object@ ObObjectDereferenceByPointer drop
+
+			STATUS_PERMISSION_DENIED ok!
+
+			return
+		end
+	end
+
+	uid@ // uid
+	gid@ // gid
+	permissions@ // permissions
+	object@ // object
+	ObSetSecurityObject ok!
+
+	object@ ObObjectDereferenceByPointer drop
+end
+
+fn ObObjectInheritPermissions { destobject srcobject -- }
+	fnsection "PAGE$text"
+
+	// directly transfer all permissions from one object to another
+
+	auto destpheader
+	destobject@ ObObjectPagedHeader destpheader!
+
+	auto srcpheader
+	srcobject@ ObObjectPagedHeader srcpheader!
+
+	srcpheader@ ObiPagedHeader_UID + @ destpheader@ ObiPagedHeader_UID + !
+	srcpheader@ ObiPagedHeader_GID + @ destpheader@ ObiPagedHeader_GID + !
+	srcpheader@ ObiPagedHeader_Permissions + @ destpheader@ ObiPagedHeader_Permissions + !
+end
+
+fn ObConditionallyReferenceObject { object -- ok }
+	// reference the object by pointer, but only if the pointer count isn't
+	// currently zero. this provides a safe way to reference objects that are
+	// stored in auxiliary structures such as a handle table or a device
+	// stack, since these things need to be locked during both a reference and
+	// a delete operation.
+
+	auto npheader
+	object@ ObiCommonHeader_SIZEOF - ObiCommonHeader_NonpagedHeader + @ npheader!
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	auto oldcount
+	npheader@ ObiNonpagedHeader_PointerCount + @ oldcount!
+
+	if (oldcount@ ~~)
+		rs@ HALCPUInterruptRestore
+
+		STATUS_INVALID_HANDLE ok!
+
+		return
+	end
+
+	oldcount@ 1 + npheader@ ObiNonpagedHeader_PointerCount + !
+
+	rs@ HALCPUInterruptRestore
+
+	0 ok!
+end

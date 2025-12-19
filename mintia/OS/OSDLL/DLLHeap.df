@@ -1,0 +1,678 @@
+//
+// Implements the userspace heap.
+// Allocates in steps of 32 bytes.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OSCalls.h"
+#include "<ll>/OSDLL/OSMap.h"
+#include "<ll>/OSDLL/OSAlloc.h"
+#include "<ll>/OSDLL/OSAccess.h"
+#include "<ll>/OSDLL/OSFile.h"
+#include "<ll>/OSDLL/OSAbort.h"
+#include "<ll>/OSDLL/OSFastMutex.h"
+#include "<ll>/OSDLL/OSObject.h"
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "OSDLL.h"
+
+var DLLHeapUsedInternally 0
+var DLLHeapUsedExternally 0
+
+buffer DLLHeapMutex OSFastMutex_SIZEOF
+
+table DLLHeapBucketListHeads[DLLHEAPBLOCKBUCKETS]
+
+var DLLHeapExtensionSize 1 // in units of pages
+
+const DLLHEAPEXTENSIONMAXIMUM 8
+
+fn DLLHeapInit { -- }
+	"DLLHeapMutex" // name
+	DLLHeapMutex // fastmutex
+	OSFastMutexInitialize
+end
+
+fn OSHeapQuery { query -- }
+	DLLHeapUsedInternally@ query@ OSHeapInformation_UsedInternally + !
+	DLLHeapUsedExternally@ query@ OSHeapInformation_UsedExternally + !
+end
+
+fn OSHeapAllocate { bytes -- ptr ok }
+	if (bytes@ 0 ==)
+		"OSHeapAllocate: 0 byte allocation\n" OSAbort
+	end
+
+	if (bytes@ DLLAllocatedHeapBlock_SIZEOF + OSPAGESIZE 2 / >=)
+		// do a direct private memory allocation
+
+		bytes@ DLLDirectHeapBlock_SIZEOF + // length
+		HEAPSTART // startva
+		OSCURRENTPROCESS // processhandle
+		PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+		0 // flags
+		OSAllocate ok! ptr!
+
+		if (ok@)
+			return
+		end
+
+		bytes@ DLLDirectHeapBlock_SIZEOF + OSPAGEOFFSETMASK + OSPAGENUMBERMASK &
+		DLLHeapUsedInternally OSInterlockedIncrement drop
+
+		bytes@ DLLDirectHeapBlock_SIZEOF + OSPAGEOFFSETMASK + OSPAGENUMBERMASK &
+		DLLHeapUsedExternally OSInterlockedIncrement drop
+
+		DLLHEAPDIRECTMAGIC ptr@ DLLDirectHeapBlock_MagicB + sb
+
+		bytes@ DLLDirectHeapBlock_SIZEOF + OSPAGEOFFSETMASK + OSPAGENUMBERMASK &
+		ptr@ DLLDirectHeapBlock_Size + !
+
+		DLLDirectHeapBlock_SIZEOF ptr +=
+
+		return
+	end
+
+	DLLAllocatedHeapBlock_SIZEOF bytes +=
+
+	bytes@ DLLHEAPBLOCKSIZEMASK + DLLHEAPBLOCKSIZESHIFT >> bytes!
+
+	// bytes now actually stores size units rather than real bytes.
+
+	auto bucketindex
+	0 bucketindex!
+
+	// we want to start searching in the bucket ceil(log_2(units)).
+	// we place blocks in bucket floor(log_2(units)).
+	// the following algorithm is a very naive way to calculate the former:
+
+	auto n
+	1 n!
+
+	while (n@ bytes@ <)
+		1 bucketindex +=
+		1 n <<=
+	end
+
+	// to get the floor version, we do this little ditty:
+
+	auto logfloor
+	bucketindex@ logfloor!
+
+	if (n@ bytes@ ~=)
+		1 logfloor -=
+	end
+
+	auto listhead
+	[bucketindex@]DLLHeapBucketListHeads listhead!
+
+	auto i
+	bucketindex@ i!
+
+	auto newblocksize
+	auto newblock
+	auto newbucketindex
+
+	DLLHeapMutex OSFastMutexAcquire
+
+	while (i@ DLLHEAPBLOCKBUCKETS <)
+		listhead@@ ptr!
+
+		if (ptr@)
+			if (ptr@ DLLHeapBlock_MagicB + gb DLLHEAPFREEMAGIC ~=)
+				ptr@ DLLHeapBlock_MagicB + gb "OSHeapAllocate: bad magic 0x%02x\n" OSAbort
+			end
+
+			if (ptr@ DLLHeapBlock_BucketIndexB + gb i@ ~=)
+				i@ ptr@ DLLHeapBlock_BucketIndexB + gb "OSHeapAllocate: bad bucketindex %d (expected %d)\n" OSAbort
+			end
+
+			// this block is either perfectly sized, or at least big enough to
+			// satisfy the allocation request. in either case, we want to
+			// unlink it from the bucket's free list.
+
+			ptr@ DLLHeapBlock_NextFree + @ n!
+
+			if (n@)
+				0 n@ DLLHeapBlock_PrevFree + !
+			end
+
+			n@ listhead@!
+
+			ptr@ DLLHeapBlock_SizeB + gb newblocksize!
+
+			if (newblocksize@ bytes@ ==)
+				// just big enough.
+
+				// set magic to indicate allocated
+
+				DLLHEAPSWIFTMAGIC ptr@ DLLHeapBlock_MagicB + sb
+
+				bytes@ DLLHEAPBLOCKSIZESHIFT << DLLHeapUsedInternally +=
+
+				DLLHeapMutex OSFastMutexRelease
+
+				// return block
+
+				DLLAllocatedHeapBlock_SIZEOF ptr +=
+
+				0 ok!
+
+				return
+			end
+
+			// the block must be split.
+
+			// calculate the size of the new block.
+
+			bytes@ newblocksize -=
+
+			if (DEBUGCHECKS)
+				if (newblocksize@ z<)
+					i@
+					ptr@ DLLHeapBlock_SizeB + gb
+					bytes@
+					"OSHeapAllocate: request=%d thisblock=%d bucketindex=%d\n" OSAbort
+				end
+			end
+
+			// set new bucketindex in old block header.
+			// already has correct lastsize, don't need to touch that.
+
+			logfloor@ ptr@ DLLHeapBlock_BucketIndexB + sb
+			DLLHEAPSWIFTMAGIC ptr@ DLLHeapBlock_MagicB + sb
+			bytes@ ptr@ DLLHeapBlock_SizeB + sb
+
+			// calculate index of bucket to place split block in.
+
+			0 newbucketindex!
+
+			1 n!
+
+			while (n@ newblocksize@ <)
+				1 newbucketindex +=
+				1 n <<=
+			end
+
+			if (n@ newblocksize@ ~=)
+				1 newbucketindex -=
+			end
+
+			// get a pointer to the new block.
+
+			ptr@ bytes@ DLLHEAPBLOCKSIZESHIFT << + newblock!
+
+			// create new block header
+
+			newblocksize@ newblock@ DLLHeapBlock_SizeB + sb
+			bytes@ newblock@ DLLHeapBlock_LastSizeB + sb
+			newbucketindex@ newblock@ DLLHeapBlock_BucketIndexB + sb
+			DLLHEAPFREEMAGIC newblock@ DLLHeapBlock_MagicB + sb
+
+			// update next block to point to new block unless it is page
+			// -aligned which means theres no next block
+
+			newblock@ newblocksize@ DLLHEAPBLOCKSIZESHIFT << + n!
+
+			if (n@ OSPAGEOFFSETMASK &)
+				newblocksize@ n@ DLLHeapBlock_LastSizeB + sb
+			end
+
+			// insert in new bucket list
+
+			[newbucketindex@]DLLHeapBucketListHeads@ n!
+
+			if (n@)
+				newblock@ n@ DLLHeapBlock_PrevFree + !
+			end
+
+			n@ newblock@ DLLHeapBlock_NextFree + !
+			0 newblock@ DLLHeapBlock_PrevFree + !
+
+			newblock@ [newbucketindex@]DLLHeapBucketListHeads!
+
+			bytes@ DLLHEAPBLOCKSIZESHIFT << DLLHeapUsedInternally +=
+
+			DLLHeapMutex OSFastMutexRelease
+
+			// return block
+
+			DLLAllocatedHeapBlock_SIZEOF ptr +=
+
+			0 ok!
+
+			return
+		end
+
+		4 listhead +=
+		1 i +=
+	end
+
+	// no sufficient block! allocate a heap extension with the page-aligned
+	// allocator and initialize each page to be 1 page-sized block on the
+	// highest free list, except for the first page, who we will yoink our
+	// requested block from.
+
+	auto pages
+	DLLHeapExtensionAllocate ok! ptr! pages!
+
+	if (ok@)
+		DLLHeapMutex OSFastMutexRelease
+
+		return
+	end
+
+	// set bucketindex in our block header
+
+	pages@ ptr@ DLLHeapBlock_LastSizeB + sb
+	logfloor@ ptr@ DLLHeapBlock_BucketIndexB + sb
+	DLLHEAPSWIFTMAGIC ptr@ DLLHeapBlock_MagicB + sb
+	bytes@ ptr@ DLLHeapBlock_SizeB + sb
+
+	// calculate index of bucket to place split block in
+
+	OSPAGESIZE DLLHEAPBLOCKSIZESHIFT >> bytes@ - newblocksize!
+
+	0 newbucketindex!
+
+	1 n!
+
+	while (n@ newblocksize@ <)
+		1 newbucketindex +=
+		1 n <<=
+	end
+
+	if (n@ newblocksize@ ~=)
+		1 newbucketindex -=
+	end
+
+	ptr@ bytes@ DLLHEAPBLOCKSIZESHIFT << + newblock!
+
+	// create free block header
+
+	newblocksize@ newblock@ DLLHeapBlock_SizeB + sb
+	bytes@ newblock@ DLLHeapBlock_LastSizeB + sb
+	newbucketindex@ newblock@ DLLHeapBlock_BucketIndexB + sb
+	DLLHEAPFREEMAGIC newblock@ DLLHeapBlock_MagicB + sb
+
+	// insert in free list
+
+	[newbucketindex@]DLLHeapBucketListHeads@ n!
+
+	if (n@)
+		newblock@ n@ DLLHeapBlock_PrevFree + !
+	end
+
+	n@ newblock@ DLLHeapBlock_NextFree + !
+	0 newblock@ DLLHeapBlock_PrevFree + !
+
+	newblock@ [newbucketindex@]DLLHeapBucketListHeads!
+
+	bytes@ DLLHEAPBLOCKSIZESHIFT << DLLHeapUsedInternally +=
+
+	// initialize each remaining page as 1 block on the highest free list
+
+	1 i!
+	ptr@ OSPAGESIZE + newblock!
+
+	while (i@ pages@ <)
+		OSPAGESIZE DLLHEAPBLOCKSIZESHIFT >> newblock@ DLLHeapBlock_SizeB + sb
+		0 newblock@ DLLHeapBlock_LastSizeB + sb
+		DLLHEAPBLOCKBUCKETS 1 - newblock@ DLLHeapBlock_BucketIndexB + sb
+		DLLHEAPFREEMAGIC newblock@ DLLHeapBlock_MagicB + sb
+
+		[DLLHEAPBLOCKBUCKETS 1 -]DLLHeapBucketListHeads@ n!
+
+		if (n@)
+			newblock@ n@ DLLHeapBlock_PrevFree + !
+		end
+
+		n@ newblock@ DLLHeapBlock_NextFree + !
+		0 newblock@ DLLHeapBlock_PrevFree + !
+
+		newblock@ [DLLHEAPBLOCKBUCKETS 1 -]DLLHeapBucketListHeads!
+
+		OSPAGESIZE newblock +=
+		1 i +=
+	end
+
+	DLLHeapMutex OSFastMutexRelease
+
+	DLLAllocatedHeapBlock_SIZEOF ptr +=
+
+	0 ok!
+end
+
+fn OSHeapFree { ptr -- }
+	if (ptr@ 1 - gb DLLHEAPDIRECTMAGIC ==)
+		// directly unmap.
+
+		DLLDirectHeapBlock_SIZEOF ptr -=
+
+		0 ptr@ DLLDirectHeapBlock_Size + @ -
+		DLLHeapUsedInternally OSInterlockedIncrement drop
+
+		0 ptr@ DLLDirectHeapBlock_Size + @ -
+		DLLHeapUsedExternally OSInterlockedIncrement drop
+
+		ptr@ DLLDirectHeapBlock_Size + @ // length
+		ptr@ // vaddr
+		OSCURRENTPROCESS // processhandle
+		OSUnmapView drop
+
+		return
+	end
+
+	DLLAllocatedHeapBlock_SIZEOF ptr -=
+
+	// check if the block has free blocks physically to its left or right.
+	// if so, merge.
+
+	// then, place the resulting block on the relevant free list.
+
+	auto bucketindex
+	auto lastblocksize
+	auto nb
+	auto n
+	auto merged
+	auto blocksize
+
+	0 merged!
+
+	ptr@ DLLHeapBlock_SizeB + gb blocksize!
+
+	ptr@ DLLHeapBlock_BucketIndexB + gb bucketindex!
+
+	if (ptr@ DLLHeapBlock_MagicB + gb DLLHEAPSWIFTMAGIC ~=)
+		ptr@ DLLHeapBlock_MagicB + gb "OSHeapFree: bad magic %02x\n" OSAbort
+	end
+
+	DLLHeapMutex OSFastMutexAcquire
+
+	blocksize@ DLLHEAPBLOCKSIZESHIFT << DLLHeapUsedInternally -=
+
+	if (ptr@ OSPAGEOFFSETMASK &)
+		// we're not at the start of the page, check left
+
+		ptr@ DLLHeapBlock_LastSizeB + gb lastblocksize!
+
+		ptr@ lastblocksize@ DLLHEAPBLOCKSIZESHIFT << - nb!
+
+		if (nb@ DLLHeapBlock_SizeB + gb lastblocksize@ ~=)
+			lastblocksize@ nb@ DLLHeapBlock_SizeB + gb "DLLHeapFree: bad blocksize %d (expected %d)\n" OSAbort
+		end
+
+		if (nb@ DLLHeapBlock_MagicB + gb DLLHEAPFREEMAGIC ==)
+			// free! merge left.
+
+			1 merged!
+
+			// remove from old free list
+
+			nb@ DLLHeapBlock_NextFree + @ n!
+
+			if (n@)
+				nb@ DLLHeapBlock_PrevFree + @ n@ DLLHeapBlock_PrevFree + !
+			end
+
+			nb@ DLLHeapBlock_PrevFree + @ n!
+
+			if (n@)
+				nb@ DLLHeapBlock_NextFree + @ n@ DLLHeapBlock_NextFree + !
+			end else
+				nb@ DLLHeapBlock_NextFree + @ [nb@ DLLHeapBlock_BucketIndexB + gb]DLLHeapBucketListHeads!
+			end
+
+			// turn block into bigger block
+
+			lastblocksize@ blocksize +=
+
+			// fields will get updated later.
+
+			// invalidate magic number of old block
+
+			0 ptr@ DLLHeapBlock_MagicB + sb
+
+			// set block pointer to last block
+
+			nb@ ptr!
+		end
+	end
+
+	ptr@ blocksize@ DLLHEAPBLOCKSIZESHIFT << + nb!
+
+	if (nb@ OSPAGEOFFSETMASK &)
+		// next block exists, see if it can be merged
+
+		nb@ DLLHeapBlock_SizeB + gb lastblocksize!
+
+		if (nb@ DLLHeapBlock_MagicB + gb DLLHEAPFREEMAGIC ==)
+			// free! merge right
+
+			1 merged!
+
+			// remove from old free list
+
+			nb@ DLLHeapBlock_NextFree + @ n!
+
+			if (n@)
+				nb@ DLLHeapBlock_PrevFree + @ n@ DLLHeapBlock_PrevFree + !
+			end
+
+			nb@ DLLHeapBlock_PrevFree + @ n!
+
+			if (n@)
+				nb@ DLLHeapBlock_NextFree + @ n@ DLLHeapBlock_NextFree + !
+			end else
+				nb@ DLLHeapBlock_NextFree + @ [nb@ DLLHeapBlock_BucketIndexB + gb]DLLHeapBucketListHeads!
+			end
+
+			// turn block into bigger block
+
+			lastblocksize@ blocksize +=
+
+			// fields will get updated later.
+
+			// invalidate magic number of old block
+
+			0 nb@ DLLHeapBlock_MagicB + sb
+		end
+	end
+
+	if (merged@)
+		// re-calculate bucket index and set new fields.
+
+		0 bucketindex!
+
+		1 n!
+
+		while (n@ blocksize@ <)
+			1 bucketindex +=
+			1 n <<=
+		end
+
+		if (n@ blocksize@ ~=)
+			1 bucketindex -=
+		end
+
+		bucketindex@ ptr@ DLLHeapBlock_BucketIndexB + sb
+		blocksize@ ptr@ DLLHeapBlock_SizeB + sb
+
+		// set last size of block to our right, if there is one.
+
+		ptr@ blocksize@ DLLHEAPBLOCKSIZESHIFT << + nb!
+
+		if (nb@ OSPAGEOFFSETMASK &)
+			blocksize@ nb@ DLLHeapBlock_LastSizeB + sb
+		end
+	end
+
+	// set free magic
+
+	DLLHEAPFREEMAGIC ptr@ DLLHeapBlock_MagicB + sb
+
+	// put on relevant free list
+
+	[bucketindex@]DLLHeapBucketListHeads@ nb!
+
+	if (nb@)
+		ptr@ nb@ DLLHeapBlock_PrevFree + !
+	end
+
+	nb@ ptr@ DLLHeapBlock_NextFree + !
+	0 ptr@ DLLHeapBlock_PrevFree + !
+
+	ptr@ [bucketindex@]DLLHeapBucketListHeads!
+
+	if (bucketindex@ DLLHEAPBLOCKBUCKETS 1 - ==)
+		// this free created a page-sized block, see if we can free the heap
+		// extension.
+		
+		ptr@ DLLHeapExtensionFree
+	end
+
+	DLLHeapMutex OSFastMutexRelease
+end
+
+fn DLLHeapExtensionAllocate { -- pages ptr ok }
+	DLLHeapExtensionSize@ pages!
+
+	pages@ OSPAGESHIFT << // length
+	HEAPSTART // startva
+	OSCURRENTPROCESS // processhandle
+	PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+	0 // flags
+	OSAllocate ok! ptr!
+
+	if (ok@)
+		if (ok@ STATUS_VM_QUOTA_EXCEEDED ~= ok@ STATUS_COMMIT_EXCEEDED ~= &&)
+			return
+		end
+
+		1 DLLHeapExtensionSize!
+
+		if (pages@ 1 ==)
+			return
+		end
+
+		1 pages!
+
+		OSPAGESIZE // length
+		HEAPSTART // startva
+		OSCURRENTPROCESS // processhandle
+		PAGEACCESS_READ PAGEACCESS_WRITE | // pageprotection
+		0 // flags
+		OSAllocate ok! ptr!
+
+		if (ok@)
+			return
+		end
+	end else
+		1 DLLHeapExtensionSize +=
+
+		if (DLLHeapExtensionSize@ DLLHEAPEXTENSIONMAXIMUM >)
+			DLLHEAPEXTENSIONMAXIMUM DLLHeapExtensionSize!
+		end
+	end
+
+	pages@ OSPAGESHIFT << DLLHeapUsedExternally +=
+end
+
+fn DLLHeapExtensionFree { ptr -- }
+	// try to free the heap extension this pointer to a page-aligned heap
+	// block is part of. this is done through a series of extremely cursed
+	// tricks to verify that the entire extension is free.
+
+	// first, seek to the page at the start of the extension.
+
+	while (ptr@ DLLHeapBlock_LastSizeB + gb ~~)
+		OSPAGESIZE ptr -=
+	end
+
+	// now remember this.
+
+	auto extensionstart
+	ptr@ extensionstart!
+
+	auto extensionsize
+	extensionstart@ DLLHeapBlock_LastSizeB + gb extensionsize!
+
+	// now go forward thru the extension to verify that all of the pages are
+	// empty.
+
+	while (extensionsize@)
+		if (ptr@ DLLHeapBlock_SizeB + gb DLLHEAPBLOCKSIZESHIFT << OSPAGESIZE ~=)
+			// not empty. can't free.
+			return
+		end
+
+		if (ptr@ DLLHeapBlock_MagicB + gb DLLHEAPFREEMAGIC ~=)
+			// not free.
+			return
+		end
+
+		1 extensionsize -=
+		OSPAGESIZE ptr +=
+	end
+
+	// all of the pages are verified to be empty. now we need to unlink them
+	// from the free list.
+
+	extensionstart@ ptr!
+	extensionstart@ DLLHeapBlock_LastSizeB + gb extensionsize!
+
+	while (extensionsize@)
+		auto p
+		ptr@ DLLHeapBlock_PrevFree + @ p!
+
+		if (p@)
+			ptr@ DLLHeapBlock_NextFree + @ p@ DLLHeapBlock_NextFree + !
+		end else
+			ptr@ DLLHeapBlock_NextFree + @ [DLLHEAPBLOCKBUCKETS 1 -]DLLHeapBucketListHeads!
+		end
+
+		ptr@ DLLHeapBlock_NextFree + @ p!
+
+		if (p@)
+			ptr@ DLLHeapBlock_PrevFree + @ p@ DLLHeapBlock_PrevFree + !
+		end
+
+		1 extensionsize -=
+		OSPAGESIZE ptr +=
+	end
+
+	extensionstart@ DLLHeapBlock_LastSizeB + gb OSPAGESHIFT << DLLHeapUsedExternally -=
+
+	1 DLLHeapExtensionSize!
+
+	// now we can unmap the extension.
+
+	extensionstart@ DLLHeapBlock_LastSizeB + gb OSPAGESHIFT << // length
+	extensionstart@ // vaddr
+	OSCURRENTPROCESS // processhandle
+	OSUnmapView drop
+end
+
+fn Malloc { size -- ptr }
+	auto ok
+	size@ OSHeapAllocate ok! ptr!
+
+	if (ok@)
+		ERR ptr!
+	end
+end
+
+fn Free { ptr -- }
+	ptr@ OSHeapFree
+end
+
+fn Calloc { size -- ptr }
+	size@ Malloc ptr!
+
+	if (ptr@ ERR ==)
+		return
+	end
+
+	ptr@ size@ 0 memset
+end

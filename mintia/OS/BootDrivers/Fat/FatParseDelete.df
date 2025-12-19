@@ -1,0 +1,413 @@
+//
+// Implements the Parse and Delete dispatch routines for the FAT driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "Fat.h"
+
+fn (IODispatchParseFunction) FatParse { fileobject initialfcb process -- reparsepath ok }
+	fnsection "PAGE$text"
+
+	0 reparsepath!
+	0 ok!
+
+	auto path
+	fileobject@ IOFile_OpenedPath + @ path!
+
+	if (path@ ~~)
+		STATUS_NOT_FOUND ok!
+		return
+	end
+
+	auto mount
+	initialfcb@ FSFileControlBlockGetMount mount!
+
+	1 // alertable
+	mount@ // mount
+	FatTreeLock ok!
+
+	if (ok@)
+		return
+	end
+
+	initialfcb@ FatFCBReference
+
+	while (path@ gb)
+		fileobject@ // fileobject
+		path@ // path
+		initialfcb@ // fcb
+		mount@ // mount
+		process@ // process
+		FatCrunchPathComponent ok! initialfcb! path!
+
+		if (ok@)
+			if (initialfcb@ ~~)
+				// FatCrunchPathComponent already cleaned up.
+
+				mount@ FatTreeUnlock
+
+				return
+			end
+
+			break
+		end
+	end
+
+	// at this point the FCB should be refed but unlocked
+
+	if (ok@)
+		initialfcb@ FatFCBDereference
+
+		mount@ FatTreeUnlock
+
+		return
+	end
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_MUSTCREATE &)
+		initialfcb@ FatFCBDereference
+
+		mount@ FatTreeUnlock
+
+		STATUS_ALREADY_EXISTS ok!
+
+		return
+	end
+
+	mount@ FatTreeUnlock
+
+	fileobject@ // fileobject
+	initialfcb@ // fcb
+	FatFillFileObject
+end
+
+fn (IODispatchDeleteObjectFunction) FatDeleteObject { object -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	object@ IOFile_FileControlBlock + @ fcb!
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto fatdata
+	mount@ IOMount_Extension + @ fatdata!
+
+	if (object@ IOFile_Context + @ FATFILECONTEXT_WRITABLE &)
+		-1 fatdata@ FatData_WritableFiles + KeInterlockedIncrement drop
+	end
+
+	if (object@ IOFile_Context + @ FATFILECONTEXT_UPDATEONCLOSE &)
+		fcb@ FatUpdateDirent
+	end
+
+	// the FCB may or may not stop existing after we deref it here, so don't
+	// touch it again.
+
+	0 // alertable
+	mount@ // mount
+	FatTreeLock drop
+
+	fcb@ FatFCBDereference
+
+	mount@ FatTreeUnlock
+
+	mount@ FatMountDereference
+
+	0 ok!
+end
+
+fn FatFillFileObject { fileobject fcb -- }
+	fnsection "PAGE$text"
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	mount@ FatMountReference
+
+	fcb@ // fcb
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ FatFCBData_SavedPermissions + @ // permissions
+	UID_SYSTEM // uid
+	GID_SYSTEM // gid
+	fileobject@ // fileobject
+	mount@ // mount
+	FSFileObjectFill
+end
+
+fn FatCrunchPathComponent { fileobject path fcb mount process -- nextpath nextfcb ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	fcb@ nextfcb!
+	path@ nextpath!
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	auto pcomp
+	256 alloc pcomp!
+
+	while (nextpath@ gb '/' ==)
+		1 nextpath +=
+	end
+
+	if (nextpath@ gb ~~)
+		// no more path, done
+
+		return
+	end
+
+	// more path. traverse
+
+	if (fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+		STATUS_NOT_A_DIRECTORY ok!
+
+		return
+	end
+
+	if (process@)
+		// check traverse rights (on behalf of the CALLING process,
+		// not the receiver of the handle)
+
+		ACCESS_EXEC // access
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ FatFCBData_SavedPermissions + @ // permbits
+		UID_SYSTEM // owninguid
+		GID_SYSTEM // owninggid
+		mount@ // mount
+		FSCheckAccess ok!
+
+		if (ok@)
+			// no rights
+
+			return
+		end
+	end
+
+	auto len
+	0 len!
+
+	while (1)
+		if (nextpath@ gb '/' ==)
+			break
+		end
+
+		if (nextpath@ gb 0 ==)
+			break
+		end
+
+		if (len@ 255 >=)
+			STATUS_NAME_TOO_LONG ok!
+
+			return
+		end
+
+		nextpath@ gb pcomp@ len@ + sb
+
+		1 len +=
+		1 nextpath +=
+	end
+
+	0 pcomp@ len@ + sb
+
+	if (pcomp@ "." strcmp)
+		return
+	end
+
+	if (pcomp@ ".." strcmp)
+		if (fcb@ mount@ IOMount_RootFCB + @ ==)
+			return
+		end
+
+		fcbdata@ FatFCBData_ParentDirDCB + @ nextfcb!
+
+		nextfcb@ FatFCBReference
+		fcb@ FatFCBDereference
+
+		return
+	end
+
+	fileobject@ IOFile_Flags + @ // flags
+	pcomp@ // name
+	fcb@ // dirfcb
+	mount@ // mount
+	FatDirectoryGetChildByName ok! nextfcb!
+
+	if (ok@)
+		fcb@ nextfcb!
+
+		if (ok@ STATUS_NOT_FOUND ~=)
+			return
+		end
+
+		if (fileobject@ IOFile_Flags + @ OSFILEFLAG_CREATE & ~~)
+			return
+		end
+
+		if (nextpath@ gb)
+			return
+		end
+
+		ACCESS_WRITE // access
+		fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ FatFCBData_SavedPermissions + @ // permbits
+		UID_SYSTEM // owninguid
+		GID_SYSTEM // owninggid
+		mount@ // mount
+		FSCheckAccess ok!
+
+		if (ok@)
+			return
+		end
+
+		fileobject@ // fileobject
+		pcomp@ // name
+		fcb@ // dirfcb
+		FatCreateFile ok! nextfcb!
+
+		fcb@ FatFCBDereference
+
+		if (ok@)
+			0 nextfcb!
+		end
+
+		return
+	end
+
+	fcb@ FatFCBDereference
+end
+
+fn FatCreateFile { fileobject name dirfcb -- fcb ok }
+	fnsection "PAGE$text"
+
+	auto mount
+	dirfcb@ FSFileControlBlockGetMount mount!
+
+	OSFILEFLAG_MUSTCREATE ~ fileobject@ IOFile_Flags + &=
+
+	auto seek
+	auto entries
+	auto bcb
+	auto fatdirent
+	auto shortdirentseek
+	auto longdirentseek
+
+	0 // alertable
+	dirfcb@ // fcb
+	IOFileControlBlockLock drop
+
+	name@ // name
+	dirfcb@ // dirfcb
+	FatDirectoryBuildEntry ok! fatdirent! bcb! seek! entries! shortdirentseek! longdirentseek!
+
+	if (ok@)
+		dirfcb@ IOFileControlBlockUnlock
+
+		return
+	end
+
+	// fill in the short entry appropriately
+
+	auto time
+	KeTime_SIZEOF alloc time!
+
+	time@ KeTimeQuery
+
+	time@ // desttime
+	time@ // srctime
+	KeRealTimeToLocalTime
+
+	auto fattime
+	time@ KeTime_SecPart + @ FatUnixToTime fattime!
+
+	auto fatdate
+	time@ KeTime_SecPart + @ FatUnixToDate fatdate!
+
+	fattime@ fatdirent@ FatDirectoryEntry_CreationTimeI + si
+	fatdate@ fatdirent@ FatDirectoryEntry_CreationDateI + si
+
+	fatdate@ fatdirent@ FatDirectoryEntry_AccessDateI + si
+
+	fattime@ fatdirent@ FatDirectoryEntry_ModificationTimeI + si
+	fatdate@ fatdirent@ FatDirectoryEntry_ModificationDateI + si
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_CREATEDIR &)
+		FAT_ATTR_DIRECTORY fatdirent@ FatDirectoryEntry_AttributeB + sb
+	end
+
+	// create the FCB
+
+	name@ // name
+	fileobject@ IOFile_Flags + @ // flags
+	dirfcb@ // dirfcb
+	longdirentseek@ // longdirentseek
+	shortdirentseek@ // shortdirentseek
+	fatdirent@ // shortdirent
+	mount@ // mount
+	FatFCBCreateFromDirent ok! fcb!
+
+	bcb@ VcBufferDirty
+	bcb@ VcBufferDecrementMapAndUnpin
+
+	if (ok@)
+		1 // updatebitmap
+		entries@ // count
+		seek@ // startseek
+		dirfcb@ // dirfcb
+		FatFreeDirents drop
+
+		dirfcb@ IOFileControlBlockUnlock
+
+		return
+	end
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_CREATEDIR &)
+		// gotta create entries for . and .. for this to be a valid directory
+
+		fatdate@ // fatdate
+		fattime@ // fattime
+		fcb@ // fcb
+		dirfcb@ // dirfcb
+		FatDirectoryBuildDotEntries ok!
+
+		if (ok@)
+			dirfcb@ IOFileControlBlockUnlock
+
+			fcb@ FatFileDelete drop
+
+			return
+		end
+	end
+
+	dirfcb@ IOFileControlBlockUnlock
+
+	dirfcb@ // fcb
+	0 // fileobject
+	FatUpdateModifyTimestamp
+end

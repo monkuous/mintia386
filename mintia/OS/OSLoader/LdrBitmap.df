@@ -1,0 +1,10 @@
+//
+// Faster bitmap management routines. Stolen from MINTIA executive for
+// OSLoader.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "OSLoader.h"
+
+#include "../Common/ComBitmap.df"

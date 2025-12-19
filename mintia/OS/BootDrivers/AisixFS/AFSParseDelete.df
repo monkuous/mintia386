@@ -1,0 +1,514 @@
+//
+// Implements the Parse and Delete dispatch routines for the AisixFS driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/FSRTL.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "AisixFS.h"
+
+fn (IODispatchParseFunction) AFSParse { fileobject initialfcb process -- reparsepath ok }
+	fnsection "PAGE$text"
+
+	0 reparsepath!
+	0 ok!
+
+	auto path
+	fileobject@ IOFile_OpenedPath + @ path!
+
+	if (path@ ~~)
+		STATUS_NOT_FOUND ok!
+		return
+	end
+
+	auto pcomp
+	60 alloc pcomp!
+
+	auto mount
+	initialfcb@ FSFileControlBlockGetMount mount!
+
+	1 mount@ AFSTreeLock ok!
+
+	if (ok@)
+		return
+	end
+
+	if (path@ gb)
+		if (initialfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+			mount@ AFSTreeUnlock
+
+			STATUS_NOT_A_DIRECTORY ok!
+
+			return
+		end
+
+		if (initialfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+			initialfcb@ IOFileControlBlockCacheCheck ok! drop
+
+			if (ok@)
+				return
+			end
+		end
+
+		initialfcb@ AFSFCBReference
+
+		while (1)
+			while (path@ gb '/' ==)
+				1 path +=
+			end
+
+			if (path@ gb ~~)
+				// no more path, done
+
+				break
+			end
+
+			auto fcbdata
+			initialfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+			// more path, traverse
+
+			if (process@)
+				// check traverse rights (on behalf of the CALLING process,
+				// not the receiver of the handle)
+
+				ACCESS_EXEC // access
+				fcbdata@ AFSFCBData_Permissions + @ // permbits
+				fcbdata@ AFSFCBData_UID + @ // owninguid
+				fcbdata@ AFSFCBData_GID + @ // owninggid
+				mount@ // mount
+				FSCheckAccess ok!
+
+				if (ok@)
+					// no rights
+
+					mount@ AFSTreeUnlock
+
+					return
+				end
+			end
+
+			auto len
+			0 len!
+
+			while (1)
+				if (path@ gb '/' ==)
+					break
+				end
+
+				if (path@ gb 0 ==)
+					break
+				end
+
+				if (len@ 59 >=)
+					mount@ AFSTreeUnlock
+
+					STATUS_NAME_TOO_LONG ok!
+
+					return
+				end
+
+				path@ gb pcomp@ len@ + sb
+
+				1 len +=
+				1 path +=
+			end
+
+			0 pcomp@ len@ + sb
+
+			if (pcomp@ "." strcmp)
+				continue
+			end
+
+			auto nextfcb
+
+			if (pcomp@ ".." strcmp)
+				auto iparent
+				initialfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_IParent + @ iparent!
+
+				if (iparent@ initialfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_INum + @ ==)
+					continue
+				end
+
+				0 // flags
+				iparent@ // inum
+				initialfcb@ FSFileControlBlockGetMount // mount
+				AFSFCBRead ok! nextfcb!
+
+				initialfcb@ AFSFCBDereference
+
+				if (ok@)
+					mount@ AFSTreeUnlock
+
+					return
+				end
+
+				if (nextfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+					nextfcb@ IOFileControlBlockCacheCheck ok! drop
+
+					if (ok@)
+						nextfcb@ AFSFCBDereference
+
+						mount@ AFSTreeUnlock
+
+						return
+					end
+				end
+
+				nextfcb@ initialfcb!
+
+				continue
+			end
+
+			auto bcb
+			auto dirent
+
+			pcomp@ // name
+			initialfcb@ // dirfcb
+			AFSDirectoryFindEntry ok! bcb! dirent!
+
+			if (ok@)
+				if (ok@ STATUS_NOT_FOUND ==)
+					if (path@ gb ~~)
+						if (fileobject@ IOFile_Flags + @ OSFILEFLAG_CREATE &)
+							ACCESS_WRITE // access
+							fcbdata@ AFSFCBData_Permissions + @ // permbits
+							fcbdata@ AFSFCBData_UID + @ // owninguid
+							fcbdata@ AFSFCBData_GID + @ // owninggid
+							mount@ // mount
+							FSCheckAccess ok!
+
+							if (ok@ ~~)
+								fileobject@ // fileobject
+								process@ // process
+								pcomp@ // name
+								initialfcb@ // dirfcb
+								AFSCreateFile ok!
+							end
+						end
+					end
+				end
+
+				initialfcb@ AFSFCBDereference
+
+				mount@ AFSTreeUnlock
+
+				return
+			end
+
+			// found the entry!
+
+			if (path@ gb 0 ==)
+				fileobject@ IOFile_Flags + @ // flags
+				dirent@ AFSDirEnt_INum + @ // inum
+				initialfcb@ FSFileControlBlockGetMount // mount
+				AFSFCBRead ok! nextfcb!
+			end else
+				0 // flags
+				dirent@ AFSDirEnt_INum + @ // inum
+				initialfcb@ FSFileControlBlockGetMount // mount
+				AFSFCBRead ok! nextfcb!
+			end
+
+			bcb@ VcBufferDecrementMapAndUnpin
+
+			initialfcb@ AFSFCBDereference
+
+			if (ok@)
+				mount@ AFSTreeUnlock
+
+				return
+			end
+
+			if (path@ gb)
+				if (nextfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+					nextfcb@ AFSFCBDereference
+
+					mount@ AFSTreeUnlock
+
+					STATUS_NOT_A_DIRECTORY ok!
+
+					return
+				end
+			end
+
+			if (nextfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ==)
+				if (nextfcb@ IOFileControlBlock_CacheInfoBlock + @ ~~)
+					nextfcb@ IOFileControlBlockCacheCheck ok! drop
+
+					if (ok@)
+						nextfcb@ AFSFCBDereference
+
+						mount@ AFSTreeUnlock
+
+						return
+					end
+				end
+			end
+
+			nextfcb@ initialfcb!
+
+			if (initialfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_FileType + @ OSFILETYPE_DIRECTORY ~=)
+				break
+			end
+		end
+	end else
+		initialfcb@ AFSFCBReference
+	end
+
+	// at this point the FCB should be refed but unlocked
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_MUSTCREATE &)
+		initialfcb@ AFSFCBDereference
+
+		mount@ AFSTreeUnlock
+
+		STATUS_ALREADY_EXISTS ok!
+
+		return
+	end
+
+	mount@ AFSTreeUnlock
+
+	fileobject@ // fileobject
+	process@ // process
+	initialfcb@ // fcb
+	AFSFillFileObject
+end
+
+fn AFSFillFileObject { fileobject process fcb -- }
+	fnsection "PAGE$text"
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	mount@ AFSMountReference drop
+
+	auto fcbdata
+	fcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ fcbdata!
+
+	fcb@ // fcb
+	fcbdata@ AFSFCBData_Permissions + @ ACCESS_ALL_ALL & // permissions
+	fcbdata@ AFSFCBData_UID + @ // uid
+	fcbdata@ AFSFCBData_GID + @ // gid
+	fileobject@ // fileobject
+	mount@ // mount
+	FSFileObjectFill
+end
+
+fn AFSVerifyName { name -- ok }
+	fnsection "PAGE$text"
+
+	0 ok!
+
+	if (name@ "." strcmp)
+		STATUS_ALREADY_EXISTS ok!
+		return
+	end
+
+	if (name@ ".." strcmp)
+		STATUS_ALREADY_EXISTS ok!
+		return
+	end
+
+	auto length
+	0 length!
+
+	while (name@ gb)
+		if (length@ 59 >=)
+			STATUS_NAME_TOO_LONG ok!
+			return
+		end
+
+		if (name@ gb 0x20 < name@ gb 0x7F >= ||)
+			STATUS_ILLEGAL_NAME ok!
+			return
+		end
+
+		if (name@ gb '/' ==)
+			STATUS_ILLEGAL_NAME ok!
+			return
+		end
+
+		1 length +=
+		1 name +=
+	end
+end
+
+fn AFSCreateFile { fileobject process name dirfcb -- ok }
+	fnsection "PAGE$text"
+
+	name@ AFSVerifyName ok!
+
+	if (ok@)
+		return
+	end
+
+	auto mount
+	dirfcb@ FSFileControlBlockGetMount mount!
+
+	// allocate inode
+
+	auto dirbcb
+	auto ibcb
+
+	auto inode
+	auto inum
+
+	mount@ AFSINodeAllocate ok! ibcb! inode! inum!
+	
+	if (ok@)
+		return
+	end
+
+	// fill in fields
+
+	if (fileobject@ IOFile_Flags + @ OSFILEFLAG_CREATEDIR &)
+		2 inode@ AFSINode_type + !
+	end else
+		1 inode@ AFSINode_type + !
+	end
+
+	KeThreadCurrent@ PsThreadGetFilePermissions ACCESS_ALL_ALL & inode@ AFSINode_permissions + !
+	KeProcessCurrent PsProcessGetUID inode@ AFSINode_uid + !
+	KeProcessCurrent PsProcessGetGID inode@ AFSINode_gid + !
+	dirfcb@ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_Extension + @ AFSFCBData_INum + @ inode@ AFSINode_iparent + !
+
+	auto time
+	KeTime_SIZEOF alloc time!
+	time@ KeTimeQuery
+	time@ KeTime_SecPart + @ inode@ AFSINode_timestamp + !
+
+	0xFFFFFFFF inode@ AFSINode_startblock + !
+	0 inode@ AFSINode_bytesize + !
+
+	// allocate directory entry
+
+	auto dirent
+	
+	dirfcb@ AFSDirectoryAllocateEntry ok! dirbcb! dirent!
+
+	if (ok@)
+		0 inode@ AFSINode_type + !
+
+		ibcb@ VcBufferDirty
+		ibcb@ VcBufferDecrementMapAndUnpin
+
+		return
+	end
+
+	// fill in fields
+
+	0 // alertable
+	dirfcb@ // fcb
+	IOFileControlBlockLock drop
+
+	inum@ dirent@ AFSDirEnt_INum + !
+
+	dirent@ AFSDirEnt_name + // dest
+	name@ // src
+	59 // max
+	strncpy
+
+	// grab FCB for inode
+
+	auto fcb
+	fileobject@ IOFile_Flags + @ // flags
+	inum@ // inum
+	mount@ // mount
+	AFSFCBRead ok! fcb!
+
+	if (ok@)
+		// failed to grab FCB, undo everything we just did
+
+		0 inode@ AFSINode_type + !
+		0 dirent@ AFSDirEnt_INum + !
+
+		dirfcb@ IOFileControlBlockUnlock
+
+		ibcb@ VcBufferDirty
+		ibcb@ VcBufferDecrementMapAndUnpin
+
+		dirbcb@ VcBufferDecrementMapAndUnpin
+
+		return
+	end
+
+	dirfcb@ IOFileControlBlockUnlock
+
+	// create object with FCB
+
+	fileobject@ // fileobject
+	process@ // process
+	fcb@ // fcb
+	AFSFillFileObject
+
+	ibcb@ VcBufferDirty
+	ibcb@ VcBufferDecrementMapAndUnpin
+
+	dirbcb@ VcBufferDirty
+	dirbcb@ VcBufferDecrementMapAndUnpin
+
+	dirfcb@ AFSINodeUpdateModificationTime
+end
+
+fn (IODispatchDeleteObjectFunction) AFSDeleteObject { object -- ok }
+	fnsection "PAGE$text"
+
+	auto fcb
+	object@ IOFile_FileControlBlock + @ fcb!
+
+	auto mount
+	fcb@ FSFileControlBlockGetMount mount!
+
+	auto afsdata
+	mount@ IOMount_Extension + @ afsdata!
+
+	if (object@ IOFile_Context + @ AFSFILECONTEXT_WRITABLE &)
+		-1 afsdata@ AFSData_WritableFiles + KeInterlockedIncrement drop
+	end
+
+	if (object@ IOFile_Context + @ AFSFILECONTEXT_UPDATEONCLOSE &)
+		fcb@ AFSINodeUpdate
+	end
+
+	// the FCB may or may not stop existing after we deref it here, so don't
+	// touch it again.
+
+	0 mount@ AFSTreeLock drop
+
+	fcb@ AFSFCBDereference
+
+	mount@ AFSTreeUnlock
+
+	mount@ // mount
+	AFSMountDereference drop
+
+	0 ok!
+end

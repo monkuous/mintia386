@@ -1,0 +1,116 @@
+//
+// Implements the system calls for the memory manager subsystem.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+fn OSSectionCreate { anonsize permissions name -- sectionhandle ok }
+	fnsection "PAGE$text"
+
+	auto kname
+	0 kname!
+
+	if (name@)
+		OBNAMEMAX // max
+		name@ // string
+		ExCallGetString ok! kname!
+
+		if (ok@)
+			return
+		end
+	end
+
+	anonsize@ // anonsize
+	permissions@ // permissions
+	kname@ // name
+	MmSectionCreate ok! sectionhandle!
+
+	if (name@)
+		kname@ ExCallFreeString
+	end
+end
+
+fn OSMapView { length startva sectionoffset mappedhandle processhandle pageprotection flags -- realva ok }
+	fnsection "PAGE$text"
+
+	length@ startva@ sectionoffset@ mappedhandle@ processhandle@ pageprotection@ flags@ MmMapView ok! realva!
+end
+
+fn OSUnmapView { length vaddr processhandle -- ok }
+	fnsection "PAGE$text"
+
+	length@ vaddr@ processhandle@ MmUnmapView ok!
+end
+
+fn OSRemapView { pageprotection length vaddr processhandle -- ok }
+	fnsection "PAGE$text"
+
+	pageprotection@ length@ vaddr@ processhandle@ MmRemapView ok!
+end
+
+fn OSFlushView { length vaddr processhandle -- ok }
+	fnsection "PAGE$text"
+
+	length@ vaddr@ processhandle@ MmFlushView ok!
+end
+
+fn OSAllocate { length startva processhandle pageprotection flags -- realva ok }
+	fnsection "PAGE$text"
+
+	length@ startva@ processhandle@ pageprotection@ flags@ MmAllocate ok! realva!
+end
+
+fn OSMemoryQuery { query -- ok }
+	fnsection "PAGE$text"
+
+	auto kquery
+	OSMemoryInformation_SIZEOF alloc kquery!
+
+	kquery@ MmQuery ok!
+
+	if (ok@)
+		return
+	end
+
+	query@ // dest
+	kquery@ // src
+	OSMemoryInformation_SIZEOF // size
+	KeSafeCopyOut ok!
+end
+
+fn OSWorkingSetPurge { -- ok }
+	fnsection "PAGE$text"
+
+	auto process
+	KeProcessCurrent process!
+
+	process@ MiWorkingSetPurge
+end
+
+fn OSSynchronizeIcache { -- }
+	fnsection "PAGE$text"
+
+	HALIcacheSynchronize
+end

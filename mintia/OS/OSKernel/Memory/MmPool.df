@@ -1,0 +1,1087 @@
+//
+// Implements the kernel pool allocation entrypoints, and the page-aligned
+// allocator.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+#include "<ll>/OSDLL/OSBootFlags.h"
+
+#include "../../Common/Common.h"
+
+#include "MmInternal.h"
+
+buffer MiPoolSpacePagedEndBitmapHeader ComBitmapHeader_SIZEOF
+public MiPoolSpacePagedEndBitmapHeader
+
+buffer MiPoolSpacePagedEndBitmap (POOLPAGES 7 + 3 >>)
+
+var MmNonpagedPoolBytesUsed 0
+public MmNonpagedPoolBytesUsed
+
+var MmPagedPoolBytesUsed 0
+public MmPagedPoolBytesUsed
+
+var MmNonpagedPoolBytesPeak 0
+public MmNonpagedPoolBytesPeak
+
+var MmPagedPoolBytesPeak 0
+public MmPagedPoolBytesPeak
+
+var MiPoolPTEListHead 0
+var MiPoolPTEFirst 0
+
+var MiPoolPageListHead 0
+
+// The heap is managed within a 32MB region of kernel space called
+// "pool space". Allocations less than a page size are handled by a slab
+// allocator within pool pages. Allocations of a page size or more are handled
+// by directly allocating pool pages.
+
+struct MiPoolPTEBlock
+	4 Next
+	4 Size
+endstruct
+
+extern MiHeapInit { -- }
+
+fn MiPoolInit { -- }
+	fnsection "INIT$text"
+
+	POOLPAGES // sizeinbits
+	MiPoolSpacePagedEndBitmap // data	
+	MiPoolSpacePagedEndBitmapHeader // header
+	ComBitmapInitialize
+
+	// initialize the free list of POOLSPACE PTEs as one big block.
+
+	auto pteaddr
+	POOLSPACE MmVirtualtoPTEAddress pteaddr!
+
+	pteaddr@ MiPoolPTEFirst!
+
+	// set the size PTE to indicate the entire POOLSPACE.
+	POOLPAGES PTE_POOL_INFO_SHIFT << pteaddr@ MiPoolPTEBlock_Size + !
+
+	// set the offset PTE to zero, indicating the end of the free list.
+	0 pteaddr@ MiPoolPTEBlock_Next + !
+
+	// set the head of the free list.
+	pteaddr@ MiPoolPTEListHead!
+
+	MiHeapInit
+end
+
+fn MmHeapPrintTag { tag -- }
+	auto shf
+	32 shf!
+
+	while (shf@)
+		8 shf -=
+
+		auto c
+		tag@ shf@ >> 0xFF & c!
+
+		if (c@ 0x80 & ~~ c@ 0x20 >= &&)
+			c@ Putc
+		end else
+			'!' Putc
+		end
+	end
+end
+
+fn MmHeapCheck { -- }
+
+end
+
+fn MmHeapDumpBlockInfo { block -- }
+
+end
+
+extern MmHeapDumpPage { tag page -- usage }
+
+fn MmPoolDump { tag -- usage }
+	auto pfdbe
+	MiPoolPageListHead@ pfdbe!
+
+	0 usage!
+
+	while (pfdbe@)
+		if (pfdbe@ MiPageFrameEntryPool_Level + @ -1 ==)
+			// page-aligned
+
+			if (tag@ ~~ pfdbe@ MiPageFrameEntryPool_Tag + @ tag@ == ||)
+				pfdbe@ MiPageFrameEntryPool_Tag + @ MmHeapPrintTag
+				pfdbe@ MiPageFrameEntryPool_ByteSize + @
+				pfdbe@ MiPageFrameEntryPool_VirtualAddress + @
+				" %08x (%d bytes)\n" Printf
+
+				pfdbe@ MiPageFrameEntryPool_ByteSize + @ usage +=
+			end
+		end else
+			// heap
+
+			tag@ // tag
+			pfdbe@ MiPageFrameEntryPool_VirtualAddress + @
+			MmHeapDumpPage usage +=
+		end
+
+		pfdbe@ MiPageFrameEntryPool_PoolListNext + @ pfdbe!
+	end
+end
+
+fn MmAllocWithTag { bytes tag flags -- ptr ok }
+	if (DEBUGCHECKS)
+		if (MiInited@ ~~)
+			"MmAllocWithTag: used before MmInit called\n" KeCrash
+		end
+
+		if (KeIPLCurrentGet IPLDPC >)
+			"MmAllocWithTag: ipl > IPLDPC\n" KeCrash
+		end
+
+		if (bytes@ ~~)
+			"MmAllocWithTag: request of 0 bytes\n" KeCrash
+		end
+	end
+
+	if (flags@ 0 ==)
+		// can't block, so give this nonpaged allocation a small leg up
+
+		POOLALLOC flags!
+	end elseif (ExBootFlags@ OSBOOTFLAG_NONPAGEDPOOL &)
+		PAGED ~ flags &=
+	end
+
+	// round up to nearest long
+	bytes@ 3 + 3 ~ & bytes!
+
+	if (bytes@ MiAllocatedHeapBlock_SIZEOF + PAGESIZE 2 / >=)
+		if (flags@ PAGED &)
+			bytes@ // bytes
+			tag@ // tag
+			flags@ // flags
+			MiPagedPoolAllocPages ok! ptr!
+		end else
+			bytes@ // bytes
+			tag@ // tag
+			flags@ // flags
+			MiNonpagedPoolAllocPages ok! ptr! drop
+		end
+
+		if (DEBUGCHECKS)
+			if (ok@)
+				if (flags@ CANBLOCK &)
+					"MmAllocWithTag: page-aligned CANBLOCK allocation failed\n" KeCrash
+				end
+			end
+		end
+
+		return
+	end
+
+	bytes@ // bytes
+	tag@ // tag
+	flags@ // flags
+	MiHeapAlloc ok! ptr!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			if (flags@ CANBLOCK &)
+				"MmAllocWithTag: CANBLOCK allocation failed\n" KeCrash
+			end
+		end
+	end
+end
+
+fn MmFree { ptr -- }
+	if (DEBUGCHECKS)
+		if (MiInited@ ~~)
+			"MmFree: used before MmInit called\n" KeCrash
+		end
+
+		if (ptr@ -1 ==)
+			"MmFree: tried to free -1 pointer\n" KeCrash
+		end
+
+		if (KeIPLCurrentGet IPLDPC >)
+			"MmFree: ipl > IPLDPC\n" KeCrash
+		end
+
+		if (ptr@ POOLSPACE <)
+			ptr@ "MmFree: ptr 0x%08x < POOLSPACE\n" KeCrash
+		end
+
+		if (ptr@ POOLSPACE POOLSIZE + >=)
+			ptr@ "MmFree: ptr 0x%08x beyond pool space\n" KeCrash
+		end
+	end
+
+	if (ptr@ MMLOWESTSYSTEMADDRESS <)
+		ptr@ "MmFree: tried to free null pointer (%x)\n" KeCrash
+	end
+
+	if (ptr@ PAGEOFFSETMASK & ~~)
+		// page aligned.
+		// determine if the given block is in paged or nonpaged pool.
+
+		auto pteaddr
+		ptr@ // vaddr
+		MmVirtualtoPTEAddress pteaddr!
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		auto ok
+		auto phyaddr
+		pteaddr@ // pteaddr
+		MiPTEInterpret ok! drop phyaddr!
+
+		if (ok@)
+			ipl@ KeIPLLower
+
+			// only paged pool can be non-resident.
+			// and also mistaken frees.
+
+			0 // noaccount
+			ptr@ // ptr
+			MiPagedPoolFreePages
+		end else
+			// maybe paged or nonpaged. check PFDBE.
+
+			auto pfdbe
+			phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			if (pfdbe@ MiPageFrameEntryPool_ZeroIfNonPaged + @ 0 ==)
+				ipl@ KeIPLLower
+
+				// nonpaged.
+
+				0 // noaccount
+				ptr@ // ptr
+				MiNonpagedPoolFreePages
+			end else
+				ipl@ KeIPLLower
+
+				// paged.
+
+				0 // noaccount
+				ptr@ // ptr
+				MiPagedPoolFreePages
+			end
+		end
+
+		return
+	end
+
+	ptr@ MiHeapFree
+end
+
+var MiPoolPageHint 0
+
+var MiPoolSpaceUsed 0
+public MiPoolSpaceUsed
+
+fn MiPoolSpaceReserve { pri pagesneeded -- vaddr pteaddr ok }
+	auto prev
+	0 prev!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	MiPoolPTEListHead@ pteaddr!
+
+	if (pteaddr@ ~~)
+		ipl@ KeIPLLower
+
+#ifdef DEBUGCHECKS
+			"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n" Printf
+			"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n" Printf
+
+			PrintPoolPTEList
+
+			pagesneeded@
+			MiPoolSpaceUsed@
+			"!!! MiPoolSpaceReserve 1 !!! used=%d rq=%d\n" KeCrash
+#endif
+
+		STATUS_NO_MEMORY ok!
+
+		return
+	end
+
+	while (1)
+		auto next
+		pteaddr@@ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & next!
+
+		auto ptecount
+
+		if (pteaddr@@ PTE_POOL_SINGLETON &)
+			1 ptecount!
+		end else
+			pteaddr@ MiPoolPTEBlock_Size + @ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & ptecount!
+		end
+
+		if (ptecount@ pagesneeded@ >=)
+			// theres at least enough in this block to satisfy the request.
+			// figure out whether to direct return or split.
+
+			pagesneeded@ MiPoolSpaceUsed +=
+
+			if (ptecount@ pagesneeded@ ==)
+				// there's exactly enough to satisfy the request.
+				// grab the whole chunk.
+
+				if (prev@)
+					// save next link in prev
+
+					prev@@ PTE_POOL_INFO_MASK PTE_POOL_INFO_SHIFT << ~ &
+					next@ PTE_POOL_INFO_SHIFT << | prev@!
+				end elseif (next@)
+					next@ MiPoolPTEFirst@ + MiPoolPTEListHead!
+				end else
+					0 MiPoolPTEListHead!
+				end
+
+				ipl@ KeIPLLower
+
+				pteaddr@ MiPoolPTEFirst@ - PTESIZE / PAGESHIFT << POOLSPACE + vaddr!
+
+				0 ok!
+
+				return
+			end
+
+			// split the chunk by carving off the end.
+			// we do this so that we don't have to manipulate the next link in
+			// the prev entry.
+
+			// calculate how many PTEs will be in the new chunk.
+
+			pagesneeded@ ptecount -=
+
+			// save this.
+
+			if (ptecount@ 1 ==)
+				// the remaining free chunk is becoming a singleton, record that
+
+				PTE_POOL_SINGLETON pteaddr@ |=
+			end else
+				pteaddr@ MiPoolPTEBlock_Size + @ PTE_POOL_INFO_MASK PTE_POOL_INFO_SHIFT << ~ &
+				ptecount@ PTE_POOL_INFO_SHIFT << | pteaddr@ MiPoolPTEBlock_Size + !
+			end
+
+			ipl@ KeIPLLower
+
+			ptecount@ PTESIZE * pteaddr +=
+
+			pteaddr@ MiPoolPTEFirst@ - PTESIZE / PAGESHIFT << POOLSPACE + vaddr!
+
+			0 ok!
+
+			return
+		end
+
+		if (next@ ~~)
+			ipl@ KeIPLLower
+
+#ifdef DEBUGCHECKS
+				"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n" Printf
+				"\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n" Printf
+
+				PrintPoolPTEList
+
+				pagesneeded@
+				MiPoolSpaceUsed@
+				"!!! MiPoolSpaceReserve 2 !!! used=%d rq=%d\n" KeCrash
+#endif
+
+			STATUS_NO_MEMORY ok!
+
+			return
+		end
+
+		pteaddr@ prev!
+		next@ MiPoolPTEFirst@ + pteaddr!
+	end
+
+	if (DEBUGCHECKS)
+		"MiPoolSpaceReserve: unreachable\n" KeCrash
+	end
+end
+
+fn MiPoolSpaceRelease { pages pteaddr -- }
+	if (DEBUGCHECKS)
+		if (pages@ 0 ==)
+			"MiPoolSpaceRelease: zero pages\n" KeCrash
+		end
+	end
+
+	auto offset
+	pteaddr@ MiPoolPTEFirst@ - offset!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	pages@ MiPoolSpaceUsed -=
+
+	// Insertion sort the free block into the list.
+
+	auto next
+	MiPoolPTEListHead@ next!
+
+	if (next@ ~~)
+		0 pteaddr@!
+
+		if (pages@ 1 ==)
+			PTE_POOL_SINGLETON pteaddr@ |=
+		end else
+			pages@ PTE_POOL_INFO_SHIFT << pteaddr@ MiPoolPTEBlock_Size + !
+		end
+
+		pteaddr@ MiPoolPTEListHead!
+
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	// Seek to the first chunk of free PTEs that is after us.
+
+	auto prev
+	0 prev!
+
+	while (next@ pteaddr@ <)
+		next@ prev!
+
+		next@@ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & next!
+
+		if (next@ ~~)
+			break
+		end
+
+		MiPoolPTEFirst@ next +=
+	end
+
+	auto ptecount
+
+	if (prev@ ~~)
+		// No prev means we should be the head.
+
+		pteaddr@ MiPoolPTEListHead!
+	end else
+		// Try to merge left.
+
+		if (prev@@ PTE_POOL_SINGLETON &)
+			1 ptecount!
+		end else
+			prev@ MiPoolPTEBlock_Size + @ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & ptecount!
+		end
+
+		if (prev@ ptecount@ PTESIZE * + pteaddr@ ==)
+			// We can merge left.
+
+			prev@ pteaddr!
+			ptecount@ pages +=
+		end else
+			// Make prev point to our new chunk.
+
+			prev@@ PTE_POOL_INFO_MASK PTE_POOL_INFO_SHIFT << ~ &
+			offset@ PTE_POOL_INFO_SHIFT << | prev@!
+		end
+	end
+
+	if (next@)
+		// Try to merge right.
+
+		if (pteaddr@ pages@ PTESIZE * + next@ ==)
+			// We can merge right, it turns out.
+
+			if (next@@ PTE_POOL_SINGLETON &)
+				1 ptecount!
+			end else
+				next@ MiPoolPTEBlock_Size + @ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & ptecount!
+			end
+
+			ptecount@ pages +=
+
+			next@@ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & MiPoolPTEFirst@ + next!
+		end
+	end
+
+	// Encode the size, next link, etc in our new freed chunk.
+
+	next@ MiPoolPTEFirst@ - PTE_POOL_INFO_SHIFT << pteaddr@!
+
+	if (pages@ 1 ==)
+		PTE_POOL_SINGLETON pteaddr@ |=
+	end else
+		pages@ PTE_POOL_INFO_SHIFT << pteaddr@ MiPoolPTEBlock_Size + !
+	end
+
+	ipl@ KeIPLLower
+end
+
+#ifdef DEBUGCHECKS
+
+fn PrintPoolPTEList { -- }
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto freepte
+	MiPoolPTEListHead@ freepte!
+
+	if (freepte@ ~~)
+		return
+	end
+
+	while (1)
+		auto next
+		freepte@@ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & next!
+
+		auto ptecount
+
+		if (freepte@@ PTE_POOL_SINGLETON &)
+			1 ptecount!
+		end else
+			freepte@ MiPoolPTEBlock_Size + @ PTE_POOL_INFO_SHIFT >> PTE_POOL_INFO_MASK & ptecount!
+		end
+
+		ptecount@
+		freepte@ MiPoolPTEFirst@ - PTESIZE /
+		"\n%d: %d\n" Printf
+
+		if (next@ ~~)
+			break
+		end
+
+		next@ MiPoolPTEFirst@ + freepte!
+	end
+
+	ipl@ KeIPLLower
+end
+
+#endif
+
+fn MiPagedPoolAllocPages { bytes tag flags -- realva ok }
+	// this is a kernel mapping, so reserve POOLSPACE and use that as the
+	// startva. it must be done like this because kernel page tables are
+	// necessarily not dynamic.
+
+	auto pages
+	bytes@ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	pages@ PAGESHIFT << // charge
+	MmSystemQuota // quotablock
+	MmQuotaBlockChargeVM ok!
+
+	if (ok@)
+		return
+	end
+
+	auto pteaddr
+	CANBLOCK // pri
+	pages@ // pages
+	MiPoolSpaceReserve ok! pteaddr! realva!
+
+	if (ok@)
+		pages@ PAGESHIFT << // charge
+		MmSystemQuota // quotablock
+		MmQuotaBlockUnchargeVM
+
+		return
+	end
+
+	// set the bit for the final page in this allocation in the final page
+	// bitmap so we can count bits to know how long it is when we go to free.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	1 // runlength
+	realva@ POOLSPACE - PAGESHIFT >> pages@ 1 - + // index
+	MiPoolSpacePagedEndBitmapHeader // header
+	ComBitmapSetBits
+
+	if (flags@ POOLEXP & ~~)
+		pages@ PAGESHIFT << MmPagedPoolBytesUsed +=
+
+		if (MmPagedPoolBytesUsed@ MmPagedPoolBytesPeak@ >)
+			MmPagedPoolBytesUsed@ MmPagedPoolBytesPeak!
+		end
+	end
+
+	ipl@ KeIPLLower
+
+	// initialize the PTEs in that region of POOLSPACE as kernel demand-
+	// zero. this avoids having to allocate a VAD for private kernel
+	// mappings, which makes them much cheaper. we can't do this for user-
+	// space because userspace page tables are dynamically created and
+	// deleted as pages are faulted in and removed which necessitates a
+	// more permanent place for information. also, VADs are going to be
+	// placed in paged pool, which will cause a dependency cycle if we use
+	// them for private kernel mappings.
+
+	while (pages@)
+		PTE_KERNEL_DEMANDZERO pteaddr@!
+
+		PTESIZE pteaddr +=
+		1 pages -=
+	end
+
+	// TODO Tag
+end
+
+fn MiPagedPoolFreePages { noaccount vaddr -- }
+	auto pages
+	0 pages!
+
+	// find the length of the allocation by counting the number of clear bits
+	// until the next bit in the end bitmap. we don't wrap this in any
+	// synchronization mechanism because it shouldn't(?) be possible for
+	// anybody to interfere with this range of the bitmap while it is
+	// allocated, even if they (non-atomically) set bits in the same byte of
+	// it.
+
+	// XXX review this assumption for architectures like Alpha which don't
+	// have atomic loads and stores of bytes. this also may have weird
+	// interactions with some SMP schemes.
+
+	auto bmph
+	MiPoolSpacePagedEndBitmapHeader bmph!
+
+	auto off
+	vaddr@ POOLSPACE - PAGESHIFT >> off!
+
+	while (off@ bmph@ ComBitmapBitGet ~~)
+		1 off +=
+		1 pages +=
+	end
+
+	1 pages +=
+
+	// clear the final page bit.
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	1 // runlength
+	off@ // index
+	MiPoolSpacePagedEndBitmapHeader // header
+	ComBitmapClearBits
+
+	// trim the valid pages from the system working set.
+
+	vaddr@ // startva
+	vaddr@ pages@ PAGESHIFT << + // endva
+	PsSystemProcess@ // process
+	MiWorkingSetTrimRange
+
+	ipl@ KeIPLLower
+
+	auto count
+	pages@ count!
+
+	auto firstpteaddr
+	vaddr@ MmVirtualtoPTEAddress firstpteaddr!
+
+	auto pteaddr
+	firstpteaddr@ pteaddr!
+
+	while (count@)
+		if (pteaddr@@ PTE_KERNEL_DEMANDZERO ~=)
+			0 // deletepte
+			pteaddr@ // pteaddr
+			vaddr@ // vaddr
+			PsSystemProcess@ // process
+			MiAnonymousPageDeleteByPTE
+		end else
+			PTE_KERNEL_ZERO pteaddr@!
+		end
+
+		1 count -=
+		PTESIZE pteaddr +=
+		PAGESIZE vaddr +=
+	end
+
+	pages@ // pages
+	firstpteaddr@ // pteaddr
+	MiPoolSpaceRelease
+
+	pages@ PAGESHIFT << // charge
+	MmSystemQuota // quotablock
+	MmQuotaBlockUnchargeVM
+
+	if (noaccount@ ~~)
+		auto rs
+		HALCPUInterruptDisable rs!
+		pages@ PAGESHIFT << MmPagedPoolBytesUsed -=
+		rs@ HALCPUInterruptRestore
+	end
+end
+
+fn MiNonpagedPoolAllocPages { bytes tag flags -- firstpfdbe ptr ok }
+	auto pagesneeded
+	bytes@ PAGEOFFSETMASK + PAGESHIFT >> pagesneeded!
+
+	auto firstpteaddr
+	flags@ // pri
+	pagesneeded@ // pagesneeded
+	MiPoolSpaceReserve ok! firstpteaddr! ptr!
+
+	if (ok@)
+		return
+	end
+
+	flags@ MUSTSUCCEED | // pri
+	pagesneeded@ // pages
+	MmChargeCommit ok!
+
+	if (ok@)
+		pagesneeded@ // pages
+		firstpteaddr@ // pteaddr
+		MiPoolSpaceRelease
+
+		return
+	end
+
+	if (flags@ 0xFF & ZEROMUST ~=)
+		FREEFIRST flags |=
+	end
+
+	// the vaddrs are marked allocated, so we don't need to be in IPLDPC now,
+	// since nobody else is going to touch this range.
+
+	auto pfdbe
+	auto ipl
+	auto phyaddr
+
+	auto vaddr
+	ptr@ vaddr!
+
+	auto i
+	0 i!
+
+	0 firstpfdbe!
+
+	auto pteaddr
+	firstpteaddr@ pteaddr!
+
+	while (i@ pagesneeded@ <)
+		IPLDPC KeIPLRaise ipl!
+
+		0 // process
+		flags@ // priority
+		MmPageWait ok! drop
+
+		if (ok@)
+			ipl@ KeIPLLower
+
+			// failed to wait... gotta go back and free/unmap those pages.
+			// this can happen because the flags may or may not contain
+			// CANBLOCK.
+
+			while (i@)
+				PTESIZE pteaddr -=
+				1 i -=
+
+				0 // phyaddr
+				0 // flags
+				pteaddr@ // pteaddr
+				MiPTEUpdate drop phyaddr!
+
+				phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+				pfdbe@ MiPageFreeByEntry
+			end
+
+			pagesneeded@ MmUnchargeCommit
+
+			pagesneeded@ // pages
+			firstpteaddr@ // pteaddr
+			MiPoolSpaceRelease
+
+			return
+		end
+
+		flags@ MmPageGet drop pfdbe!
+
+		ipl@ KeIPLLower
+
+		if (firstpfdbe@ ~~)
+			pfdbe@ firstpfdbe!
+		end
+
+		pfdbe@ MmPFDBEToPhysicalAddress phyaddr!
+
+		phyaddr@ // phyaddr
+		PTE_W PTE_V | // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		tag@ pfdbe@ MiPageFrameEntryPool_Tag + !
+		pagesneeded@ PAGESHIFT << pfdbe@ MiPageFrameEntryPool_ByteSize + !
+		vaddr@ pfdbe@ MiPageFrameEntryPool_VirtualAddress + !
+		0 pfdbe@ MiPageFrameEntryPool_ZeroIfNonPaged + !
+		-1 pfdbe@ MiPageFrameEntryPool_Level + !
+
+		PTESIZE pteaddr +=
+		1 i +=
+	end
+
+	if (flags@ POOLEXP & ~~)
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		pagesneeded@ PAGESHIFT << MmNonpagedPoolBytesUsed +=
+
+		if (MmNonpagedPoolBytesUsed@ MmNonpagedPoolBytesPeak@ >)
+			MmNonpagedPoolBytesUsed@ MmNonpagedPoolBytesPeak!
+		end
+
+		rs@ HALCPUInterruptRestore
+	end
+
+	pagesneeded@ MiPhysicalUsage KeInterlockedIncrement drop
+
+	IPLDPC KeIPLRaise ipl!
+
+	firstpfdbe@ MiPoolPageInsert
+
+	ipl@ KeIPLLower
+end
+
+fn MiNonpagedPoolFreePages { noaccount ptr -- }
+	if (DEBUGCHECKS)
+		if (ptr@ POOLSPACE <)
+			ptr@ "MmPoolPageAlignedFree: ptr 0x%08x < POOLSPACE\n" KeCrash
+		end
+
+		if (ptr@ POOLSPACE POOLSIZE + >=)
+			ptr@ "MmPoolPageAlignedFree: ptr 0x%08x beyond pool space\n" KeCrash
+		end
+
+		if (ptr@ PAGEOFFSETMASK &)
+			ptr@ "MmPoolPageAlignedFree: ptr 0x%08x not aligned\n" KeCrash
+		end
+	end
+
+	auto pteaddr
+	ptr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto pfdbe
+	ptr@ MmVirtualToPFDBE pfdbe!
+
+	auto pages
+	pfdbe@ MiPageFrameEntryPool_ByteSize + @ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	pfdbe@ MiPoolPageRemove
+
+	if (noaccount@ ~~)
+		pages@ PAGESHIFT << MmNonpagedPoolBytesUsed -=
+	end
+
+	ipl@ KeIPLLower
+
+	0 pages@ - MiPhysicalUsage KeInterlockedIncrement drop
+
+	auto i
+	0 i!
+
+	while (i@ pages@ <)
+		ptr@ MmVirtualToPFDBE pfdbe!
+
+		0 // phyaddr
+		0 // flags
+		ptr@ // vaddr
+		MiPTEUpdateByVirtual drop drop
+
+		pfdbe@ MiPageFreeByEntry
+
+		PAGESIZE ptr +=
+		1 i +=
+	end
+
+	pages@ // pages
+	pteaddr@ // pteaddr
+	MiPoolSpaceRelease
+
+	pages@ MmUnchargeCommit
+end
+
+fn MmChargeBytesGet { bytes -- charge }
+	// round up to nearest long
+	bytes@ 3 + 3 ~ & bytes!
+
+	if (bytes@ MiAllocatedHeapBlock_SIZEOF + PAGESIZE 2 / >=)
+		bytes@ PAGEOFFSETMASK + PAGENUMBERMASK & charge!
+	end else
+		bytes@ MmHeapChargeBytesGet charge!
+	end
+end
+
+fn MmBlockChargeGet { block -- charge }
+	if (DEBUGCHECKS)
+		if (block@ 3 &)
+			block@ "MmBlockChargeGet: ptr 0x%08x not aligned\n" KeCrash
+		end
+	end
+
+	if (block@ PAGEOFFSETMASK & ~~)
+		if (DEBUGCHECKS)
+			if (block@ POOLSPACE <)
+				block@ "MmBlockChargeGet: ptr 0x%08x < POOLSPACE\n" KeCrash
+			end
+
+			if (block@ POOLSPACE POOLSIZE + >=)
+				block@ "MmBlockChargeGet: ptr 0x%08x beyond pool space\n" KeCrash
+			end
+		end
+
+		// page aligned.
+		// determine if the given block is in paged or nonpaged pool.
+
+		auto pteaddr
+		block@ // vaddr
+		MmVirtualtoPTEAddress pteaddr!
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		auto ok
+		auto phyaddr
+		pteaddr@ // pteaddr
+		MiPTEInterpret ok! drop phyaddr!
+
+		if (ok@ ~~)
+			// maybe paged or nonpaged. check PFDBE.
+
+			auto pfdbe
+			phyaddr@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			if (pfdbe@ MiPageFrameEntryPool_ZeroIfNonPaged + @ 0 ==)
+				ipl@ KeIPLLower
+
+				// nonpaged.
+
+				pfdbe@ MiPageFrameEntryPool_ByteSize + @ charge!
+
+				return
+			end
+		end
+
+		ipl@ KeIPLLower
+
+		// paged.
+
+		auto offset
+		block@ POOLSPACE - PAGESHIFT >> offset!
+
+		auto pages
+		0 pages!
+
+		auto bmph
+		MiPoolSpacePagedEndBitmapHeader bmph!
+
+		while (offset@ bmph@ ComBitmapBitGet ~~)
+			1 offset +=
+			1 pages +=
+		end
+
+		1 pages +=
+
+		pages@ PAGESHIFT << charge!
+
+		return
+	end
+
+	// not page aligned. charge is defined by pool header.
+
+	block@ MmHeapChargeGet charge!
+end
+
+fn MiPoolPageRemove { pfdbe -- }
+	// assumes IPLDPC or equivalent
+
+	auto ls
+	pfdbe@ MiPageFrameEntryPool_PoolListPrev + @ ls!
+
+	auto ns
+	pfdbe@ MiPageFrameEntryPool_PoolListNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ MiPageFrameEntryPool_PoolListNext + !
+	end else
+		ns@ MiPoolPageListHead!
+	end
+
+	if (ns@)
+		ls@ ns@ MiPageFrameEntryPool_PoolListPrev + !
+	end
+end
+
+fn MiPoolPageInsert { pfdbe -- }
+	// assumes IPLDPC or equivalent
+
+	auto h
+	MiPoolPageListHead@ h!
+
+	if (h@ ~~)
+		0 pfdbe@ MiPageFrameEntryPool_PoolListNext + !
+		0 pfdbe@ MiPageFrameEntryPool_PoolListPrev + !
+
+		pfdbe@ MiPoolPageListHead!
+	end else
+		0 pfdbe@ MiPageFrameEntryPool_PoolListPrev + !
+
+		h@ pfdbe@ MiPageFrameEntryPool_PoolListNext + !
+		pfdbe@ h@ MiPageFrameEntryPool_PoolListPrev + !
+		pfdbe@ MiPoolPageListHead!
+	end
+end
+
+fn MiMapQuickPage { phyaddr -- vaddr }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"MiMapQuickPage: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	MiQuickPage@ vaddr!
+
+	phyaddr@ // phyaddr
+	PTE_V PTE_W | // flags
+	vaddr@ // vaddr
+	MiPTEUpdateByVirtual drop drop
+end
+
+fn MiUnmapQuickPage { vaddr -- }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"MiUnmapQuickPage: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	return
+end

@@ -1,0 +1,48 @@
+//
+// Initialization of the MINTIA memory manager.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALResource.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../MmInternal.h"
+
+extern HALfox32MapSwitch { pgtb -- }
+
+fn MiPlatformInit { -- }
+	fnsection "INIT$text"
+
+#ifdef 0
+	// unmap the lower half so those page tables can be reclaimed
+
+	HALPlatformKernelPageDirectory@ IDENTITYSPACE | // ptr
+	2048 // size
+	0 // word
+	memset
+#endif
+
+	// flush entire TLB
+
+	HALPlatformKernelPageDirectory@ // pgtb
+	HALfox32MapSwitch
+end

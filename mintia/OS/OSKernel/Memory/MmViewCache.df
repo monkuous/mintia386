@@ -1,0 +1,318 @@
+//
+// Implements support routines for the file view cache.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/ViewCache.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+table MmBufferMappings[(VIEWSIZE FILEVIEWSHIFT >>)]
+public MmBufferMappings
+
+fn MmBufferMap { bcb -- }
+	auto vaddr
+	bcb@ VcBuffer_WindowAddress + @ vaddr!
+
+	if (DEBUGCHECKS)
+		if (vaddr@ VIEWSPACE < vaddr@ VIEWSPACEEND >= ||)
+			vaddr@ "MmBufferMap: window not in VIEWSPACE (%x)\n" KeCrash
+		end
+	end
+
+	auto ix
+	vaddr@ VIEWSPACE - FILEVIEWSHIFT >> ix!
+
+	if (DEBUGCHECKS)
+		if ([ix@]MmBufferMappings@)
+			"MmBufferMap: window already mapped\n" KeCrash
+		end
+	end
+
+	bcb@ [ix@]MmBufferMappings!
+end
+
+fn MmBufferUnmap { bcb -- }
+	auto vaddr
+	bcb@ VcBuffer_WindowAddress + @ vaddr!
+
+	if (DEBUGCHECKS)
+		if (vaddr@ VIEWSPACE < vaddr@ VIEWSPACEEND >= ||)
+			vaddr@ "MmBufferUnmap: window not in VIEWSPACE (%x)\n" KeCrash
+		end
+	end
+
+	auto ix
+	vaddr@ VIEWSPACE - FILEVIEWSHIFT >> ix!
+
+	if (DEBUGCHECKS)
+		if ([ix@]MmBufferMappings@ ~~)
+			"MmBufferUnmap: window not mapped\n" KeCrash
+		end
+	end
+
+	auto max
+	vaddr@ FILEVIEWGRANULARITY + max!
+
+	vaddr@ // startva
+	max@ // endva
+	PsSystemProcess@ // process
+	MiWorkingSetTrimRange
+
+	0 [ix@]MmBufferMappings!
+
+	// We don't actually need to do anything else since the view cache maps
+	// shared pages, whose PTEs are zeroed out when trimmed from the working
+	// set.
+end
+
+fn MmBufferTruncate { offset bcb -- }
+	auto vaddr
+	bcb@ VcBuffer_WindowAddress + @ vaddr!
+
+	if (DEBUGCHECKS)
+		if (vaddr@ VIEWSPACE < vaddr@ VIEWSPACEEND >= ||)
+			vaddr@ "MmBufferUnmap: window not in VIEWSPACE (%x)\n" KeCrash
+		end
+	end
+
+	auto max
+	vaddr@ FILEVIEWGRANULARITY + max!
+
+	vaddr@ offset@ + // startva
+	max@ // endva
+	PsSystemProcess@ // process
+	MiWorkingSetTrimRange
+end
+
+fn MmBufferDirty { bcb -- }
+	auto flags
+	PTE_V flags!
+
+	flags@ // flags
+	bcb@ VcBuffer_WindowAddress + @ // startva
+	bcb@ VcBuffer_WindowAddress + @ bcb@ VcBuffer_Length + @ + // endva
+	PsSystemProcess@ // process
+	MiWorkingSetRemap
+end
+
+fn MmBufferPin { bcb -- ok }
+	0 ok!
+
+	// pin the buffer one page at a time. we just fault the pages in with
+	// KeSafeGetByte and capture the pfdbe to increment the refcount, much
+	// like how we pin MDLs. when the working set manager sees a shared page
+	// with a biased refcount in the system working set, it knows its a pinned
+	// viewcache page and doesn't touch it.
+
+	// the FCB MUST be held at least shared for the duration of the pin,
+	// otherwise truncation may occur which will cause horrible effects.
+	// other fs-specific methods of preventing truncation are also acceptable,
+	// as long as it is prevented somehow.
+
+	// read an entire fileview or up to the end of the file, whatever comes
+	// first.
+
+	auto pages
+	bcb@ VcBuffer_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @
+	bcb@ VcBuffer_FileOffset + @ - pages!
+
+	if (pages@ FILEVIEWGRANULARITY >)
+		FILEVIEWGRANULARITY pages!
+	end
+
+	pages@ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	auto vaddr
+	bcb@ VcBuffer_WindowAddress + @ vaddr!
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto pagesdone
+	0 pagesdone!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	while (pages@)
+		while (1)
+			auto pfdbe
+			pteaddr@ // pteaddr
+			MiPTEInterpret ok! drop pfdbe!
+
+			if (ok@)
+				// not resident. (re-)probe and try again.
+
+				ipl@ KeIPLLower
+
+				vaddr@ KeSafeProbeSystemByte ok! drop
+
+				IPLDPC KeIPLRaise ipl!
+
+				if (ok@)
+					break
+				end
+
+				continue
+			end
+
+			pfdbe@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			// we got a pfdbe, time to pin it.
+
+			auto oldcount
+			pfdbe@ MmEvictablePageReference oldcount!
+
+			if (DEBUGCHECKS)
+				if (oldcount@ 1 <)
+					"MmBufferPin: count too low\n" KeCrash
+				end
+			end
+
+			break
+		end
+
+		if (ok@)
+			break
+		end
+
+		PAGESIZE vaddr +=
+		PTESIZE pteaddr +=
+		1 pages -=
+		1 pagesdone +=
+	end
+
+	ipl@ KeIPLLower
+
+	if (ok@)
+		pagesdone@ // pages
+		bcb@ // bcb
+		MiBufferUnpin
+	end
+end
+
+fn MiBufferUnpin { pages bcb -- }
+	auto pteaddr
+	bcb@ VcBuffer_WindowAddress + @ MmVirtualtoPTEAddress pteaddr!
+
+	while (pages@)
+		auto pfdbe
+		auto ok
+
+		pteaddr@ MiPTEInterpret ok! drop pfdbe!
+
+		if (DEBUGCHECKS)
+			if (ok@)
+				"MmBufferUnpin: pinned viewcache PTE wasn't valid\n" KeCrash
+			end
+		end
+
+		pfdbe@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+		// we got a pfdbe, time to unpin it.
+
+		auto oldcount
+		pfdbe@ MmEvictablePageDereference oldcount!
+
+		if (DEBUGCHECKS)
+			if (oldcount@ 1 <=)
+				"MmBufferUnpin: count too low\n" KeCrash
+			end
+		end
+
+		PTESIZE pteaddr +=
+		1 pages -=
+	end
+end
+
+fn MmBufferUnpin { bcb -- }
+	auto pages
+	bcb@ VcBuffer_FileControlBlock + @ IOFileControlBlock_SizeInBytes + @
+	bcb@ VcBuffer_FileOffset + @ - pages!
+
+	if (pages@ FILEVIEWGRANULARITY >)
+		FILEVIEWGRANULARITY pages!
+	end
+
+	pages@ PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	pages@ // pages
+	bcb@ // bcb
+	MiBufferUnpin
+end
+
+fn MmViewPagePin { vaddr -- pfdbe ok }
+	// pin a single viewcache page into the system working set and return its
+	// PFDBE. useful when pinning an entire BCB (up to 32K) would be too heavy
+	// handed, but a guarantee of page validity, and/or the catching of
+	// potential page-in I/O errors, is still required.
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	while (1)
+		// poke the buffer page to make sure it is resident.
+
+		vaddr@ KeSafeProbeSystemByte ok! drop
+
+		if (ok@)
+			return
+		end
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		pteaddr@ MiPTEInterpret ok! drop pfdbe!
+
+		if (ok@)
+			// not resident, loop, re-poke, and try again.
+
+			ipl@ KeIPLLower
+
+			continue
+		end
+
+		pfdbe@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+		// we got a pfdbe, time to pin it.
+
+		auto oldcount
+		pfdbe@ MmEvictablePageReference oldcount!
+
+		if (DEBUGCHECKS)
+			if (oldcount@ 1 <)
+				"MmViewCachePagePin: count too low\n" KeCrash
+			end
+		end
+
+		ipl@ KeIPLLower
+
+		return
+	end
+end
+
+fn MmViewPageUnpin { pfdbe -- }
+	pfdbe@ MmEvictablePageDereference drop
+end

@@ -1,0 +1,327 @@
+//
+// Implements page frame allocation.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALResource.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "MmInternal.h"
+
+fn MmPFDBEToPhysicalAddress { pfdbe -- phyaddr }
+	pfdbe@ MiPageFrameDatabase@ - MiPageFrameEntry_SIZEOF / PAGESHIFT << phyaddr!
+end
+
+fn MmKflagToPriority { kflags -- pri }
+	0 pri!
+
+	if (kflags@ IOKFLAG_SWAPOUT &)
+		MUSTSUCCEED pri!
+	end elseif (kflags@ IOKFLAG_URGENT &)
+		MUSTSUCCEEDL2 pri!
+	end
+
+	if (kflags@ IOKFLAG_SYSSPC &)
+		SYSTEMSPACE pri |=
+	end
+end
+
+fn MmPageGet { priority -- pfdbe ok }
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"MmPageGet: ipl != IPLDPC\n" KeCrash
+		end
+
+		if (priority@ FREEFIRST ZEROMUST | & ~~)
+			priority@ "MmPageGet: bad pagetype %d\n" KeCrash
+		end
+
+		if (priority@ FREEFIRST ZEROMUST | & FREEFIRST ZEROMUST | ==)
+			priority@ "MmPageGet: bad priority %d\n" KeCrash
+		end
+	end
+
+	0 ok!
+
+	if (MiPageZeroListHead@ MiPageFreeListHead@ | ~~)
+		// None in free or zero list. Evict one.
+
+		MiEvictablePageListHead@ pfdbe!
+
+		if (pfdbe@ ~~)
+			STATUS_NO_MEMORY ok!
+
+			return
+		end
+
+		// Call the appropriate eviction function for the page type.
+
+		pfdbe@ // pfdbe
+		[pfdbe@ MiPageFrameEntryEvictable_EvictionTypeB + gb]MiEvictableFunctionsTable@
+		MmEvictionFunction
+
+		if (DEBUGCHECKS)
+			if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi 0 ~=)
+				pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi
+				"MmPageGet: attempt to evict a page with %d references\n" KeCrash
+			end
+		end
+
+		// Remove the page from the evictable list.
+
+		pfdbe@ MiEvictablePageRemove
+
+		// MiEvictablePageRemove incremented the system working set counter,
+		// so fix it, since this page is not necessarily destined for that.
+
+		1 MmTotalWorkingSetSize -=
+
+		if (priority@ ZEROMUST &)
+			// Zero out this page.
+
+			0 // offset
+			pfdbe@ MmPFDBEToPhysicalAddress // phyaddr
+			MmPageFrameZero
+		end
+	end elseif (priority@ FREEFIRST &)
+		1 MmAvailablePageCount -=
+
+		// Attempt to get a page from the free list first.
+		// If its empty, try to get one from the zero list.
+		// We already determined that there's at least one page on one of
+		// those lists.
+
+		MiPageFreeListHead@ pfdbe!
+
+		if (pfdbe@)
+			pfdbe@ MiPageFrameEntryFree_Next + @ MiPageFreeListHead!
+
+			1 MiFreeListCount -=
+		end else
+			// Resort to a zero page.
+
+			MiPageZeroListHead@ pfdbe!
+			pfdbe@ MiPageFrameEntryFree_Next + @ MiPageZeroListHead!
+
+			1 MiZeroListCount -=
+		end
+	end else
+		1 MmAvailablePageCount -=
+
+		// Attempt to get a page from the zero list first.
+		// If its empty, try to get one from the free list.
+		// We already determined that there's at least one page on one of
+		// those lists.
+
+		MiPageZeroListHead@ pfdbe!
+
+		if (pfdbe@)
+			pfdbe@ MiPageFrameEntryFree_Next + @ MiPageZeroListHead!
+
+			1 MiZeroListCount -=
+		end else
+			MiPageFreeListHead@ pfdbe!
+			pfdbe@ MiPageFrameEntryFree_Next + @ MiPageFreeListHead!
+
+			1 MiFreeListCount -=
+
+			// Zero the free page out.
+
+			0 // offset
+			pfdbe@ MmPFDBEToPhysicalAddress // phyaddr
+			MmPageFrameZero
+		end
+	end
+
+	if (MmAvailablePageCount@ MmLowAvailablePageCount@ <)
+		0 // priboost
+		MmLowMemoryEvent // event
+		KeEventSignal
+	end
+end
+
+fn MmPageWait { process priority -- waited ok }
+	// wait until the appropriate available page threshold is reached.
+	// will never return an error status if CANBLOCK is specified.
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC ~=)
+			"MmPageWait: ipl != IPLDPC\n" KeCrash
+		end
+	end
+
+	0 waited!
+
+	if (MmAvailablePageCount@ MMNORMALTHRESH >=)
+		0 ok!
+
+		return
+	end
+
+	auto wprocess
+	KeThreadCurrent@ KeThread_Process + @ wprocess!
+
+	auto blockon
+
+	if (priority@ MUSTSUCCEED &)
+		// CANBLOCK page allocations have different wait rules if MUSTSUCCEED
+		// is also specified:
+
+		MMMUSTSUCCEEDTHRESH blockon!
+	end elseif (priority@ MUSTSUCCEEDL2 &)
+		MMMUSTSUCCEEDL2THRESH blockon!
+	end elseif (priority@ POOLALLOC &)
+		MMPOOLTHRESH blockon!
+	end else
+		// normal rules:
+		MMNORMALTHRESH blockon! // don't dip into MUSTSUCCEED page pool
+	end
+
+	if (KeThreadCurrent@ PsThread_MemoryPrivilegedCount + @)
+		MMMUSTSUCCEEDTHRESH blockon!
+	end
+
+	if (priority@ CANBLOCK & ~~)
+		// check this now instead of doing it every iteration in the while
+		// loop
+
+		if (MmAvailablePageCount@ blockon@ <)
+			STATUS_NO_MEMORY ok!
+
+			return
+		end
+	end
+
+	auto timeouts
+	600 timeouts!
+
+	auto event
+
+	if (blockon@ MMNORMALTHRESH >=)
+		MiPageAvailableEvent event!
+	end else
+		MiMustSucceedEvent event!
+	end
+
+	while (MmAvailablePageCount@ blockon@ <)
+		event@ KeEventReset drop
+
+		IPLAPC KeIPLLower
+
+		if (process@)
+			process@ MmVADListUnlock
+		end
+
+		1 waited!
+
+		KERNELMODE // waitmode
+		0 // alertable
+		100 // timeout
+		event@ // object
+		KeThreadWaitForObject ok!
+
+		if (process@)
+			0 // alertable
+			process@ // processobject
+			MmVADListLock drop
+		end
+
+		IPLDPC KeIPLRaise drop
+
+		if (ok@ ~~)
+			600 timeouts!
+
+			continue
+		end
+
+		if (ok@ STATUS_WAIT_TIMEOUT ~=)
+			return
+		end
+
+		if (timeouts@ ~~)
+			MmAvailablePageCount@
+			MmModifiedPageCount@
+			MiZeroListCount@
+			MiFreeListCount@
+			MiEvictableListCount@
+			"MM likely deadlocked EVI=%d FRE=%d ZRO=%d MOD=%d AVL=%d\n" KeCrash
+		end
+
+		1 timeouts -=
+
+		// recheck this since it may have changed
+
+		if (KeThreadCurrent@ PsThread_MemoryPrivilegedCount + @)
+			MMMUSTSUCCEEDTHRESH blockon!
+			MiMustSucceedEvent event!
+		end
+	end
+
+	0 ok!
+end
+
+fn MiPageFreeByEntry { pfdbe -- }
+	// insert a page frame into the free list
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	MiPageFreeListHead@ pfdbe@ MiPageFrameEntryFree_Next + !
+	pfdbe@ MiPageFreeListHead!
+
+	1 MmAvailablePageCount +=
+	1 MiFreeListCount +=
+
+	rs@ HALCPUInterruptRestore
+
+	if (MmAvailablePageCount@ MMNORMALTHRESH >=)
+		if (MiPageAvailableEvent KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+			0 // priboost
+			MiPageAvailableEvent // event
+			KeEventSignal
+		end
+	end elseif (MiMustSucceedEvent KeEvent_DispatchHeader + KeDispatchHeader_Signaled + @ ~~)
+		0 // priboost
+		MiMustSucceedEvent // event
+		KeEventSignal
+	end
+end
+
+fn MmPageFrameZero { offset phyaddr -- }
+	// zero out a page frame, starting at the given offset.
+
+	auto vaddr
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	phyaddr@ MiMapQuickPage vaddr!
+
+	vaddr@ offset@ + // ptr
+	PAGESIZE offset@ - // sz
+	0 // word
+	memset
+
+	vaddr@ MiUnmapQuickPage
+
+	ipl@ KeIPLLower
+end

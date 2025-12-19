@@ -1,0 +1,406 @@
+//
+// Implements the fox32 mouse driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALMap.h"
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALfox32IO.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OSMouseControl.h"
+
+const MSE_PORT 0x80000400
+const MSE_PORT_BUTTONS 0
+const MSE_PORT_POS     1
+
+var Fox32MouseButtonLast 0
+var Fox32MousePosLast 0
+
+const PACKETBUFFERSIZE (OSMousePacket_SIZEOF 4 *)
+
+struct Mouse
+	PACKETBUFFERSIZE PacketBuffer
+
+	4 ReadIndex
+	4 WriteIndex
+	4 Remaining
+
+	4 RequestListHead
+	4 RequestListTail
+endstruct
+
+table DriverMouseDispatch
+	0                                    // open
+	0                                    // close
+	0                                    // iocontrol
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // system control
+	0                                    // parse
+	0                                    // create
+	0                                    // flush
+	pointerof IODeviceDeleteFileObject   // delete object
+	0                                    // set information
+	0                                    // get information
+	0                                    // rename
+	0                                    // readblock
+	0                                    // writeblock
+	0                                    // truncate
+	0                                    // readdirectory
+	0                                    // getpageaddr
+	0                                    // delete device object
+	0                                    // reclaim fcb
+	pointerof DriverMouseCancel          // cancel request
+	pointerof DriverMouseRead            // read
+	0                                    // reserved
+endtable
+
+table DriverMouse
+	IOVERSION_MAJOR                      // ioversion major
+	IOVERSION_MINOR                      // ioversion minor
+
+	"mouse"                              // name
+	pointerof DriverMouseDispatch        // dispatch table
+	0                                    // flags
+
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+	0                                    // reserved
+endtable
+
+var Fox32Mouse 0
+
+rosection "INIT$text"
+
+fn Fox32MouseInit { -- }
+	fnsection "INIT$text"
+
+	auto dev
+	auto ok
+
+	Mouse_SIZEOF // extensionsize
+	OSFILETYPE_CHARDEVICE // type
+	"foxmouse0" // name
+	0 // sizeinbytes
+	DriverMouse // driver
+	ACCESS_OWNER_READ ACCESS_GROUP_READ | // permissions
+	IODeviceCreate ok! dev!
+
+	if (ok@)
+		ok@ "Fox32MouseInit: failed to create foxmouse0 (%i)\n" KeCrash
+	end
+
+	auto mouse
+	dev@ IODevice_Extension + @ mouse!
+
+	0 mouse@ Mouse_RequestListHead + !
+	0 mouse@ Mouse_RequestListTail + !
+
+	0 mouse@ Mouse_ReadIndex + !
+	0 mouse@ Mouse_WriteIndex + !
+	PACKETBUFFERSIZE mouse@ Mouse_Remaining + !
+
+	mouse@ Fox32Mouse!
+end
+
+rosection "text"
+
+fn (IODispatchCancelFunction) DriverMouseCancel { iop -- ok }
+	0 ok!
+
+	auto iopl
+	iop@ IOPacketCurrentLocation iopl!
+
+	auto mouse
+	iopl@ IOPacketLocation_Context + @ mouse!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (iop@ IOPacketHeader_IOPFlagsB + gb IOPFLAG_COMPLETE &)
+		// already completed, nothing to do
+		ipl@ KeIPLLower
+		return
+	end
+
+	auto ls
+	auto ns
+
+	iop@ IOPacketHeader_DeviceQueuePrev + @ ls!
+	iop@ IOPacketHeader_DeviceQueueNext + @ ns!
+
+	if (ls@)
+		ns@ ls@ IOPacketHeader_DeviceQueueNext + !
+	end else
+		ns@ mouse@ Mouse_RequestListHead + !
+	end
+
+	if (ns@)
+		ls@ ns@ IOPacketHeader_DeviceQueuePrev + !
+	end else
+		ls@ mouse@ Mouse_RequestListTail + !
+	end
+
+	ipl@ KeIPLLower
+
+	STATUS_IO_CANCELLED // status
+	0 // priboost
+	iop@ // iop
+	IOPacketCompleteLow
+end
+
+fn (IODispatchEnqueueIOPFunction) DriverMouseRead { iopl -- done ok }
+	1 done!
+	0 ok!
+
+	auto mouse
+	iopl@ IOPacketLocation_FileControlBlock + @ IOFileControlBlock_Paged + @ IOFileControlBlockPaged_DeviceObject + @ IODevice_Extension + @ mouse!
+
+	auto iop
+	iopl@ IOPacketFromLocation iop!
+
+	if (iopl@ IOPacketLocation_Length + @ OSMousePacket_SIZEOF %)
+		STATUS_UNALIGNED ok!
+
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	if (iopl@ IOPacketLocation_Length + @ ~~)
+		0 // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto mdl
+	iop@ IOPacketHeader_MDL + @ mdl!
+
+	1 // lockforwrite
+	mdl@ // mdl
+	MmMDLPin ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	mdl@ MmMDLMap ok!
+
+	if (ok@)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+
+		return
+	end
+
+	auto buf
+	iopl@ IOPacketLocationMappedBuffer buf!
+
+	auto length
+	iopl@ IOPacketLocation_Length + @ length!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto rp
+	mouse@ Mouse_ReadIndex + @ rp!
+
+	auto bytecnt
+	mouse@ Mouse_WriteIndex + @ rp@ - bytecnt!
+
+	if (length@ bytecnt@ <)
+		length@ bytecnt!
+	end
+
+	if (bytecnt@)
+		auto endp
+		rp@ bytecnt@ + endp!
+
+		if (rp@ PACKETBUFFERSIZE 1 - ~ & endp@ 1 - PACKETBUFFERSIZE 1 - ~ & ==)
+			// doesn't cross the boundary, do a single copy
+
+			buf@ // dest
+			mouse@ Mouse_PacketBuffer + rp@ PACKETBUFFERSIZE 1 - & + // src
+			bytecnt@ // sz
+			memcpy
+		end else
+			// crosses the boundary, do two copies
+
+			buf@ // dest
+			mouse@ Mouse_PacketBuffer + rp@ PACKETBUFFERSIZE 1 - & + // src
+			PACKETBUFFERSIZE rp@ PACKETBUFFERSIZE 1 - & - // sz
+			memcpy
+
+			buf@ PACKETBUFFERSIZE rp@ PACKETBUFFERSIZE 1 - & - + // dest
+			mouse@ Mouse_PacketBuffer + // src
+			endp@ PACKETBUFFERSIZE 1 - & // sz
+			memcpy
+		end
+
+		endp@ mouse@ Mouse_ReadIndex + !
+		bytecnt@ mouse@ Mouse_Remaining + +=
+	end
+
+	if (bytecnt@ length@ ~=)
+		if (iop@ IOPacketHeader_Timeout + @)
+			// enqueue
+
+			STATUS_OTHER_CONDITION ok!
+
+			bytecnt@ iopl@ IOPacketLocation_Offset + !
+			mouse@ iopl@ IOPacketLocation_Context + !
+
+			0 iop@ IOPacketHeader_DeviceQueueNext + !
+
+			auto t
+			mouse@ Mouse_RequestListTail + @ t!
+
+			t@ iop@ IOPacketHeader_DeviceQueuePrev + !
+
+			if (t@ ~~)
+				iop@ mouse@ Mouse_RequestListHead + !
+			end else
+				iop@ t@ IOPacketHeader_DeviceQueueNext + !
+			end
+
+			iop@ mouse@ Mouse_RequestListTail + !
+
+			iop@ IOPacketWasEnqueued
+		end else
+			bytecnt@ iop@ IOPacketHeader_StatusBlock + OSStatusBlock_Length + !
+		end
+	end
+
+	ipl@ KeIPLLower
+
+	if (ok@ STATUS_OTHER_CONDITION ~=)
+		ok@ // status
+		0 // priboost
+		iop@ // iop
+		IOPacketCompleteLow
+	end else
+		0 ok!
+	end
+end
+
+fn Fox32MouseEvent { info eventtype -- }
+	auto mouse
+	Fox32Mouse@ mouse!
+
+	auto eventbuf
+	mouse@ Mouse_PacketBuffer + eventbuf!
+
+	auto iop
+	mouse@ Mouse_RequestListHead + @ iop!
+
+	if (iop@)
+		auto iopl
+		iop@ IOPacketCurrentLocation iopl!
+
+		auto buf
+		iopl@ IOPacketLocationMappedBuffer buf!
+
+		info@
+		buf@ iopl@ IOPacketLocation_Offset + @ + OSMousePacket_Info + !
+
+		eventtype@
+		buf@ iopl@ IOPacketLocation_Offset + @ + OSMousePacket_EventType + !
+
+		OSMousePacket_SIZEOF iopl@ IOPacketLocation_Offset + +=
+		OSMousePacket_SIZEOF iopl@ IOPacketLocation_Length + -=
+
+		if (iopl@ IOPacketLocation_Length + @ ~~)
+			auto niop
+			iop@ IOPacketHeader_DeviceQueueNext + @ niop!
+
+			// complete the client MDL.
+
+			0 // status
+			IOBOOSTMOUSE // priboost
+			iop@ // mdl
+			IOPacketComplete
+
+			// unlink the client request.
+
+			niop@ iop!
+			iop@ mouse@ Mouse_RequestListHead + !
+
+			if (iop@)
+				0 iop@ IOPacketHeader_DeviceQueuePrev + !
+			end else
+				0 mouse@ Mouse_RequestListTail + !
+			end
+		end
+	end elseif (mouse@ Mouse_Remaining + @)
+		// insert into the buffer
+
+		info@ eventbuf@ mouse@ Mouse_WriteIndex + @ PACKETBUFFERSIZE 1 - & + OSMousePacket_Info + !
+		eventtype@ eventbuf@ mouse@ Mouse_WriteIndex + @ PACKETBUFFERSIZE 1 - & + OSMousePacket_EventType + !
+
+		OSMousePacket_SIZEOF mouse@ Mouse_Remaining + -=
+		OSMousePacket_SIZEOF mouse@ Mouse_WriteIndex + +=
+	end
+end
+
+fn Fox32MousePoll { -- }
+	auto mousebutton
+	MSE_PORT MSE_PORT_BUTTONS | HALfox32In mousebutton!
+
+	auto mousepos
+	MSE_PORT MSE_PORT_POS | HALfox32In mousepos!
+
+	if (mousebutton@ Fox32MouseButtonLast@ ~=)
+		if (mousebutton@ 4 &) // clicked
+			OSMOUSEBUTTON_PRIMARY // info
+			OSMOUSEEVENT_PRESSED // eventtype
+			Fox32MouseEvent
+		end else // released
+			OSMOUSEBUTTON_PRIMARY // info
+			OSMOUSEEVENT_RELEASED // eventtype
+			Fox32MouseEvent
+		end
+
+		mousebutton@ Fox32MouseButtonLast!
+	end
+
+	if (mousepos@ Fox32MousePosLast@ ~=)
+		mousepos@ 16 >> mousepos@ 16 << | // info
+		OSMOUSEEVENT_MOVEDABS // eventtype
+		Fox32MouseEvent
+
+		mousepos@ Fox32MousePosLast!
+	end
+end

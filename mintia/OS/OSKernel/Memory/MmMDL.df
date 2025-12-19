@@ -1,0 +1,709 @@
+//
+// Implements memory descriptor lists (MDLs) and buffer pinning, as well as
+// mapping of user buffers into system space.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/IPC.h"
+
+#include "MmInternal.h"
+
+buffer MiMDLZoneSmall MmZoneHeader_SIZEOF
+
+const SMALLPAGES 8
+
+const SMALLMDLS 40
+
+rosection "INIT$text"
+
+fn MiMDLZoneInit { count pagecount zone -- }
+	fnsection "INIT$text"
+
+	auto mdlsize
+	MmMDLHeader_SIZEOF pagecount@ 1 + 2 << + mdlsize!
+
+	mdlsize@ count@ * MMZONEOVERHEAD +
+	"zonesize %d\n"
+	"MiMDLZonesInit" HALLog
+
+	auto ok
+	auto chunk
+
+	mdlsize@ count@ * MMZONEOVERHEAD + // bytes
+	'MDLz' // tag
+	0 // flags
+	MmAllocWithTag ok! chunk!
+
+	if (ok@)
+		"MiMDLZonesInit: failed to create MDL zones\n" KeCrash
+	end
+
+	mdlsize@ count@ * MMZONEOVERHEAD + // bytes
+	chunk@ // chunk
+	mdlsize@ // blocksize
+	zone@ // zoneheader
+	MmZoneInitialize
+end
+
+fn MiMDLZonesInit { -- }
+	fnsection "INIT$text"
+
+	SMALLMDLS // count
+	SMALLPAGES // pagecount
+	MiMDLZoneSmall // zone
+	MiMDLZoneInit
+end
+
+rosection "text"
+
+fn MmMDLInitialize { length vaddr kflags mdl -- }
+	vaddr@ mdl@ MmMDLHeader_VirtualAddress + !
+	length@ mdl@ MmMDLHeader_Length + !
+	0 mdl@ MmMDLHeader_Flags + !
+	0 mdl@ MmMDLHeader_MappedAddress + !
+	0 mdl@ MmMDLHeader_QuotaBlock + !
+
+	KeProcessCurrent mdl@ MmMDLHeader_Process + !
+
+	if (kflags@ IOKFLAG_PAGEIN &)
+		MMMDL_PAGEIN mdl@ MmMDLHeader_Flags + |=
+	end
+end
+
+fn MmMDLAllocate { length vaddr kflags -- mdl ok }
+	// try pretty hard not to call this since it puts IO integrity at the
+	// mercy of the memory manager.
+
+	if (DEBUGCHECKS)
+		if (KeIPLCurrentGet IPLDPC >=)
+			"MmMDLAllocate: ipl >= IPLDPC\n" KeCrash
+		end
+	end
+
+	auto pages
+	vaddr@ PAGEOFFSETMASK & length@ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	0 mdl!
+
+	auto zone
+	0 zone!
+
+	if (pages@ SMALLPAGES <=)
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		MiMDLZoneSmall MmZoneAllocate ok! mdl!
+
+		rs@ HALCPUInterruptRestore
+
+		if (ok@)
+			// no MDLs left in the zone.
+
+			0 mdl!
+		end else
+			1 zone!
+		end
+	end
+
+	if (mdl@ ~~)
+		auto bytes
+		vaddr@ length@ MmMDLGetSize bytes!
+
+		auto flags
+		CANBLOCK flags!
+
+		kflags@ MmKflagToPriority flags |=
+
+		bytes@ // bytes
+		'MMDL' // tag
+		flags@ // flags
+		MmAllocWithTag ok! mdl!
+
+		if (ok@)
+			return
+		end
+	end
+
+	length@ vaddr@ kflags@ mdl@ MmMDLInitialize
+
+	if (zone@)
+		MMMDL_ZONEMDL mdl@ MmMDLHeader_Flags + |=
+	end
+end
+
+fn MmMDLAllocateWithQuota { length vaddr kflags -- mdl ok }
+	if (kflags@ IOKFLAG_PAGING &)
+		// nope, don't charge quota for paging IO
+
+		length@ vaddr@ kflags@ MmMDLAllocate ok! mdl!
+
+		return
+	end
+
+	auto quotablock
+	KeProcessCurrent PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	auto bytes
+	vaddr@ length@ MmMDLGetSize bytes!
+
+	bytes@ MmChargeBytesGet // charge
+	quotablock@ // quotablock
+	MmQuotaBlockCharge ok!
+
+	if (ok@)
+		return
+	end
+
+	length@ vaddr@ kflags@ MmMDLAllocate ok! mdl!
+
+	if (ok@)
+		bytes@ MmChargeBytesGet // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUncharge
+	end else
+		quotablock@ mdl@ MmMDLHeader_QuotaBlock + !
+	end
+end
+
+fn MmMDLFree { mdl -- }
+	// free the MDL and uncharge any associated quota.
+
+	auto quotablock
+	mdl@ MmMDLHeader_QuotaBlock + @ quotablock!
+
+	auto charge
+
+	if (quotablock@)
+		mdl@ MmMDLHeader_VirtualAddress + @ // vaddr
+		mdl@ MmMDLHeader_Length + @ // length
+		MmMDLGetSize MmChargeBytesGet charge!
+	end
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_ZONEMDL &)
+		auto rs
+		HALCPUInterruptDisable rs!
+
+		mdl@ // ptr
+		MiMDLZoneSmall // zoneheader
+		MmZoneFree
+
+		rs@ HALCPUInterruptRestore
+	end else
+		mdl@ MmFree
+	end
+
+	if (quotablock@)
+		charge@ // charge
+		quotablock@ // quotablock
+		MmQuotaBlockUncharge
+	end
+end
+
+fn MmMDLFreeComplete { mdl -- }
+	// XXX review being able to clean this up after IOPackets are done
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_MAPPED &)
+		mdl@ MmMDLUnmap
+	end
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_PINNED &)
+		mdl@ MmMDLUnpin
+	end
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_FREE &)
+		mdl@ MmMDLFree
+	end
+end
+
+fn MmMDLGetSize { vaddr length -- size }
+	// calculate the required size for an MDL to describe this buffer
+
+	auto pages
+	vaddr@ PAGEOFFSETMASK & length@ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	pages@ 1 + 2 << MmMDLHeader_SIZEOF + size!
+end
+
+fn MmMDLFill { mdl -- }
+	// fill up an MDL with nonpaged system space.
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto vaddr
+	mdl@ MmMDLHeader_VirtualAddress + @ vaddr!
+
+	auto pages
+	vaddr@ PAGEOFFSETMASK & mdl@ MmMDLHeader_Length + @ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddress pteaddr!
+
+	auto ok
+
+	-1 mdlpos@!
+
+	while (pages@)
+		auto pfdbe
+		pteaddr@ MiPTEInterpret ok! drop pfdbe!
+
+		if (DEBUGCHECKS)
+			if (ok@)
+				"MmMDLFill: invalid system space\n" KeCrash
+			end
+		end
+
+		pfdbe@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+		pfdbe@ mdlpos@!
+
+		4 mdlpos +=
+		-1 mdlpos@!
+
+		1 pages -=
+		PAGESIZE vaddr +=
+		PTESIZE pteaddr +=
+	end
+end
+
+var MmPinnedPagesLimit 0
+public MmPinnedPagesLimit
+
+var MmPinnedPagesCount 0
+public MmPinnedPagesCount
+
+fn MmMDLChargePinnedPages { count process -- ok }
+	// charge the system for the number of pinned pages.
+	// the usual consequence of failing this operation is that someone's IO
+	// transfer will unexpectedly fail, so this needs to work reasonably.
+	// the consequence of this operation being too lenient is that its easy to
+	// put the system in a memory chokehold by accident.
+
+	// will succeed if any of these is true:
+	//   1. the process is owned by the system user,
+	//   2. memory pressure is very low,
+	//   3. the per-process guarantee can accomodate these pages,
+	//   4. the total number of pinned pages in the system is below a
+	//      certain threshold.
+
+	STATUS_VM_QUOTA_EXCEEDED ok!
+
+	auto uid
+	process@ PsProcess_PagedArea + @ PsProcessPaged_UID + @ uid!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	if (uid@ UID_SYSTEM ==)
+		0 ok!
+	end elseif (MmAvailablePageCount@ count@ + MmSufficientAvailablePageCount@ >=)
+		0 ok!
+	end elseif (process@ PsProcess_PinnedPageCount + @ count@ + MMPROCESSPINGUARANTEE <)
+		0 ok!
+	end elseif (MmPinnedPagesCount@ count@ + MmPinnedPagesLimit@ <)
+		0 ok!
+	end
+
+	if (ok@)
+		ipl@ KeIPLLower
+
+		return
+	end
+
+	count@ process@ PsProcess_PinnedPageCount + +=
+	count@ MmPinnedPagesCount +=
+
+	ipl@ KeIPLLower
+end
+
+fn MmMDLUnchargePinnedPages { count process -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	count@ process@ PsProcess_PinnedPageCount + -=
+	count@ MmPinnedPagesCount -=
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn MmMDLPin { lockforwrite mdl -- ok }
+	// pin all of the pages described by the MDL into memory, resources
+	// permitting. must be called in the context of the process whose buffer
+	// it is.
+
+	// NOTE: buffer parameters (start virtual address, length, etc) must have
+	// been validated by the caller. this function trusts them blindly.
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_PINNED &)
+		0 ok!
+
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (mdl@ MmMDLHeader_Length + @ ~~)
+			"MmMDLPin: length=0\n" KeCrash
+		end
+	end
+
+	auto vaddr
+	mdl@ MmMDLHeader_VirtualAddress + @ vaddr!
+
+	if (vaddr@ MMLOWESTSYSTEMADDRESS >=)
+		mdl@ MmMDLFill
+
+		// so that nothing happens when it tries to unpin...
+
+		MMMDL_DONTUNPIN MMMDL_PINNED | mdl@ MmMDLHeader_Flags + |=
+
+		0 ok!
+
+		return
+	end
+
+	auto process
+	KeProcessCurrent process!
+
+	auto pages
+	vaddr@ PAGEOFFSETMASK & mdl@ MmMDLHeader_Length + @ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	// we must guarantee that the mappings do not change in the middle of
+	// pinning the MDL, but we cannot lock the VAD list mutex, since this will
+	// lead to deadlocks regarding collided faults on user pages. therefore,
+	// the VAD list mutex has been split into that and a "MapLock", which we
+	// lock here instead. the comment explaining how it used to work is now
+	// incorrect but has been kept below for posterity:
+	//
+	// lock the process's VAD list mutex so we know nothing can get yoinked
+	// out from underneath us by another thread in the process. in particular
+	// this avoids race conditions involving the COW pages we might create
+	// here if we probe for writing. it is fine to keep this mutex locked
+	// during pagefaults we incur later because it can be locked recursively.
+
+	process@ MiMapLock ok!
+
+	if (ok@)
+		return
+	end
+
+	if (process@ PsProcess_PagedArea + @ PsProcessPaged_MappedMMIOCount + @)
+		// check to ensure that there aren't any VADs corresponding to memory-
+		// -mapped devices overlapping our buffer, since these pages are yucky
+		// and don't correspond to RAM and so they must not be looked up in the
+		// PFDB.
+
+		0 // alertable
+		process@ // processobject
+		MmVADListLock drop
+
+		vaddr@ // startva
+		vaddr@ mdl@ MmMDLHeader_Length + @ + // endva
+		process@ // process
+		MiVADListCheckRange ok!
+
+		process@ MmVADListUnlock
+
+		if (ok@)
+			process@ MiMapUnlock
+
+			return
+		end
+	end
+
+	if (lockforwrite@)
+		// force any COWs and discover any read-only violations.
+		// we can do this safely here because we hold the map lock.
+
+		auto i
+		0 i!
+
+		while (i@ pages@ <)
+			vaddr@ KeSafeProbeWrite ok!
+
+			if (ok@)
+				process@ MiMapUnlock
+
+				return
+			end
+
+			1 i +=
+			PAGESIZE vaddr +=
+
+			// mask the vaddr so that we probe at the start of each subsequent
+			// page after the first one. the reason for this is that
+			// KeSafeProbeWrite works by reading and then writing the same
+			// byte from the given address. this is acceptable within the
+			// buffer because its contents mid-syscall ought to be expected to
+			// be unpredictable anyway, but it is not acceptable to do this to
+			// random memory that may be just beyond the buffer because it
+			// will cause satanic race conditions with any other threads in
+			// this process.
+
+			PAGENUMBERMASK vaddr &=
+		end
+
+		mdl@ MmMDLHeader_VirtualAddress + @ vaddr!
+	end
+
+	pages@ // count
+	process@ // process
+	MmMDLChargePinnedPages ok!
+
+	if (ok@)
+		process@ MiMapUnlock
+
+		return
+	end
+
+	// probe all of the pages until their PTE is valid. call MmMDLUnpin to
+	// clean up the partial pin if we fail at any point.
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	MMMDL_PINNED mdl@ MmMDLHeader_Flags + |=
+
+	if (lockforwrite@)
+		MMMDL_MODIFIED mdl@ MmMDLHeader_Flags + |=
+	end else
+		MMMDL_MODIFIED ~ mdl@ MmMDLHeader_Flags + &=
+	end
+
+	-1 mdlpos@!
+
+	auto pinnedvaddr
+
+	auto pteaddr
+	vaddr@ MmVirtualtoPTEAddressUser pteaddr!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	while (pages@)
+		while (1)
+			if (vaddr@ MmVirtualAddressIsValid ~~)
+				// not resident. (re-)probe and try again.
+
+				ipl@ KeIPLLower
+
+				vaddr@ KeSafeGetByte ok! drop
+
+				IPLDPC KeIPLRaise ipl!
+
+				if (ok@)
+					break
+				end
+
+				continue
+			end
+
+			auto pfdbe
+			pteaddr@ MiPTEInterpret drop drop pfdbe!
+
+			pfdbe@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+			// we got a pfdbe, time to pin it and record it in our MDL.
+
+			pfdbe@ MmEvictablePageReference drop
+
+			pfdbe@ mdlpos@!
+			-1 mdlpos@ 4 + !
+
+			break
+		end
+
+		if (ok@)
+			break
+		end
+
+		4 mdlpos +=
+		1 pages -=
+		PAGESIZE vaddr +=
+		PTESIZE pteaddr +=
+	end
+
+	ipl@ KeIPLLower
+
+	process@ MiMapUnlock
+
+	if (ok@)
+		mdl@ MmMDLUnpin
+	end
+end
+
+fn MmMDLUnpin { mdl -- }
+	// unpin all of the pages described by the MDL.
+
+	if (DEBUGCHECKS)
+		if (mdl@ MmMDLHeader_Flags + @ MMMDL_PINNED & ~~)
+			"MmMDLUnpin: not pinned\n" KeCrash
+		end
+	end
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_DONTUNPIN &)
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (mdl@ MmMDLHeader_Flags + @ MMMDL_MAPPED &)
+			"MmMDLUnpin: mapped\n" KeCrash
+		end
+	end
+
+	MMMDL_PINNED ~ mdl@ MmMDLHeader_Flags + &=
+
+	auto process
+	mdl@ MmMDLHeader_Process + @ process!
+
+	if (process@)
+		mdl@ MmMDLHeader_VirtualAddress + @ PAGEOFFSETMASK &
+		mdl@ MmMDLHeader_Length + @ + PAGEOFFSETMASK + PAGESHIFT >> // count
+		process@ // process
+		MmMDLUnchargePinnedPages
+	end
+
+	auto flags
+	mdl@ MmMDLHeader_Flags + @ flags!
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	while (mdlpos@@ -1 ~=)
+		auto pfdbe
+		mdlpos@@ pfdbe!
+
+		if (flags@ MMMDL_MODIFIED &)
+			pfdbe@ // pfdbe
+			process@ // process
+			MmEvictablePageModify
+		end
+
+		pfdbe@ MmEvictablePageDereference drop
+
+		4 mdlpos +=
+	end
+end
+
+fn MmMDLMap { mdl -- ok }
+	// map the page frames into system space that are pinned by the MDL.
+
+	0 ok!
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_MAPPED &)
+		return
+	end
+
+	if (mdl@ MmMDLHeader_VirtualAddress + @ MMLOWESTSYSTEMADDRESS >=)
+		mdl@ MmMDLHeader_VirtualAddress + @ mdl@ MmMDLHeader_MappedAddress + !
+
+		MMMDL_MAPPED MMMDL_DONTUNMAP | mdl@ MmMDLHeader_Flags + |=
+
+		return
+	end
+
+	auto pages
+	mdl@ MmMDLHeader_VirtualAddress + @ PAGEOFFSETMASK & mdl@ MmMDLHeader_Length + @ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	auto vaddr
+	auto pteaddr
+
+	CANBLOCK // pri
+	pages@ // pages
+	MiPoolSpaceReserve ok! pteaddr! vaddr!
+
+	if (ok@)
+		return
+	end
+
+	MMMDL_MAPPED mdl@ MmMDLHeader_Flags + |=
+
+	mdl@ MmMDLHeader_VirtualAddress + @ PAGEOFFSETMASK & vaddr@ + mdl@ MmMDLHeader_MappedAddress + !
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	while (pages@)
+		auto phyaddr
+		mdlpos@@ MiPageFrameDatabase@ - MiPageFrameEntry_SIZEOF / PAGESHIFT << phyaddr!
+
+		phyaddr@ // phyaddr
+		PTE_W PTE_V | // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		PTESIZE pteaddr +=
+		4 mdlpos +=
+		1 pages -=
+	end
+end
+
+fn MmMDLUnmap { mdl -- }
+	// unmap the page frames from system space that are pinned by the MDL.
+
+	if (DEBUGCHECKS)
+		if (mdl@ MmMDLHeader_Flags + @ MMMDL_MAPPED & ~~)
+			"MmMDLUnmap: not mapped\n" KeCrash
+		end
+	end
+
+	if (mdl@ MmMDLHeader_Flags + @ MMMDL_DONTUNMAP &)
+		return
+	end
+
+	MMMDL_MAPPED ~ mdl@ MmMDLHeader_Flags + &=
+
+	auto pages
+	mdl@ MmMDLHeader_VirtualAddress + @ PAGEOFFSETMASK & mdl@ MmMDLHeader_Length + @ + PAGEOFFSETMASK + PAGESHIFT >> pages!
+
+	auto vaddr
+	mdl@ MmMDLHeader_MappedAddress + @ PAGENUMBERMASK & vaddr!
+
+	auto firstpteaddr
+	vaddr@ MmVirtualtoPTEAddress firstpteaddr!
+
+	auto pteaddr
+	firstpteaddr@ pteaddr!
+
+	auto mdlpos
+	mdl@ MmMDLHeader_SIZEOF + mdlpos!
+
+	auto cnt
+	pages@ cnt!
+
+	while (cnt@)
+		auto ok
+		0 // phyaddr
+		0 // flags
+		pteaddr@ // pteaddr
+		MiPTEUpdate drop drop
+
+		PTESIZE pteaddr +=
+		4 mdlpos +=
+		1 cnt -=
+	end
+
+	pages@ // pages
+	firstpteaddr@ // pteaddr
+	MiPoolSpaceRelease
+end

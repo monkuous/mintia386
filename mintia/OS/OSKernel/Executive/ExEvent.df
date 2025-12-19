@@ -1,0 +1,243 @@
+//
+// Implements the executive event object.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+var ExEventObjectType 0
+public ExEventObjectType
+
+fn ExiEventInit { -- }
+	fnsection "INIT$text"
+
+	auto type
+
+	auto typeinit
+	ObTypeInitializer_SIZEOF alloc typeinit!
+
+	// initialize ObTypeInitializer fields
+
+	typeinit@ ObTypeInitializerInitialize
+
+	"Event" typeinit@ ObTypeInitializer_Name + !
+	'ExEv' typeinit@ ObTypeInitializer_Tag + !
+	OSTYPE_EVENT typeinit@ ObTypeInitializer_TypeIdentifier + !
+	0 typeinit@ ObTypeInitializer_WaitOffset + !
+
+	auto ok
+	typeinit@ ObTypeCreate ok! type!
+
+rosection "INIT$text"
+
+	if (ok@)
+		ok@ "ExiEventInit: couldn't create Event type (%i)\n" KeCrash
+	end
+
+rosection "text"
+
+	type@ ExEventObjectType!
+end
+
+fn ExEventCreateObject { signaled type permissions name -- eventobject ok }
+	fnsection "PAGE$text"
+
+	if (type@ OSEVENT_SYNCH < type@ OSEVENT_NOTIF > ||)
+		STATUS_INVALID_ARGUMENT ok!
+		return
+	end
+
+	name@ // name
+	0 // flags
+	permissions@ // permissions
+	0 // npquotabias
+	0 // pquotabias
+	KeEvent_SIZEOF // bodysize
+	ExEventObjectType@ // type
+	ObObjectCreate ok! eventobject!
+
+	if (ok@)
+		return
+	end
+
+	signaled@ // signaled
+	type@ // type
+	"ExEventObject" // name
+	eventobject@ // event
+	KeEventInitialize
+end
+
+fn ExEventCreate { signaled type permissions name -- eventhandle ok }
+	fnsection "PAGE$text"
+
+	auto eventobject
+
+	signaled@ // signaled
+	type@ // type
+	permissions@ // permissions
+	name@ // name
+	ExEventCreateObject ok! eventobject!
+
+	if (ok@)
+		return
+	end
+
+	1 // nocheck
+	ACCESS_ALL // permissions
+	eventobject@ // object
+	ObObjectOpen ok! eventhandle!
+
+	if (ok@)
+		eventobject@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+end
+
+fn ExEventResetObject { eventobject -- signaled }
+	fnsection "PAGE$text"
+
+	eventobject@ // event
+	KeEventReset signaled!
+end
+
+fn ExEventReset { eventhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExEventObjectType@ // type
+	eventhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ ExEventResetObject signaled!
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn ExEventSignalObject { eventobject -- }
+	fnsection "PAGE$text"
+
+	1 // priboost
+	eventobject@ // event
+	KeEventSignal
+end
+
+fn ExEventSignal { eventhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExEventObjectType@ // type
+	eventhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ ExEventSignalObject
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn ExEventPulseObject { eventobject -- }
+	fnsection "PAGE$text"
+
+	1 // priboost
+	eventobject@ // event
+	KeEventPulse
+end
+
+fn ExEventPulse { eventhandle -- ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExEventObjectType@ // type
+	eventhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_EXEC SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ ExEventPulseObject
+
+	obj@ ObObjectDereferenceByPointer drop
+end
+
+fn ExEventReadState { eventhandle -- signaled ok }
+	fnsection "PAGE$text"
+
+	auto obj
+	auto access
+
+	ExEventObjectType@ // type
+	eventhandle@ // handle
+	ObObjectReferenceByHandle ok! obj! access!
+
+	if (ok@)
+		return
+	end
+
+	access@ ACCESS_READ SeCheckAccess ok!
+
+	if (ok@)
+		obj@ ObObjectDereferenceByPointer drop
+
+		return
+	end
+
+	obj@ KeDispatchIsSignaled signaled!
+
+	obj@ ObObjectDereferenceByPointer drop
+end

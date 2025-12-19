@@ -1,0 +1,200 @@
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+var RecursiveFlag 0
+var FFlag 0
+
+fn Usage { -- }
+	"usage: rm [-fr] file\n" OSGetStdErr FPrintf
+end
+
+fn Main { ... -- ret }
+	0 ret!
+
+	auto i
+	1 i!
+
+	if (argc@ 2 >=)
+		if ([1]argv@ gb '-' ==)
+			auto fl
+			[1]argv@ 1 + fl!
+
+			while (fl@ gb)
+				if (fl@ gb 'r' ==)
+					1 RecursiveFlag!
+				end elseif (fl@ gb 'f' ==)
+					1 FFlag!
+				end else
+					Usage
+					-1 OSExit
+				end
+
+				1 fl +=
+			end
+
+			2 i!
+		end
+	end
+
+	while (i@ argc@ <)
+		[i@]argv@ Rm
+
+		1 i +=
+	end
+end
+
+fn Rm { path -- }
+	auto ok
+
+	auto dirname
+	OSFILEPATHMAX alloc dirname!
+
+	path@ // path
+	dirname@ // dirname
+	OSFILEPATHMAX // bufsize
+	OSDirectoryName ok!
+
+	if (ok@)
+		ok@ OSStatusGetName path@ "rm: %s: %s\n" OSError
+	end
+
+	auto name
+	path@ OSLastComponent name!
+
+	if (name@ "/" strcmp name@ gb ':' == ||)
+		// so that the syscall produces the expected error
+		"." name!
+	end
+
+	auto ptr
+	name@ ptr!
+
+	while (ptr@ gb)
+		if (ptr@ gb '/' ==)
+			0 ptr@ sb
+			break
+		end
+
+		1 ptr +=
+	end
+
+	auto dirhandle
+	OSFILETYPE_ANY // filetype
+	0 // flags
+	ACCESS_WRITE ACCESS_EXEC | // access
+	dirname@ // path
+	OSFileOpen ok! dirhandle!
+
+	if (ok@)
+		ok@ OSStatusGetName dirname@ "rm: %s: %s\n" OSError
+	end
+
+	if (RecursiveFlag@)
+		auto dhandle
+		OSFILETYPE_DIRECTORY // filetype
+		0 // flags
+		ACCESS_READ ACCESS_WRITE | ACCESS_EXEC | // access
+		path@  // path
+		OSFileOpen ok! dhandle!
+
+		if (ok@ ~~)
+			dhandle@ path@ RmRecursive
+
+			dhandle@ OSClose drop
+		end
+	end
+
+	name@ // name
+	dirhandle@ // filehandle
+	OSDirectoryUnlink ok!
+
+	if (ok@)
+		if (FFlag@)
+			0 ok!
+		end else
+			ok@ OSStatusGetName path@ "rm: %s: %s\n" OSError
+		end
+	end
+
+	dirhandle@ OSClose drop
+end
+
+buffer FileInformation OSFileInformation_SIZEOF
+
+fn RmRecursive { handle name -- }
+	auto dirent
+	OSDirectoryEntry_SIZEOF alloc dirent!
+
+	while (1)
+		auto ok
+		1 // count
+		dirent@ // dirent
+		handle@ // filehandle
+		OSDirectoryRead ok! drop
+
+		if (ok@ STATUS_END_OF_FILE ==)
+			break
+		end elseif (ok@)
+			ok@ OSStatusGetName name@ "rm: couldn't read %s: %s\n" OSError
+		end
+
+		auto fname
+		dirent@ OSDirectoryEntry_Name + fname!
+
+		auto dhandle
+		OSFILETYPE_ANY // filetype
+		OSTYPE_FILE // objecttype
+		0 // flags
+		0 // access
+		handle@ // initialobjecthandle
+		fname@ // path
+		OSOpenRelative ok! dhandle!
+
+		if (ok@)
+			ok@ OSStatusGetName fname@ "rm: %s: %s\n" OSError
+		end
+
+		dhandle@ // filehandle
+		FileInformation // query
+		OSFileQuery ok!
+
+		if (ok@)
+			ok@ OSStatusGetName fname@ "rm: %s: %s\n" OSError
+		end
+
+		if (FileInformation OSFileInformation_Type + @ OSFILETYPE_DIRECTORY ==)
+			dhandle@ OSClose drop
+
+			// reopen with RWX to allow reading and deleting entries
+
+			OSFILETYPE_ANY // filetype
+			OSTYPE_FILE // objecttype
+			0 // flags
+			ACCESS_READ ACCESS_WRITE | ACCESS_EXEC | // access
+			handle@ // initialobjecthandle
+			fname@ // path
+			OSOpenRelative ok! dhandle!
+
+			if (ok@)
+				ok@ OSStatusGetName fname@ "rm: %s: %s\n" OSError
+			end
+
+			dhandle@ fname@ RmRecursive
+		end
+
+		dhandle@ OSClose drop
+
+		fname@ // name
+		handle@ // filehandle
+		OSDirectoryUnlink ok!
+
+		if (ok@)
+			ok@ OSStatusGetName fname@ "rm: %s: %s\n" OSGetStdErr FPrintf
+
+			if (FFlag@ ~~)
+				-1 OSExit
+			end
+		end
+	end
+end

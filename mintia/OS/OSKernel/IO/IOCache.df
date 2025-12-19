@@ -1,0 +1,52 @@
+//
+// Implements the MINTIA page cache.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALDebug.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Object.h"
+
+#include "<inc>/Process.h"
+
+#include "<inc>/IO.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "IOInternal.h"
+
+fn IOiCacheInitialize { fcb -- cacheblock ok }
+	fnsection "PAGE$text"
+
+	// initialize caching for an FCB
+
+	IOiCacheInfoBlockCreate ok! cacheblock!
+
+	if (ok@)
+		// creation failed
+
+		return
+	end
+
+	if (DEBUGCHECKS)
+		if (fcb@ IOFileControlBlock_CacheInfoBlock + @)
+			"IOiCacheInitialize: FCB already had a cache info block\n" KeCrash
+		end
+	end
+
+	cacheblock@ fcb@ IOFileControlBlock_CacheInfoBlock + !
+end

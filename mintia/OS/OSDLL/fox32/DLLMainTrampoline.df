@@ -1,0 +1,105 @@
+#include "<ll>/OSDLL/OSContext.h"
+
+asm "
+
+.extern OSExit
+.extern OSThreadExit
+.extern DLLMainHL
+
+.section text
+
+; copy arguments table from OSPEB to stack and jump to entrypoint
+; does not return
+
+DLLMain:
+.global DLLMain
+	call DLLMainHL
+	nop
+
+;a2 - program entry
+;a1 - argv
+;a0 - argc
+DLLMainTrampoline:
+.global DLLMainTrampoline
+	mov  t0, sp
+	mov  t1, a0
+
+	mov  t3, a0
+	sla  t3, 2
+	sub  sp, t3
+	mov  t3, sp
+
+.loop:
+	cmp  t1, 0
+	ifz  jmp .done
+
+	mov  t2, [a1]
+	mov  [t3], t2
+
+	add  a1, 4
+	add  t3, 4
+	sub  t1, 1
+	rjmp .loop
+
+.done:
+	call a2
+
+	jmp  OSExit
+
+DLLThreadExit:
+.global DLLThreadExit
+	;return value is already in a0
+	jmp  OSThreadExit
+
+.extern DLLSignalDispatchHL
+.extern DLLAPCDispatchHL
+
+DLLSignalDispatch:
+.global DLLSignalDispatch
+	mov  t0, sp
+	add  t0, OSContext_epc
+	mov  t0, [t0]
+
+	mov  t1, sp
+	add  t1, OSContext_fp
+	mov  t1, [t1]
+
+	push t0
+	push t1
+
+	mov  fp, sp
+
+	call DLLSignalDispatchHL
+
+	nop
+
+DLLAPCDispatch:
+.global DLLAPCDispatch
+	mov  t0, sp
+	add  t0, OSContext_epc
+	mov  t0, [t0]
+
+	mov  t1, sp
+	add  t1, OSContext_fp
+	mov  t1, [t1]
+
+	push t0
+	push t1
+
+	mov  fp, sp
+
+	call DLLAPCDispatchHL
+
+	nop
+
+.section data
+
+nonsense:
+	.dl 0
+
+.section bss
+
+nonsense2:
+	.dl 0
+
+"
