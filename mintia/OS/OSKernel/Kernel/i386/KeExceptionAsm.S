@@ -124,6 +124,13 @@ KiThreadTrampoline:
     int3
 .size KiThreadTrampoline, . - KiThreadTrampoline
 
+.globl KeIPLCurrentGet
+.type KeIPLCurrentGet, @function
+KeIPLCurrentGet:
+    mov (KeIPLCurrent), %eax
+    ret
+.size KeIPLCurrentGet, . - KeIPLCurrentGet
+
 .pushsection "INIT$text", "ax", %progbits
 .balign 4
 .globl KiI386IdtThunks
