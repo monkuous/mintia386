@@ -3,7 +3,7 @@ ifndef MINTIA_CC
 endif
 
 ifndef MINTIA_CC
-	MINTIA_CC := gcc -m32 -march=i486
+	MINTIA_CC := gcc -m32 -march=i486 -mgeneral-regs-only
 endif
 
 CC := $(MINTIA_CC)
