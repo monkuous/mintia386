@@ -1,0 +1,17 @@
+//
+// Implements the PC system driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+
+fn (FDriverInit) DriverInit { stage -- ok }
+	stage@ "Hello from PC system driver stage %d\n" Printf
+end

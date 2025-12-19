@@ -117,6 +117,16 @@ fn LdrPlatformExit { ret -- }
 end
 
 fn LdrPlatformBootDriversLoadAll { -- }
+	// load all the PC drivers
+
+	auto ok
+	0 // flags
+	"PC.sys" // name
+	LdrBootDriverLoad ok! drop
+
+	if (ok@)
+		ok@ "LdrBootDrivers: failed to load PC.sys (%i)\n" LdrCrash
+	end
 end
 
 extern LdrPCCallInterrupt { vec regs -- }
