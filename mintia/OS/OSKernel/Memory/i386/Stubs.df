@@ -32,10 +32,6 @@ fn MiPTEIsZero { pte -- iszero }
     "TODO MiPTEIsZero\n" KeCrash
 end
 
-fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
-    "TODO MiPTEInterpret\n" KeCrash
-end
-
 fn MmVirtualToPFDBE { vaddr -- pfdbe }
     "TODO MmVirtualToPFDBE\n" KeCrash
 end

@@ -81,3 +81,24 @@ fn MiPTEUpdateByVirtual { phyaddr flags vaddr -- oldphyaddr oldflags }
 	pteaddr@ // pteaddr
 	MiPTEUpdate oldflags! oldphyaddr!
 end
+
+fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
+	// interpret arch-specific PTE contents into physical address and generic
+	// flags. returns -1 if the PTE is not valid.
+
+	0 ok!
+
+	auto pte
+	pteaddr@@ pte!
+
+	if (pte@ PTE_V & ~~)
+		0 flags!
+		-1 ok!
+		return
+	end
+
+	// i386 PTEs happen to line up with the generic PTE flags, so
+	// just mask those off and return them directly.
+	pte@ 127 & flags!
+	pte@ 12 >> PAGESHIFT << phyaddr!
+end
