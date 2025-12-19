@@ -97,7 +97,7 @@ end
 extern LdrPCHalt { -- }
 
 fn LdrPlatformExit { ret -- }
-    ret@ "bootloader exited with code %i" Printf
+    ret@ "bootloader exited with code %i\n" Printf
     LdrPCHalt
 end
 
@@ -118,6 +118,494 @@ struct LdrPCRegs
     2 gsI
     4 eflags
 endstruct
+
+const LDR_PC_MEMORY_FREE 1
+
+fnptr LdrPCMemoryFunc { head tail type context -- }
+
+struct LdrPCE820
+    8 Start
+    8 Size
+    4 Type
+endstruct
+
+fn LdrPCIterateMemoryMap { func context -- }
+    auto key
+    0 key!
+
+    auto count
+    0 count!
+
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    while (1)
+        auto buffer
+        LdrPCE820_SIZEOF alloc buffer!
+
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0xe820 regs@ LdrPCRegs_eax + !
+        'SMAP' regs@ LdrPCRegs_edx + !
+        key@ regs@ LdrPCRegs_ebx + !
+        LdrPCE820_SIZEOF regs@ LdrPCRegs_ecx + !
+        buffer@ regs@ LdrPCRegs_edi + !
+        0x15 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eflags + @ 1 &)
+            break
+        end
+
+        regs@ LdrPCRegs_ebx + @ key!
+
+        auto size
+        buffer@ LdrPCE820_Size + @ size!
+
+        if (buffer@ LdrPCE820_Size 4 + + @)
+            -1 size!
+        end
+
+        if (size@ ~~ buffer@ LdrPCE820_Start 4 + + @)
+            if (key@ ~~)
+                break
+            end
+
+            continue
+        end
+
+        auto head
+        buffer@ LdrPCE820_Start + @ head!
+
+        head@ 1 - size +=
+        if (size@ head@ <)
+            -1 size!
+        end
+
+        if (head@ 0x100000 <)
+            if (size@ 0x100000 <)
+                if (key@ ~~)
+                    break
+                end
+
+                continue
+            end
+
+            0x100000 head!
+        end
+
+        head@ size@ buffer@ LdrPCE820_Type + @ context@ func@ LdrPCMemoryFunc
+        1 count +=
+
+        if (key@ ~~)
+            break
+        end
+    end
+
+    if (count@)
+        return
+    end
+
+    auto low
+    auto high
+
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0xe801 regs@ LdrPCRegs_eax + !
+    0x15 regs@ LdrPCCallInterrupt
+
+    if (regs@ LdrPCRegs_eflags + @ 1 & ~~)
+        regs@ LdrPCRegs_ecx + gi low!
+
+        if (low@)
+            regs@ LdrPCRegs_edx + gi high!
+        end else
+            regs@ LdrPCRegs_eax + gi low!
+            regs@ LdrPCRegs_ebx + gi high!
+        end
+
+        1024 low *=
+        0x10000 high *=
+
+        if (low@)
+            0xfffff low +=
+
+            if (low@ 0xffffff > high@ &&)
+                0xffffff low!
+            end
+
+            if (low@ 0xffffff ==)
+                high@ low +=
+
+                if (low@ high@ <)
+                    -1 low!
+                end
+
+                0 high!
+            end
+
+            0x100000 low@ LDR_PC_MEMORY_FREE context@ func@ LdrPCMemoryFunc
+        end
+
+        if (high@)
+            0xffffff high +=
+
+            if (high@ 0xffffff <)
+                -1 high!
+            end
+
+            0x1000000 high@ LDR_PC_MEMORY_FREE context@ func@ LdrPCMemoryFunc
+        end
+
+        return
+    end
+
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0x88 regs@ LdrPCRegs_eax + !
+    0x15 regs@ LdrPCCallInterrupt
+
+    if (regs@ LdrPCRegs_eflags + @ 1 & ~~)
+        regs@ LdrPCRegs_eax + gi low!
+        1024 low *=
+
+        if (low@)
+            0xfffff low +=
+
+            LDR_PC_MEMORY_FREE low@ 0x100000 context@ func@ LdrPCMemoryFunc
+        end
+    end
+end
+
+// during build, LdrMemoryDescriptor fields are reused with different meanings as follows:
+//  StartPFN: head
+//  Pages: tail
+//  OriginalExtent: prev
+
+fn (LdrPCMemoryFunc) private LdrPCAddFreeRegion { head tail type context -- }
+    if (type@ LDR_PC_MEMORY_FREE ~=)
+        return
+    end
+
+    // find insertion location (starting at the tail so that the common case of already-sorted is fast)
+
+    auto prev
+    context@ 4 + @ prev!
+
+    auto next
+    0 next!
+
+    while (prev@)
+        if (prev@ LdrMemoryDescriptor_StartPFN + @ head@ <)
+            break
+        end
+
+        prev@ next!
+        prev@ LdrMemoryDescriptor_OriginalExtent + @ prev!
+    end
+
+    // remove overlapping and neighboring followers
+
+    while (next@)
+        if (tail@ -1 < tail@ + 1 next@ LdrMemoryDescriptor_StartPFN + @ < &&)
+            break
+        end
+
+        if (next@ LdrMemoryDescriptor_Pages + @ tail@ >)
+            next@ LdrMemoryDescriptor_Pages + @ tail!
+        end
+
+        next@ LdrMemoryDescriptor_Next + @ next!
+
+        if (prev@)
+            next@ prev@ LdrMemoryDescriptor_Next + !
+        end else
+            next@ context@!
+        end
+
+        if (next@)
+            prev@ next@ LdrMemoryDescriptor_OriginalExtent + !
+        end else
+            prev@ context@ 4 + !
+        end
+    end
+
+    // merge with prev if possible
+
+    if (prev@)
+        if (prev@ LdrMemoryDescriptor_Pages + @ tail@ >=)
+            return
+        end
+
+        tail@ prev@ LdrMemoryDescriptor_Pages + !
+        return
+    end
+
+    // create a new descriptor
+
+	auto ok
+	auto ldrdesc
+	LdrMemoryDescriptor_SIZEOF // size
+	LdrMemoryAllocate ok! ldrdesc!
+
+	if (ok@)
+		ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	end
+
+    next@ ldrdesc@ LdrMemoryDescriptor_Next + !
+    OSLOADERMEM_FREE ldrdesc@ LdrMemoryDescriptor_Type + !
+    head@ ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+    tail@ ldrdesc@ LdrMemoryDescriptor_Pages + !
+    prev@ ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+    1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+
+    // insert it
+
+    if (prev@)
+        ldrdesc@ prev@ LdrMemoryDescriptor_Next + !
+    end else
+        ldrdesc@ context@!
+    end
+
+    if (next@)
+        ldrdesc@ next@ LdrMemoryDescriptor_OriginalExtent + !
+    end else
+        ldrdesc@ context@ 4 + !
+    end
+end
+
+fn (LdrPCMemoryFunc) private LdrPCRemoveReservedRegion { head tail type context -- }
+    if (type@ LDR_PC_MEMORY_FREE ==)
+        return
+    end
+
+    // find location (starting at the tail so that the common case of already-sorted is fast)
+
+    auto prev
+    context@ 4 + @ prev!
+
+    auto next
+    0 next!
+
+    while (prev@)
+        if (prev@ LdrMemoryDescriptor_StartPFN + @ head@ <)
+            break
+        end
+
+        prev@ next!
+        prev@ LdrMemoryDescriptor_OriginalExtent + @ prev!
+    end
+
+    // remove overlapping parts of prev
+
+    if (prev@)
+        if (prev@ LdrMemoryDescriptor_Pages + @ tail@ >)
+            // create a new descriptor
+
+	        auto ok
+	        auto ldrdesc
+	        LdrMemoryDescriptor_SIZEOF // size
+	        LdrMemoryAllocate ok! ldrdesc!
+
+	        if (ok@)
+	        	ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	        end
+
+            next@ ldrdesc@ LdrMemoryDescriptor_Next + !
+            OSLOADERMEM_FREE ldrdesc@ LdrMemoryDescriptor_Type + !
+            tail@ 1 + ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+            prev@ LdrMemoryDescriptor_Pages + @ ldrdesc@ LdrMemoryDescriptor_Pages + !
+            prev@ ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+            1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+
+            // insert it
+
+            ldrdesc@ prev@ LdrMemoryDescriptor_Next + !
+
+            if (next@)
+                ldrdesc@ next@ LdrMemoryDescriptor_OriginalExtent + !
+            end else
+                ldrdesc@ context@ 4 + !
+            end
+
+            ldrdesc@ next!
+        end
+
+        if (prev@ LdrMemoryDescriptor_Pages + @ head@ >=)
+            head@ 1 - prev@ LdrMemoryDescriptor_Pages + !
+        end
+    end
+
+    // remove overlapping parts of next until it doesn't overlap
+
+    while (next@)
+        if (tail@ next@ LdrMemoryDescriptor_StartPFN + @ <)
+            break
+        end
+
+        if (tail@ next@ LdrMemoryDescriptor_Pages + @ <)
+            tail@ 1 + next@ LdrMemoryDescriptor_StartPFN + !
+            break
+        end
+
+        next@ LdrMemoryDescriptor_Next + @ next!
+
+        if (prev@)
+            next@ prev@ LdrMemoryDescriptor_Next + !
+        end else
+            next@ context@!
+        end
+
+        if (next@)
+            prev@ next@ LdrMemoryDescriptor_OriginalExtent + !
+        end else
+            prev@ context@ 4 + !
+        end
+    end
+end
+
+const LDRINITIALHEAPSIZE 8192
+
+fn private LdrPCBuildDescriptors { -- }
+	// initialize the heap as an 8KB chunk at the end of low memory.
+
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0x12 regs@ LdrPCCallInterrupt
+
+    regs@ LdrPCRegs_eax + gi 10 << LdrHeapTop!
+    LdrHeapTop@ LDRINITIALHEAPSIZE - PAGENUMBERMASK & LdrHeapPointer!
+
+    if (LdrHeapPointer@ pointerof _bss_end <)
+        "not enough memory for heap\n" LdrCrash
+    end
+
+    // build memory descriptors for low memory
+
+    auto rtop
+    pointerof _bss_end PAGEOFFSETMASK + PAGENUMBERMASK & rtop!
+
+    auto hbottom
+    LdrHeapPointer@ PAGENUMBERMASK & hbottom!
+
+    auto htop
+    LdrHeapTop@ PAGENUMBERMASK & htop!
+
+    if (rtop@ hbottom@ >=)
+        htop@ rtop!
+        htop@ hbottom!
+    end else
+        hbottom@ LdrHeapPointer!
+    end
+
+	auto ok
+	auto ldrdesc
+
+    // allocate the descriptor for the reclaimable memory range.
+
+	LdrMemoryDescriptor_SIZEOF // size
+	LdrMemoryAllocate ok! ldrdesc!
+
+	if (ok@)
+		ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	end
+
+	0 ldrdesc@ LdrMemoryDescriptor_Next + !
+	OSLOADERMEM_RECLAIMABLE ldrdesc@ LdrMemoryDescriptor_Type + !
+	0 ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+	rtop@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_Pages + !
+
+	1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+	rtop@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+
+	ldrdesc@ LdrMemoryDescriptorListHead!
+	ldrdesc@ LdrMemoryDescriptorListTail!
+
+    // allocate the descriptor for the first free range.
+
+	if (rtop@ hbottom@ <)
+        LdrMemoryDescriptor_SIZEOF // size
+	    LdrMemoryAllocate ok! ldrdesc!
+
+	    if (ok@)
+	    	ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	    end
+
+	    0 ldrdesc@ LdrMemoryDescriptor_Next + !
+	    OSLOADERMEM_FREE ldrdesc@ LdrMemoryDescriptor_Type + !
+	    rtop@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+	    hbottom@ rtop@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_Pages + !
+
+	    1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+	    hbottom@ rtop@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+
+	    ldrdesc@ LdrMemoryDescriptorListTail@ LdrMemoryDescriptor_Next + !
+	    ldrdesc@ LdrMemoryDescriptorListTail!
+    end
+
+    // allocate the descriptor for the first heap range.
+
+    if (hbottom@ htop@ <)
+	    LdrMemoryDescriptor_SIZEOF // size
+	    LdrMemoryAllocate ok! ldrdesc!
+
+	    if (ok@)
+	    	ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	    end
+
+	    0 ldrdesc@ LdrMemoryDescriptor_Next + !
+	    OSLOADERMEM_RECLAIMABLE ldrdesc@ LdrMemoryDescriptor_Type + !
+	    hbottom@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+	    htop@ hbottom@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_Pages + !
+
+	    1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+	    htop@ hbottom@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+
+	    ldrdesc@ LdrMemoryDescriptorListTail@ LdrMemoryDescriptor_Next + !
+	    ldrdesc@ LdrMemoryDescriptorListTail!
+    end
+
+    // build list of free regions in high memory
+
+    auto highlist
+    8 alloc highlist!
+    0 highlist@!
+    0 highlist@ 4 + !
+    pointerof LdrPCAddFreeRegion highlist@ LdrPCIterateMemoryMap
+
+    // remove reserved regions from list
+
+    pointerof LdrPCRemoveReservedRegion highlist@ LdrPCIterateMemoryMap
+
+    // convert temporary format to proper one
+
+    highlist@@ ldrdesc!
+
+    while (ldrdesc@)
+        ldrdesc@ LdrMemoryDescriptor_Next + @ highlist!
+
+        ldrdesc@ LdrMemoryDescriptor_StartPFN + @ hbottom!
+        ldrdesc@ LdrMemoryDescriptor_Pages + @ htop!
+
+        hbottom@ PAGEOFFSETMASK + PAGENUMBERMASK & ok!
+        htop@ PAGEOFFSETMASK - PAGEOFFSETMASK | rtop!
+
+        if (hbottom@ ok@ <= htop@ rtop@ >= && ok@ rtop@ <=)
+            0 ldrdesc@ LdrMemoryDescriptor_Next + !
+            ok@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+            rtop@ ok@ - PAGESHIFT >> 1 + ldrdesc@ LdrMemoryDescriptor_Pages + !
+            rtop@ ok@ - PAGESHIFT >> 1 + ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+
+            ldrdesc@ LdrMemoryDescriptorListTail@ LdrMemoryDescriptor_Next + !
+            ldrdesc@ LdrMemoryDescriptorListTail!
+        end
+
+        highlist@ ldrdesc!
+    end
+end
+
+fn LdrPlatformMemoryInit { -- }
+    LdrPCBuildDescriptors
+
+    "TODO\n" LdrCrash
+end
 
 fn private LdrPCWriteChar { c -- }
     auto regs
@@ -159,4 +647,13 @@ end
 
 fn VPrintf { argvt argcn fmt -- }
 	argvt@ argcn@ fmt@ 1 VFPrintf
+end
+
+fn Malloc { size -- ptr }
+    auto ok
+    size@ LdrMemoryAllocate ok! ptr!
+
+    if (ok)
+        ERR ptr!
+    end
 end
