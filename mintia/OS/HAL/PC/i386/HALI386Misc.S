@@ -100,3 +100,28 @@ HALPCGetCPUModel:
 HALIcacheSynchronize:
     ret
 .size HALIcacheSynchronize, . - HALIcacheSynchronize
+
+.globl HALCPUContextSwitch
+.type HALCPUContextSwitch, @function
+HALCPUContextSwitch:
+    sub $76, %esp
+
+    mov 80(%esp), %eax
+    mov 84(%esp), %edx
+
+    mov %esi, 12(%esp)
+    mov %edi, 16(%esp)
+    mov %ebx, 20(%esp)
+    mov %ebp, 24(%esp)
+
+    mov %esp, (%edx)
+    mov %eax, %esp
+
+    mov 12(%esp), %esi
+    mov 16(%esp), %edi
+    mov 20(%esp), %ebx
+    mov 24(%esp), %ebp
+
+    add $76, %esp
+    ret
+.size HALCPUContextSwitch, . - HALCPUContextSwitch
