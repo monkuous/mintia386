@@ -1,0 +1,81 @@
+//
+// Implements the PC PIT driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALPCIO.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OSStatistics.h"
+#include "<ll>/OSDLL/OSContext.h"
+
+const PITPORTCH0 0x40
+const PITPORTCMD 0x43
+const PITINTERRUPT 0
+
+const PIT_INTERVAL 10
+const PIT_FREQ 1193182
+const PIT_DIVISOR (PIT_INTERVAL PIT_FREQ 2 / + PIT_FREQ /)
+
+const PIT_CHANNEL_0   0x00
+const PIT_ACCESS_BOTH 0x30
+const PIT_MODE_RATE   0x04
+const PIT_BINARY      0x00
+
+buffer DriverPITUptime KeTime_SIZEOF
+
+fn (FDriverInit) DriverInitPIT { stage -- ok }
+	if (stage@ STAGE_PRETASKING ==)
+		// start the clock interrupt
+
+        PIT_CHANNEL_0 PIT_ACCESS_BOTH | PIT_MODE_RATE | PIT_BINARY | PITPORTCMD HALPCOutb
+        PIT_DIVISOR 0xff & PITPORTCH0 HALPCOutb
+        PIT_DIVISOR 8 >> PITPORTCH0 HALPCOutb
+
+		pointerof DriverPITInterrupt // function
+		PITINTERRUPT // interrupt number
+		IPLCLOCK // interrupt priority level
+		HALInterruptRegister
+
+        pointerof DriverPITUptimeQuery HALUptimeQueryFunction!
+        PIT_INTERVAL HALRTCInterval!
+	end
+
+	0 ok!
+end
+
+fn (HALUptimeQueryF) private DriverPITUptimeQuery { time -- }
+	auto ctime
+	DriverPITUptime ctime!
+
+	ctime@ KeTime_SecPart + @ time@ KeTime_SecPart + !
+	ctime@ KeTime_MsPart + @ time@ KeTime_MsPart + !
+end
+
+fn (HALInterruptHandler) private DriverPITInterrupt { trapframe int -- }
+	auto uptime
+	DriverPITUptime uptime!
+
+	auto ms
+	uptime@ KeTime_MsPart + @ ms!
+
+	PIT_INTERVAL ms +=
+
+	if (ms@ 1000 >=)
+		1000 ms -=
+		1 uptime@ KeTime_SecPart + +=
+	end
+
+	ms@ uptime@ KeTime_MsPart + !
+
+	PIT_INTERVAL // interval
+	trapframe@ // trapframe
+	KeClockTick
+end

@@ -71,6 +71,14 @@ fn HALPlatformInterruptRegister { handler int ipl -- }
 
 	handler@ [int@ 2 *]HALPlatformInterruptHandlers!
 	ipl@ [int@ 2 * 1 +]HALPlatformInterruptHandlers!
+
+	1 int@ << ~ HALPCPICMask &=
+
+	if (int@ 8 <)
+		HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
+	end else
+		HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
+	end
 end
 
 fn HALPlatformInterruptUnregister { int -- }
@@ -79,6 +87,14 @@ fn HALPlatformInterruptUnregister { int -- }
 
 	if ([int@ 2 *]HALPlatformInterruptHandlers@ spf@ ==)
 		int@ "HALPlatformInterruptUnregister: attempt to unregister IRQ #%d; wasn't registered\n" HALCrash
+	end
+
+	1 int@ << HALPCPICMask |=
+
+	if (int@ 8 <)
+		HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
+	end else
+		HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
 	end
 
 	spf@ [int@ 2 *]HALPlatformInterruptHandlers!

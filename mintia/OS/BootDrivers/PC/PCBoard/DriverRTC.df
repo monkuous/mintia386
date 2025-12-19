@@ -1,0 +1,337 @@
+//
+// Implements the PC RTC driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALPCIO.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+const RTCPORTIDX 0x70
+const RTCPORTDAT 0x71
+const RTCINTERRUPT 8
+
+const RTC_SECONDS 0x00
+const RTC_MINUTES 0x02
+const RTC_HOURS   0x04
+const RTC_DAY     0x07
+const RTC_WEEKDAY 0x06
+const RTC_MONTH   0x08
+const RTC_YEAR    0x09
+
+const RTC_B 0x0b
+const RTC_B_SET 0x80
+const RTC_B_PIE 0x40
+const RTC_B_AIE 0x20
+const RTC_B_UIE 0x10
+const RTC_B_DM  0x04
+const RTC_B_24  0x02
+const RTC_B_DSE 0x01
+
+const RTC_C 0x0c
+const RTC_C_UF 0x10
+
+buffer DriverRTCTimeCurrent KeTime_SIZEOF
+
+var DriverRTCRegB 0
+
+struct RTCData
+    1 SecondsB
+    1 MinutesB
+    1 HoursB
+    1 DayB
+    1 MonthB
+    1 YearB
+endstruct
+
+fn private ReadRTC { buffer -- }
+    RTC_SECONDS RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_SecondsB + sb
+
+    RTC_MINUTES RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_MinutesB + sb
+
+    RTC_HOURS RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_HoursB + sb
+
+    RTC_DAY RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_DayB + sb
+
+    RTC_MONTH RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_MonthB + sb
+
+    RTC_YEAR RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb buffer@ RTCData_YearB + sb
+end
+
+fn private UpdateRTC { -- }
+    auto buffer
+    auto buffer2
+    RTCData_SIZEOF alloc buffer!
+    RTCData_SIZEOF alloc buffer2!
+
+    buffer@ ReadRTC
+
+    auto seconds
+    auto minutes
+    auto hours
+    auto day
+    auto month
+    auto year
+
+    while (1)
+        buffer2@ ReadRTC
+
+        buffer2@ RTCData_SecondsB + gb seconds!
+        buffer2@ RTCData_MinutesB + gb minutes!
+        buffer2@ RTCData_HoursB + gb hours!
+        buffer2@ RTCData_DayB + gb day!
+        buffer2@ RTCData_MonthB + gb month!
+        buffer2@ RTCData_YearB + gb year!
+
+        if (seconds@ buffer@ RTCData_SecondsB + gb ==
+            minutes@ buffer@ RTCData_MinutesB + gb == &&
+            hours@ buffer@ RTCData_HoursB + gb == &&
+            day@ buffer@ RTCData_DayB + gb == &&
+            month@ buffer@ RTCData_MonthB + gb == &&
+            year@ buffer@ RTCData_YearB + gb == &&)
+            break
+        end
+
+        seconds@ buffer@ RTCData_SecondsB + sb
+        minutes@ buffer@ RTCData_MinutesB + sb
+        hours@ buffer@ RTCData_HoursB + sb
+        day@ buffer@ RTCData_DayB + sb
+        month@ buffer@ RTCData_MonthB + sb
+        year@ buffer@ RTCData_YearB + sb
+    end
+
+    auto pm
+
+    if (DriverRTCRegB@ RTC_B_24 & ~~)
+        // take note of whether this is am/pm
+        hours@ 0x80 & pm!
+        0x7f hours &=
+    end
+
+    if (DriverRTCRegB@ RTC_B_DM & ~~)
+        // convert bcd to binary
+        seconds@ 15 & seconds@ 4 >> 10 * + seconds!
+        minutes@ 15 & minutes@ 4 >> 10 * + minutes!
+        hours@ 15 & hours@ 4 >> 10 * + hours!
+        day@ 15 & day@ 4 >> 10 * + day!
+        month@ 15 & month@ 4 >> 10 * + month!
+        year@ 15 & year@ 4 >> 10 * + year!
+    end
+
+    if (DriverRTCRegB@ RTC_B_24 & ~~)
+        // convert 12-hour time to 24-hour time
+        12 hours %=
+
+        if (pm@)
+            12 hours +=
+        end
+    end
+
+    2000 year +=
+
+    // convert to unix timestamp
+
+	// years to days
+	year@ 365 * year@ 4 / + year@ 100 / - year@ 400 / + day +=
+
+	// months to days
+	month@ 30 * month@ 1 + 3 * 5 / + day +=
+
+	// unix epoch
+	719561 day -=
+
+	day@ 86400 * seconds +=
+
+	hours@ 3600 * minutes@ 60 * + seconds +=
+
+    // update our accounting
+	seconds@ DriverRTCTimeCurrent KeTime_SecPart + !
+    0 DriverRTCTimeCurrent KeTime_MsPart + !
+end
+
+fn (FDriverInit) DriverInitRTC { stage -- ok }
+	if (stage@ STAGE_PRETASKING ==)
+		// start the clock interrupt
+
+        RTC_B RTCPORTIDX HALPCOutb
+        RTCPORTDAT HALPCInb DriverRTCRegB!
+
+        DriverRTCRegB@ RTC_B_SET RTC_B_PIE | RTC_B_AIE | ~ & RTC_B_UIE | DriverRTCRegB!
+
+        RTC_B RTCPORTIDX HALPCOutb
+        DriverRTCRegB@ RTCPORTDAT HALPCOutb
+
+        RTC_C RTCPORTIDX HALPCOutb
+        RTCPORTDAT HALPCInb drop
+
+		pointerof DriverRTCInterrupt // function
+		RTCINTERRUPT // interrupt number
+		IPLCLOCK // interrupt priority level
+		HALInterruptRegister
+
+		pointerof DriverRTCQuery HALRTCQueryFunction!
+		pointerof DriverRTCSet HALRTCSetFunction!
+
+        UpdateRTC
+	end
+
+	0 ok!
+end
+
+fn (HALRTCQueryF) private DriverRTCQuery { time -- }
+	auto ctime
+	DriverRTCTimeCurrent ctime!
+
+	ctime@ KeTime_SecPart + @ time@ KeTime_SecPart + !
+	ctime@ KeTime_MsPart + @ time@ KeTime_MsPart + !
+end
+
+fn (HALRTCSetF) private DriverRTCSet { time -- ok }
+	0 ok!
+
+    auto days
+    time@ KeTime_SecPart + @ days!
+
+    // convert timestamp to days and time
+
+    if (days@ z<)
+        STATUS_INVALID_ARGUMENT ok!
+        return
+    end
+
+    auto seconds
+    days@ 86400 % seconds!
+    86400 days /=
+
+    auto minutes
+    seconds@ 60 / minutes!
+    60 seconds %=
+
+    auto hours
+    minutes@ 60 / hours!
+    60 minutes %=
+
+    // get weekday (https://howardhinnant.github.io/date_algorithms.html#weekday_from_days)
+
+    auto weekday
+    days@ 4 + 7 % 1 + weekday!
+
+    // convert days to date (https://howardhinnant.github.io/date_algorithms.html#civil_from_days)
+
+    719468 days += // shift epoch to 0000-03-01
+
+    auto era
+    auto doe
+    auto yoe
+    auto year
+    auto doy
+    auto mp
+    auto day
+    auto month
+    days@ 146097 / era!
+    days@ 146097 % doe!
+    doe@ doe@ 1460 / - doe@ 36524 / + doe@ 146096 / - 365 / yoe!
+    yoe@ era@ 400 * + year!
+    doe@ 365 yoe@ * yoe@ 4 / + yoe@ 100 / - - doy!
+    doy@ 5 * 2 + 153 / mp!
+    doy@ 153 mp@ * 2 + 5 / - 1 + day!
+
+    if (mp@ 10 <)
+        mp 3 + month!
+    end else
+        mp 9 - month!
+    end
+
+    // convert to format expected by rtc
+
+    if (year@ 2000 < year@ 2099 > ||)
+        STATUS_INVALID_ARGUMENT ok!
+        return
+    end
+
+    2000 year -=
+
+    auto pm
+
+    if (DriverRTCRegB@ RTC_B_24 & ~~)
+        hours@ 12 >= pm!
+        12 hours %=
+
+        if (hours@ ~~)
+            12 hours!
+        end
+    end
+
+    if (DriverRTCRegB@ RTC_B_DM & ~~)
+        seconds@ 10 % seconds@ 10 / 4 << | seconds!
+        minutes@ 10 % minutes@ 10 / 4 << | minutes!
+        hours@ 10 % hours@ 10 / 4 << | hours!
+        day@ 10 % day@ 10 / 4 << | day!
+        month@ 10 % month@ 10 / 4 << | month!
+        year@ 10 % year@ 10 / 4 << | year!
+    end
+
+    if (DriverRTCRegB@ RTC_B_24 & ~~)
+        if (pm@)
+            0x80 hours |=
+        end
+    end
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+    // set the SET bit in register B to prevent increments during update
+    RTC_B RTCPORTIDX HALPCOutb
+    DriverRTCRegB@ RTC_B_SET | RTCPORTDAT HALPCOutb
+
+    RTC_SECONDS RTCPORTIDX HALPCOutb
+    seconds@ RTCPORTDAT HALPCOutb
+
+    RTC_MINUTES RTCPORTIDX HALPCOutb
+    minutes@ RTCPORTDAT HALPCOutb
+
+    RTC_HOURS RTCPORTIDX HALPCOutb
+    hours@ RTCPORTDAT HALPCOutb
+
+    RTC_WEEKDAY RTCPORTIDX HALPCOutb
+    weekday@ RTCPORTDAT HALPCOutb
+
+    RTC_DAY RTCPORTIDX HALPCOutb
+    day@ RTCPORTDAT HALPCOutb
+
+    RTC_MONTH RTCPORTIDX HALPCOutb
+    month@ RTCPORTDAT HALPCOutb
+
+    RTC_YEAR RTCPORTIDX HALPCOutb
+    year@ RTCPORTDAT HALPCOutb
+
+    // restore register B to enable increments again
+    RTC_B RTCPORTIDX HALPCOutb
+    DriverRTCRegB@ RTCPORTDAT HALPCOutb
+
+	rs@ HALCPUInterruptRestore
+end
+
+fn (HALInterruptHandler) private DriverRTCInterrupt { trapframe int -- }
+    auto cause
+    RTC_C RTCPORTIDX HALPCOutb
+    RTCPORTDAT HALPCInb cause!
+
+    if (cause@ RTC_C_UF &)
+        UpdateRTC
+    end
+end

@@ -12,6 +12,20 @@
 #include "<inc>/HALInterrupt.h"
 #include "<inc>/HALCPU.h"
 
+extern DriverInitPIT { stage -- ok }
+
+extern DriverInitRTC { stage -- ok }
+
 fn (FDriverInit) DriverInit { stage -- ok }
-	stage@ "Hello from PC system driver stage %d\n" Printf
+	stage@ DriverInitPIT ok!
+
+	if (ok@)
+		return
+	end
+
+	stage@ DriverInitRTC ok!
+
+	if (ok@)
+		return
+	end
 end
