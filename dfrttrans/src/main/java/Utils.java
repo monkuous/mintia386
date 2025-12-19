@@ -80,6 +80,7 @@ public class Utils {
                     case 'n' -> '\n';
                     case 't' -> '\t';
                     case 'r' -> '\r';
+                    case 'b' -> '\b';
                     case '[' -> 0x1b;
                     default -> c;
                 };
