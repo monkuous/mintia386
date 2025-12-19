@@ -109,6 +109,21 @@ KiI386Syscall:
     ret
 .size KiI386Syscall, . - KiI386Syscall
 
+.globl KiThreadTrampoline
+.type KiThreadTrampoline, @function
+KiThreadTrampoline:
+    sub $16, %esp
+    sti
+
+    movl $0, (%esp)
+    call KeIPLLower
+
+    mov %esi, (%esp)
+    mov %edi, 4(%esp)
+    call *%ebx
+    int3
+.size KiThreadTrampoline, . - KiThreadTrampoline
+
 .pushsection "INIT$text", "ax", %progbits
 .balign 4
 .globl KiI386IdtThunks

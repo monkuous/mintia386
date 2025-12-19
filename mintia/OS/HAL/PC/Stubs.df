@@ -64,10 +64,6 @@ fn HALCPUTrapFrameAbort { ok abort tf -- }
     "TODO HALCPUTrapFrameAbort\n" HALCrash
 end
 
-fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
-    "TODO HALCPUContextInit\n" HALCrash
-end
-
 fn HALNvramRead { query index -- nextindex ok }
     "TODO HALNvramRead\n" HALCrash
 end

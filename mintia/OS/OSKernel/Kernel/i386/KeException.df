@@ -295,3 +295,15 @@ fn KiI386Trap { cr2 tf -- }
 		end
 	end
 end
+
+fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
+    kstack@ OSContext_SIZEOF 4 + - ctx!
+
+    ctx@ OSContext_SIZEOF 0 memset
+
+    startfunc@ ctx@ OSContext_ebx + !
+    context1@ ctx@ OSContext_esi + !
+    context2@ ctx@ OSContext_edi + !
+
+    pointerof KiThreadTrampoline ctx@ OSContext_SIZEOF + !
+end

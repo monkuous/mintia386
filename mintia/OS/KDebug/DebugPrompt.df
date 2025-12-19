@@ -629,12 +629,12 @@ fn DebugCommandTrace { p -- halt }
 #endif
 
 #ifdef I386
-	thread@ KeThread_Context + @ OSContext_eip + @ // pc
-	thread@ KeThread_Context + @ OSContext_SIZEOF +
+	thread@ KeThread_Context + @ OSContext_SIZEOF + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF 4 + +
 	"0x%08x 0x%08x\n" Printf
 
-	thread@ KeThread_Context + @ OSContext_eip + @ // pc
-	thread@ KeThread_Context + @ OSContext_SIZEOF + // link
+	thread@ KeThread_Context + @ OSContext_SIZEOF + @ // pc
+	thread@ KeThread_Context + @ OSContext_SIZEOF 4 + + // link
 	25 // rows
 	80 // cols
 	DebugTrace
