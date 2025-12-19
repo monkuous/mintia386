@@ -125,3 +125,11 @@ HALCPUContextSwitch:
     add $76, %esp
     ret
 .size HALCPUContextSwitch, . - HALCPUContextSwitch
+
+.globl HALI386TLBFlush
+.type HALI386TLBFlush, @function
+HALI386TLBFlush:
+    mov 4(%esp), %eax
+    invlpg (%eax)
+    ret
+.size HALI386TLBFlush, . - HALI386TLBFlush

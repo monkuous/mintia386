@@ -34,3 +34,40 @@ fn MmVirtualtoPTEAddress { vaddr -- pteaddr }
 
 	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
 end
+
+extern HALI386TLBFlush { vaddr -- }
+
+fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
+	// update a PTE based on a physical address and generic flags. this could
+	// do a number of things:
+
+	auto pte
+	pteaddr@@ pte!
+
+	pte@ 127 & oldflags!
+	pte@ 12 >> PAGESHIFT << oldphyaddr!
+
+	if (pteaddr@ PAGETABLE < pteaddr@ PAGETABLETOP >= ||)
+		phyaddr@ PAGESHIFT >> 12 << flags@ 127 & | pteaddr@!
+		return
+	end
+
+	auto vaddr
+	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
+
+	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+		// this is a user page.
+
+		if (flags@ PTE_V &)
+			PTE_U flags |=
+		end
+	end
+
+	phyaddr@ PAGESHIFT >> 12 << flags@ 127 & | pte!
+
+	pte@ pteaddr@!
+
+    if (oldflags@ 1 &)
+	    vaddr@ HALI386TLBFlush
+    end
+end

@@ -72,10 +72,6 @@ fn MiPTEDelete { deref pteaddr -- }
     "TODO MiPTEDelete\n" KeCrash
 end
 
-fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
-    "TODO MiPTEUpdate\n" KeCrash
-end
-
 fn MiPTEInitializePageTable { vaddr pfdbe process -- }
     "TODO MiPTEInitializePageTable\n" KeCrash
 end
