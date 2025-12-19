@@ -324,3 +324,7 @@ fn KeAddressSpaceSwitch { process -- }
 
     rs@ HALCPUInterruptRestore
 end
+
+fn HALCPUIsUserTrapFrame { tf -- user }
+	tf@ OSContext_cs + @ I386_CS_USER & user!
+end
