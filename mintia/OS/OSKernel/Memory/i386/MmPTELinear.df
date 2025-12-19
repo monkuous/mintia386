@@ -112,3 +112,18 @@ fn MiPTEIsZero { pte -- iszero }
 		0 iszero!
 	end
 end
+
+fn MmVirtualToPhysical { vaddr -- phyaddr }
+	auto pte
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + @ pte!
+
+	if (DEBUGCHECKS)
+		if (pte@ PTE_V & ~~)
+			"MmVirtualToPhysical: invalid PTE\n" KeCrash
+		end
+	end
+
+	pte@ 12 >> PAGESHIFT << phyaddr!
+
+	vaddr@ PAGEOFFSETMASK & phyaddr +=
+end

@@ -59,7 +59,3 @@ end
 fn MiPTEInitializePageTable { vaddr pfdbe process -- }
     "TODO MiPTEInitializePageTable\n" KeCrash
 end
-
-fn MmVirtualToPhysical { vaddr -- phyaddr }
-    "TODO MmVirtualToPhysical\n" KeCrash
-end
