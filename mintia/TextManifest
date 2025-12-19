@@ -6,6 +6,8 @@
 /mintia/groups.cfg Root/mintia/groups.cfg 384
 /mintia/motd.txt Root/mintia/motd.txt
 
+/OSLoader.txt Root/OSLoader.txt
+
 # scripts
 
 /mintia/boot.cmd Root/mintia/boot.cmd
