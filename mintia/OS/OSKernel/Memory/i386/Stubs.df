@@ -40,10 +40,6 @@ fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
     "TODO MiPTEInterpret\n" KeCrash
 end
 
-fn MmVirtualtoPTEAddress { vaddr -- pteaddr }
-    "TODO MmVirtualtoPTEAddress\n" KeCrash
-end
-
 fn MmVirtualToPFDBE { vaddr -- pfdbe }
     "TODO MmVirtualToPFDBE\n" KeCrash
 end

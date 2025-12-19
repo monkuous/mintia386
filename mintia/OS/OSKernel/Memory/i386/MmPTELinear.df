@@ -1,0 +1,36 @@
+//
+// Implements page table entry (PTE) management for the xr17032 architecture.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OSStatus.h"
+
+#include "../MmInternal.h"
+
+fn MmVirtualtoPTEAddress { vaddr -- pteaddr }
+	// get the address of a PTE based on a vaddr.
+
+	if (DEBUGCHECKS)
+		if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+			vaddr@ "MmVirtualtoPTEAddress: used on user address 0x%08x\n" KeCrash
+		end
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+end
