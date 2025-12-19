@@ -126,7 +126,7 @@ _start:
 EnterNativeMode:
     cli
     call EnableA20
-    lgdt (GlobalDescriptorTable)
+    lgdt %cs:(GlobalDescriptorTable)
     mov  %cr0, %eax
     or   $1, %eax
     mov  %eax, %cr0
@@ -235,6 +235,8 @@ EnableA20:
 
 .La20KbdFailed:
 
+    push %cs
+    pop %ds
     mov $A20FailMessage, %si
     jmp .Lcrash
 
@@ -247,7 +249,7 @@ EnableA20:
     mov %ax, %es
     mov %es:(.La20CheckWord + 16), %ax
     not %ax
-    mov %ax, (.La20CheckWord)
+    mov %ax, %cs:(.La20CheckWord)
     cmp %ax, %es:(.La20CheckWord + 16)
     pop %es
     ret

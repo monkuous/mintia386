@@ -6,15 +6,6 @@ HALPlatformExit:
 .globl HALPlatformInit
 HALPlatformInit:
     int3
-.globl HALCPUInterruptDisable
-HALCPUInterruptDisable:
-    int3
-.globl HALPlatformConsoleInit
-HALPlatformConsoleInit:
-    int3
-.globl HALPlatformConsoleClear
-HALPlatformConsoleClear:
-    int3
 .globl HALCPUHalt
 HALCPUHalt:
     int3
@@ -23,9 +14,6 @@ HALPlatformInfo:
     int3
 .globl HALPlatformCrash
 HALPlatformCrash:
-    int3
-.globl HALCPUInterruptRestore
-HALCPUInterruptRestore:
     int3
 .globl HALPlatformConsoleGetc
 HALPlatformConsoleGetc:
@@ -36,12 +24,6 @@ HALPlatformIsComputerOnFire:
 .globl HALPlatformDebugDump
 HALPlatformDebugDump:
     int3
-.globl HALPlatformConsoleShutter
-HALPlatformConsoleShutter:
-    int3
-.globl HALPlatformConsoleScroll
-HALPlatformConsoleScroll:
-    int3
 .globl HALPlatformConsolePutc
 HALPlatformConsolePutc:
     int3
@@ -50,9 +32,6 @@ HALPlatformInterruptRegister:
     int3
 .globl HALPlatformInterruptUnregister
 HALPlatformInterruptUnregister:
-    int3
-.globl HALPlatformConsoleDrawChar
-HALPlatformConsoleDrawChar:
     int3
 .globl KVFontQuery
 KVFontQuery:

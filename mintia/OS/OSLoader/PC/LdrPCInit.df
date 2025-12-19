@@ -119,12 +119,6 @@ end
 fn LdrPlatformBootDriversLoadAll { -- }
 end
 
-extern LdrI386StartSystem { -- }
-
-fn LdrPlatformStartSystem { -- }
-    LdrI386StartSystem
-end
-
 extern LdrPCCallInterrupt { vec regs -- }
 
 struct LdrPCRegs
@@ -142,6 +136,33 @@ struct LdrPCRegs
     2 gsI
     4 eflags
 endstruct
+
+extern LdrI386StartSystem { -- }
+
+fn LdrPlatformStartSystem { -- }
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    if (LdrPCVideoMode@ -1 ~=)
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x4f02 regs@ LdrPCRegs_eax + !
+        LdrPCVideoMode@ regs@ LdrPCRegs_ebx + !
+        0x10 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eax + gi 0x4f ~=)
+            "LdrPlatformStartSystem: failed to set video mode\n"
+            -1 LdrPCVideoMode!
+        end
+    end
+
+    LdrI386StartSystem
+
+    if (LdrPCVideoMode@ -1 ~=)
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x03 regs@ LdrPCRegs_eax + ! // 80x25 text mode
+        0x10 regs@ LdrPCCallInterrupt
+    end
+end
 
 fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread ok }
     auto blocksize
@@ -451,6 +472,348 @@ fn LdrPlatformIOInit { bootdevname -- }
     LdrBootDeviceName "bios" strcpy
 
     LdrPCBootVolume LdrBootDevice LdrPCInitVolume
+
+    LdrPCInitVideo
+end
+
+var LdrPCVideoMode -1
+
+struct VbeInfoBlock
+    4 Signature
+    2 VersionI
+    2 OemStringOffI
+    2 OemStringSegI
+    4 Capabilities
+    2 ModesOffI
+    2 ModesSegI
+    2 TotalMemoryI
+    2 OemSoftwareRevI
+    2 OemVendorNameOffI
+    2 OemVendorNameSegI
+    2 OemProductNameOffI
+    2 OemProductNameSegI
+    2 OemProductRevOffI
+    2 OemProductRevSegI
+    222 Reserved
+    256 OemData
+endstruct
+
+struct ModeInfoBlock
+    2 ModeAttributesI
+    1 WinAAttributesB
+    1 WinBAttributesB
+    2 WinGranularityI
+    2 WinSizeI
+    2 WinASegmentI
+    2 WinBSegmentI
+    2 WinFuncOffI
+    2 WinFuncSegI
+    2 BytesPerScanLineI
+    2 XResolutionI
+    2 YResolutionI
+    1 XCharSizeB
+    1 YCharSizeB
+    1 NumberOfPlanesB
+    1 BitsPerPixelB
+    1 NumberOfBanksB
+    1 MemoryModelB
+    1 BankSizeB
+    1 NumberOfImagePagesB
+    1 ReservedB
+    1 RedMaskSizeB
+    1 RedFieldPositionB
+    1 GreenMaskSizeB
+    1 GreenFieldPositionB
+    1 BlueMaskSizeB
+    1 BlueFieldPositionB
+    1 RsvdMaskSizeB
+    1 RsvdFieldPositionB
+    1 DirectColorModeInfoB
+    4 PhysBasePtr
+    4 Reserved
+    2 ReservedI
+    2 LinBytesPerScanLineI
+    1 BnkNumberOfImagePagesB
+    1 LinNumberOfImagePagesB
+    1 LinRedMaskSizeB
+    1 LinRedFieldPositionB
+    1 LinGreenMaskSizeB
+    1 LinGreenFieldPositionB
+    1 LinBlueMaskSizeB
+    1 LinBlueFieldPositionB
+    1 LinRsvdMaskSizeB
+    1 LinRsvdFieldPositionB
+    4 MaxPixelClock
+    190 Reserved0
+endstruct
+
+const VBE3 0x300
+
+const VBE_MODE_SUPPORTED 0x01
+const VBE_MODE_GEOMETRY 0x02
+const VBE_MODE_COLOR 0x08
+const VBE_MODE_GRAPHICS 0x10
+const VBE_MODE_LINEAR_FB 0x80
+
+const VBE_MODE_WANTED (VBE_MODE_SUPPORTED VBE_MODE_GEOMETRY | VBE_MODE_COLOR | VBE_MODE_GRAPHICS | VBE_MODE_LINEAR_FB |)
+
+const VBE_MODEL_DIRECT 6
+
+fn private LdrPCCompareModes { width height curwidth curheight wantedwidth wantedheight edidwidth edidheight -- res }
+    if (width@ curwidth@ == height@ curheight@ == &&)
+        0 res!
+        return
+    end
+
+    -1 res!
+
+    if (curwidth@ wantedwidth@ ==)
+        if (width@ wantedwidth@ ~=)
+            return
+        end
+    end elseif (width@ wantedwidth@ ==)
+        1 res!
+        return
+    end
+
+    if (curheight@ wantedheight@ ==)
+        if (height@ wantedheight@ ~=)
+            return
+        end
+    end elseif (height@ wantedheight@ ==)
+        1 res!
+        return
+    end
+
+    if (curwidth@ edidwidth@ ==)
+        if (width@ edidwidth@ ~=)
+            return
+        end
+    end elseif (width@ edidwidth@ ==)
+        1 res!
+        return
+    end
+
+    if (curheight@ edidheight@ ==)
+        if (height@ edidheight@ ~=)
+            return
+        end
+    end elseif (height@ edidheight@ ==)
+        1 res!
+        return
+    end
+
+    if (width@ height@ * curwidth@ curheight@ * <)
+        return
+    end elseif (width@ height@ * curwidth@ curheight@ * >)
+        1 res!
+        return
+    end
+
+    if (width@ curwidth@ >)
+        1 res!
+    end
+end
+
+fn private LdrPCInitVideo { -- }
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    auto vbeinfo
+    VbeInfoBlock_SIZEOF alloc vbeinfo!
+    '2EBV' vbeinfo@ VbeInfoBlock_Signature + !
+
+    auto modeinfo
+    ModeInfoBlock_SIZEOF alloc modeinfo!
+
+    // detect vbe
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0x4f00 regs@ LdrPCRegs_eax + !
+    vbeinfo@ regs@ LdrPCRegs_edi + !
+    0x10 regs@ LdrPCCallInterrupt
+
+    if (regs@ LdrPCRegs_eax + gi 0x4f ~=)
+        "LdrPCInitVideo: VBE not supported, no video will be available\n" Printf
+        return
+    end
+
+    auto wantedwidth
+    auto wantedheight
+    "WIDTH" LdrArgsValue wantedwidth!
+    "HEIGHT" LdrArgsValue wantedheight!
+
+    if (wantedwidth@)
+        wantedwidth@ atoi wantedwidth!
+    end
+
+    if (wantedheight@)
+        wantedheight@ atoi wantedheight!
+    end
+
+    auto edidwidth
+    auto edidheight
+    0 edidwidth!
+    0 edidheight!
+
+    // check if edid is supported
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0x4f15 regs@ LdrPCRegs_eax + !
+    0x10 regs@ LdrPCCallInterrupt
+
+    if (regs@ LdrPCRegs_eax + gi 0x4f ==)
+        auto edidbuf
+        128 alloc edidbuf!
+
+        // get edid info
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x4f15 regs@ LdrPCRegs_eax + !
+        1 regs@ LdrPCRegs_ebx + !
+        edidbuf@ regs@ LdrPCRegs_edi + !
+        0x10 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eax + gi 0x4f ==)
+            if (edidbuf@@ 0xffffff00 == edidbuf@ 4 + @ 0xffffff == && edidbuf@ 0x36 + gb edidbuf@ 0x37 + gb || &&)
+                edidbuf@ 0x38 + gb edidbuf@ 0x3a + gb 0xf0 & 4 << | edidwidth!
+                edidbuf@ 0x3b + gb edidbuf@ 0x3d + gb 0xf0 & 4 << | edidheight!
+            end
+        end
+    end
+
+    auto modes
+    vbeinfo@ VbeInfoBlock_ModesSegI + gi 4 << vbeinfo@ VbeInfoBlock_ModesOffI + gi + modes!
+
+    auto curwidth
+    -1 curwidth!
+
+    auto curheight
+    -1 curheight!
+
+    auto curpitch
+    -1 curpitch!
+
+    auto curaddr
+    -1 curaddr!
+
+    auto curmode
+    -1 curmode!
+
+    while (1)
+        auto mode
+        modes@ gi mode!
+        2 modes +=
+
+        if (mode@ 0xffff ==)
+            break
+        end
+
+        // get mode info
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x4f01 regs@ LdrPCRegs_eax + !
+        mode@ regs@ LdrPCRegs_ecx + !
+        modeinfo@ regs@ LdrPCRegs_edi + !
+        0x10 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eax + gi 0x4f ~=)
+            continue
+        end
+
+        if (modeinfo@ ModeInfoBlock_ModeAttributesI + gi VBE_MODE_WANTED & VBE_MODE_WANTED ~=)
+            continue
+        end
+
+        if (modeinfo@ ModeInfoBlock_BitsPerPixelB + gb 32 ~=)
+            continue
+        end
+
+        if (modeinfo@ ModeInfoBlock_MemoryModelB + gb VBE_MODEL_DIRECT ~=)
+            continue
+        end
+
+        auto redfieldpos
+        auto redmasksize
+        auto greenfieldpos
+        auto greenmasksize
+        auto bluefieldpos
+        auto bluemasksize
+        auto pitch
+
+        if (vbeinfo@ VbeInfoBlock_VersionI + gi VBE3 <)
+            modeinfo@ ModeInfoBlock_RedFieldPositionB + gb redfieldpos!
+            modeinfo@ ModeInfoBlock_RedMaskSizeB + gb redmasksize!
+            modeinfo@ ModeInfoBlock_GreenFieldPositionB + gb greenfieldpos!
+            modeinfo@ ModeInfoBlock_GreenMaskSizeB + gb greenmasksize!
+            modeinfo@ ModeInfoBlock_BlueFieldPositionB + gb bluefieldpos!
+            modeinfo@ ModeInfoBlock_BlueMaskSizeB + gb bluemasksize!
+            modeinfo@ ModeInfoBlock_BytesPerScanLineI + gi pitch!
+        end else
+            modeinfo@ ModeInfoBlock_LinRedFieldPositionB + gb redfieldpos!
+            modeinfo@ ModeInfoBlock_LinRedMaskSizeB + gb redmasksize!
+            modeinfo@ ModeInfoBlock_LinGreenFieldPositionB + gb greenfieldpos!
+            modeinfo@ ModeInfoBlock_LinGreenMaskSizeB + gb greenmasksize!
+            modeinfo@ ModeInfoBlock_LinBlueFieldPositionB + gb bluefieldpos!
+            modeinfo@ ModeInfoBlock_LinBlueMaskSizeB + gb bluemasksize!
+            modeinfo@ ModeInfoBlock_LinBytesPerScanLineI + gi pitch!
+        end
+
+        if (redfieldpos@ 16 ~= redmasksize@ 8 ~= ||)
+            continue
+        end
+
+        if (greenfieldpos@ 8 ~= greenmasksize@ 8 ~= ||)
+            continue
+        end
+
+        if (bluefieldpos@ 0 ~= bluemasksize@ 8 ~= ||)
+            continue
+        end
+
+        auto width
+        auto height
+        modeinfo@ ModeInfoBlock_XResolutionI + gi width!
+        modeinfo@ ModeInfoBlock_YResolutionI + gi height!
+
+        if (curmode@ -1 ~=)
+            auto cmpres
+            width@ height@ curwidth@ curheight@ wantedwidth@ wantedheight@ edidwidth@ edidheight@ LdrPCCompareModes cmpres!
+
+            if (cmpres@ 0 s<=)
+                continue
+            end
+        end
+
+        width@ curwidth!
+        height@ curheight!
+        pitch@ curpitch!
+        modeinfo@ ModeInfoBlock_PhysBasePtr + @ curaddr!
+        mode@ curmode!
+    end
+
+    if (curmode@ -1 ==)
+        "LdrPCInitVideo: no video modes available\n" Printf
+        return
+    end
+
+    auto ok
+    auto vaddr
+	height@ pitch@ * PAGEOFFSETMASK + PAGESHIFT >> // pages
+	curaddr@ // phyaddr
+	LDRMEM_WRITECOMBINE // noncached
+	LdrMemoryMapIORegion ok! vaddr!
+
+    if (ok@)
+        ok@ "LdrPCInitVideo: failed to map framebuffer (%i)\n" Printf
+        return
+    end
+
+    curwidth@             LdrInfoBlock LdrInfo_HALConsoleFBWidth + !
+    curheight@            LdrInfoBlock LdrInfo_HALConsoleFBHeight + !
+    OSBOOTFBFORMAT_RGBA32 LdrInfoBlock LdrInfo_HALConsoleFBFormat + !
+    vaddr@                LdrInfoBlock LdrInfo_HALConsoleFBAddr + !
+    curpitch@             LdrInfoBlock LdrInfo_HALConsoleFBPitch + !
+
+    curmode@ 0x4000 | LdrPCVideoMode!
+
+    curaddr@ vaddr@ curheight@ curwidth@ "LdrPCInitVideo: using %dx%d framebuffer @ 0x%x (0x%x)\n" Printf
 end
 
 const LDR_PC_MEMORY_FREE 1
@@ -913,6 +1276,26 @@ fn private LdrPCBuildDescriptors { -- }
 	    ldrdesc@ LdrMemoryDescriptorListTail@ LdrMemoryDescriptor_Next + !
 	    ldrdesc@ LdrMemoryDescriptorListTail!
     end
+
+    // allocate the descriptor for the BIOS area (this causes the area to be mapped)
+
+	LdrMemoryDescriptor_SIZEOF // size
+	LdrMemoryAllocate ok! ldrdesc!
+
+	if (ok@)
+		ok@ "LdrPCBuildDescriptors: failed to allocate descriptor (%i)\n" LdrCrash
+	end
+
+	0 ldrdesc@ LdrMemoryDescriptor_Next + !
+	OSLOADERMEM_USED ldrdesc@ LdrMemoryDescriptor_Type + !
+	htop@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !
+	0x100000 htop@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_Pages + !
+
+	1 ldrdesc@ LdrMemoryDescriptor_OriginalDescriptor + !
+	0x100000 htop@ - PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
+
+	ldrdesc@ LdrMemoryDescriptorListTail@ LdrMemoryDescriptor_Next + !
+	ldrdesc@ LdrMemoryDescriptorListTail!
 
     // build list of free regions in high memory
 

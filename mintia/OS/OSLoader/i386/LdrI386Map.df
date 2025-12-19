@@ -15,6 +15,7 @@ const PTE_V  1
 const PTE_W  2
 const PTE_D  64
 const PTE_NC 24
+const PTE_WC 8
 
 const PTE_KPAGE (PTE_V PTE_W | PTE_D |)
 const PTE_INVALID_KPAGE 16
@@ -201,6 +202,10 @@ fn LdrPlatformMapPage { vaddr phyaddr noncached reclaimablept -- }
 
 	if (noncached@ LDRMEM_NONCACHED ==)
 		PTE_NC flags |=
+	end
+
+	if (noncached@ LDRMEM_WRITECOMBINE ==)
+		PTE_WC flags |=
 	end
 
 	phyaddr@ PAGESHIFT >> 12 << flags@ | pdi@!

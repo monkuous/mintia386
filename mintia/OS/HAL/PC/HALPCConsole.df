@@ -1,0 +1,192 @@
+//
+// Implements the platform-dependent part of the HAL console.
+//
+
+#include "<df>/dragonfruit.h"
+#include "../../OSLoader/OSLoaderGlobal.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+table Palette
+	0xffffff // 0: white       #ffffff
+	0xeeee22 // 1: yellow      #eeee22
+	0xee6622 // 2: orange      #ee6622
+	0xcc0000 // 3: red         #cc0000
+	0xee0066 // 4: magenta     #ee0066
+	0x440088 // 5: purple      #440088
+	0x000088 // 6: blue        #000088
+	0x00aacc // 7: cyan        #00aacc
+	0x22aa22 // 8: green       #22aa22
+	0x006600 // 9: dark green  #006600
+	0x442200 // 10: brown      #442200
+	0x886644 // 11: tan        #886644
+	0xcccccc // 12: light gray #cccccc
+	0x888888 // 13: gray       #888888
+	0x444444 // 14: dark gray  #444444
+	0x000000 // 15: black      #000000
+endtable
+
+var FBAddr 0
+var FBPitch 0
+var FBSize 0
+
+fn HALCPUFastDrawGlyph { fg width bg height start pitch bmp -- }
+	auto y
+	0 y!
+
+	while (y@ height@ <)
+		auto glyph
+		bmp@ y@ + gb glyph!
+
+		auto x
+		0 x!
+
+		while (x@ width@ <)
+			if (glyph@ 0x80 &)
+				fg@ start@ x@ 2 << + !
+			end else
+				bg@ start@ x@ 2 << + !
+			end
+
+			1 x +=
+			1 glyph <<=
+		end
+
+		1 y +=
+		pitch@ start +=
+	end
+end
+
+fn HALCPUFastDrawGlyphBackwards { fg width bg height start pitch bmp -- }
+	auto y
+	0 y!
+
+	while (y@ height@ <)
+		auto glyph
+		bmp@ y@ + gb glyph!
+
+		auto x
+		0 x!
+
+		while (x@ width@ <)
+			if (glyph@ 1 &)
+				fg@ start@ x@ 2 << + !
+			end else
+				bg@ start@ x@ 2 << + !
+			end
+
+			1 x +=
+			1 glyph >>=
+		end
+
+		1 y +=
+		pitch@ start +=
+	end
+end
+
+fn HALPlatformConsoleDrawChar { bmp x y -- }
+	if (HALConsoleFontFlags@ HCFFLAG_REVERSE &)
+		[CONSOLEFG]Palette@ // fg
+		HALConsoleFontWidth@ // width
+		[CONSOLEBG]Palette@ // bg
+		HALConsoleFontHeight@ // height
+		y@ FBPitch@ * x@ 2 << + FBAddr@ + // start
+		FBPitch@ // pitch
+		bmp@ // bmp
+		HALCPUFastDrawGlyphBackwards
+	end else
+		[CONSOLEFG]Palette@ // fg
+		HALConsoleFontWidth@ // width
+		[CONSOLEBG]Palette@ // bg
+		HALConsoleFontHeight@ // height
+		y@ FBPitch@ * x@ 2 << + FBAddr@ + // start
+		FBPitch@ // pitch
+		bmp@ // bmp
+		HALCPUFastDrawGlyph
+	end
+end
+
+externptr HALLoaderInfo
+
+fn HALPlatformConsoleShutter { -- }
+	// do a cool shutter effect on the framebuffer
+
+	auto size
+	FBSize@ size!
+
+	auto addr
+	FBAddr@ addr!
+
+	auto height
+	HALConsoleHeightPix@ height!
+
+	auto padding
+	FBPitch@ HALConsoleWidthPix@ 2 << - padding!
+
+	while (height@)
+		auto width
+		HALConsoleWidthPix@ width!
+
+		auto off
+		height@ 1 & off!
+
+		while (width@ 1 >=)
+			0 addr@ off@ + !
+
+			2 width -=
+			8 addr +=
+		end
+
+		1 height -=
+		padding@ addr +=
+	end
+end
+
+fn HALPlatformConsoleClear { color -- }
+	auto c
+	[color@]Palette@ c!
+
+	FBAddr@ FBSize@ c@ memset
+end
+
+fn HALPlatformConsoleScroll { color -- }
+	auto c
+	[color@]Palette@ c!
+
+	auto marginbytes
+	HALConsoleFontHeight@ FBPitch@ * marginbytes!
+
+	auto scrollbytes
+	FBSize@ marginbytes@ - scrollbytes!
+
+	auto fb
+	FBAddr@ fb!
+
+	fb@ // dest
+	fb@ marginbytes@ + // src
+	scrollbytes@ // size
+	memcpy
+
+	fb@ scrollbytes@ + // ptr
+	marginbytes@ // size
+	c@ // word
+	memset
+end
+
+fn HALPlatformConsoleInit { ldrinfo wantmode -- havemode }
+	if (wantmode@ CONSOLEMODESCREEN ==)
+		if (ldrinfo@ LdrInfo_HALConsoleFBFormat + @ OSBOOTFBFORMAT_RGBA32 ~=)
+			CONSOLEMODETTY havemode!
+		end else
+			ldrinfo@ LdrInfo_HALConsoleFBAddr + @ FBAddr!
+			ldrinfo@ LdrInfo_HALConsoleFBPitch + @ FBPitch!
+			FBPitch@ HALConsoleHeightPix@ * FBSize!
+
+			wantmode@ havemode!
+		end
+	end else
+		wantmode@ havemode!
+	end
+end

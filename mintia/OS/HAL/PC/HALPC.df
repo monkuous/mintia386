@@ -1,5 +1,5 @@
 //
-// Initialization of the XRstation HAL.
+// Initialization of the PC HAL.
 //
 
 #include "<df>/dragonfruit.h"

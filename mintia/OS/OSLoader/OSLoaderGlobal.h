@@ -48,6 +48,9 @@ struct LdrInfo
 #ifdef XR17032
 	4 ExceptionBlockBase
 #endif
+#ifdef PC
+	4 HALConsoleFBPitch
+#endif
 endstruct
 
 struct LdrBootResource
