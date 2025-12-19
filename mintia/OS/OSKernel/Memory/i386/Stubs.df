@@ -12,10 +12,6 @@ fn MiPTESet { pte pteaddr -- }
     "TODO MiPTESet\n" KeCrash
 end
 
-fn MiPTEUpdateByVirtual { phyaddr flags vaddr -- oldphyaddr oldflags }
-    "TODO MiPTEUpdateByVirtual\n" KeCrash
-end
-
 fn MiPageDirectoryDestroy { process -- }
     "TODO MiPageDirectoryDestroy\n" KeCrash
 end

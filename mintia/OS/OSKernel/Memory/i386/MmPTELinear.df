@@ -71,3 +71,13 @@ fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
 	    vaddr@ HALI386TLBFlush
     end
 end
+
+fn MiPTEUpdateByVirtual { phyaddr flags vaddr -- oldphyaddr oldflags }
+	auto pteaddr
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	phyaddr@ // phyaddr
+	flags@ // flags
+	pteaddr@ // pteaddr
+	MiPTEUpdate oldflags! oldphyaddr!
+end
