@@ -12,9 +12,6 @@ HALPlatformConsoleGetc:
 .globl HALPlatformIsComputerOnFire
 HALPlatformIsComputerOnFire:
     int3
-.globl HALPlatformDebugDump
-HALPlatformDebugDump:
-    int3
 .globl HALPlatformConsolePutc
 HALPlatformConsolePutc:
     int3
