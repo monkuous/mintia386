@@ -247,6 +247,11 @@ public class Parser {
                 case PIPE_PIPE -> block.operations().add(new ProtoOperation.LogicOr(token));
                 case SLASH_EQ -> block.operations().add(new ProtoOperation.Write(token, "/="));
                 case STAR_EQ -> block.operations().add(new ProtoOperation.Write(token, "*="));
+                case EOF -> {
+                    token.error("unexpected eof");
+                    terminator = TokenType.EOF;
+                    terminatorText = "";
+                }
                 default -> token.error("unrecognized operation");
             }
         }
