@@ -3,14 +3,8 @@
 .globl HALPlatformExit
 HALPlatformExit:
     int3
-.globl HALPlatformInit
-HALPlatformInit:
-    int3
 .globl HALCPUHalt
 HALCPUHalt:
-    int3
-.globl HALPlatformInfo
-HALPlatformInfo:
     int3
 .globl HALPlatformCrash
 HALPlatformCrash:

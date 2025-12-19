@@ -13,6 +13,8 @@
 
 #include "<ll>/OSDLL/OS.h"
 
+var InfoTotalRAM 0
+
 var KeThreadCurrentStackTop 0
 public KeThreadCurrentStackTop
 
@@ -24,3 +26,59 @@ public HALPlatformModel
 
 buffer HALCPUModel 64
 public HALCPUModel
+
+fn HALPlatformInfo { -- }
+	// we're supposed to print platform info in this function
+
+    HALCPUModel
+	InfoTotalRAM@ 1048576 /
+	"PC (%dMB) i386 %s" Printf
+end
+
+extern HALPCGetCPUModel { -- modeldata }
+
+fn HALPlatformInit { ldrinfo -- ret }
+	fnsection "INIT$text"
+
+    0 ret!
+
+	HALPlatformModel
+	"PC"
+	strcpy
+
+    auto modeldata
+    HALPCGetCPUModel modeldata!
+
+    if (modeldata@)
+        if (modeldata@ -1 ~=)
+            auto family
+            auto model
+            auto stepping
+            modeldata@ 8 >> 0xf & family!
+            modeldata@ 4 >> 0xf & model!
+            modeldata@ 0xf & stepping!
+
+            if (family@ 0xf == family@ 0x6 == ||)
+                modeldata@ 12 >> 0xf0 & model |=
+            end
+
+            if (family@ 0xf ==)
+                modeldata@ 20 >> 0xff & family +=
+            end
+
+            HALCPUModel dup strlen + " Family " strcpy
+            family@ HALCPUModel dup strlen + itoa
+            HALCPUModel dup strlen + ", Model " strcpy
+            model@ HALCPUModel dup strlen + itoa
+            HALCPUModel dup strlen + ", Stepping " strcpy
+            stepping@ HALCPUModel dup strlen + itoa
+        end elseif (HALCPUModel gb ~~)
+            HALCPUModel "Generic i386" strcpy
+        end
+    end
+
+    ldrinfo@ LdrInfo_TotalRAM + @ InfoTotalRAM!
+
+    "Platform: " "HALMain" HALLog
+    HALPlatformInfo
+end
