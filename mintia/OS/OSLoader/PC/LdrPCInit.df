@@ -258,7 +258,7 @@ fn LdrPCIterateMemoryMap { func context -- }
     end
 
     regs@ LdrPCRegs_SIZEOF 0 memset
-    0x88 regs@ LdrPCRegs_eax + !
+    0x8800 regs@ LdrPCRegs_eax + !
     0x15 regs@ LdrPCCallInterrupt
 
     if (regs@ LdrPCRegs_eflags + @ 1 & ~~)
