@@ -6,7 +6,4 @@ LdrPlatformBootDriversLoadAll:
 .globl LdrPlatformStartSystem
 LdrPlatformStartSystem:
     int3
-.globl LdrPlatformIOInit
-LdrPlatformIOInit:
-    int3
 

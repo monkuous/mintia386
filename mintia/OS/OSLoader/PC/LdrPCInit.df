@@ -74,12 +74,27 @@ fn private ArgsInit { argp -- }
 	0 p@ sb
 end
 
-fn LdrPCMain { sector drive cmdline -- }
+struct LdrPCVolume
+    4 Block
+    4 MaxAddressableBlock
+    2 TrackSizeI
+    2 NumHeadsI
+    1 DriveB
+endstruct
+
+buffer LdrPCBootVolume LdrPCVolume_SIZEOF
+
+fn LdrPCMain { block drive cmdline -- }
 	// clear BSS section
 
 	pointerof _bss
 	pointerof _bss_end pointerof _bss -
 	0 memset
+
+    // store arguments
+
+    block@ LdrPCBootVolume LdrPCVolume_Block + !
+    drive@ LdrPCBootVolume LdrPCVolume_DriveB + sb
 
 	// convert arguments to HAL-preferred format
 
@@ -118,6 +133,316 @@ struct LdrPCRegs
     2 gsI
     4 eflags
 endstruct
+
+fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread ok }
+    auto blocksize
+    file@ LdrFile_BlockSize + @ blocksize!
+
+    if (buf@ blocksize@ %)
+        LDRSTATUS_UNALIGNED ok!
+        return
+    end
+
+    if (offset@ blocksize@ %)
+        LDRSTATUS_UNALIGNED ok!
+        return
+    end
+
+    if (length@ blocksize@ %)
+        LDRSTATUS_UNALIGNED ok!
+        return
+    end
+
+    if (length@ ~~)
+        0 ok!
+        0 bytesread!
+        return
+    end
+
+    auto volume
+    file@ LdrFile_DriverContext + @ volume!
+
+    auto block
+    offset@ blocksize@ / volume@ LdrPCVolume_Block + @ + block!
+
+    auto count
+    length@ blocksize@ / count!
+
+    if (block@ count@ + 1 - volume@ LdrPCVolume_MaxAddressableBlock + @ >)
+        LDRSTATUS_IO_ERROR ok!
+        return
+    end
+
+    0 bytesread!
+
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    auto tracksize
+    auto numheads
+    auto drive
+    volume@ LdrPCVolume_TrackSizeI + gi tracksize!
+    volume@ LdrPCVolume_NumHeadsI + gi numheads!
+    volume@ LdrPCVolume_DriveB + gb drive!
+
+    auto sector
+    auto head
+    auto cylinder
+    block@ tracksize@ % sector!
+    block@ tracksize@ / numheads@ % head!
+    block@ tracksize@ / numheads@ / cylinder!
+
+    while (count@)
+        if (buf@ 0x100000 >=)
+            LDRSTATUS_IO_ERROR ok!
+            return
+        end
+
+        // determine number of blocks to read. a single operation cannot cross a 64K boundary, or a track boundary.
+
+        auto segmentcount
+        0x10000 buf@ 0xffff & - blocksize@ / segmentcount!
+
+        auto currentcount
+        tracksize@ sector@ - currentcount!
+
+        if (currentcount@ segmentcount@ >)
+            segmentcount@ currentcount!
+        end
+
+        if (currentcount@ count@ >)
+            count@ currentcount!
+        end
+
+        auto i
+        5 i!
+
+        // perform the read
+
+        while (i@)
+            regs@ LdrPCRegs_SIZEOF 0 memset
+            0x200 count@ | regs@ LdrPCRegs_eax + !
+            sector@ 1 + cylinder@ 0xff & 8 << | cylinder@ 0x300 & 2 >> | regs@ LdrPCRegs_ecx + !
+            head@ 8 << drive@ | regs@ LdrPCRegs_edx + !
+            buf@ 4 >> regs@ LdrPCRegs_esI + si
+            buf@ 15 & regs@ LdrPCRegs_ebx + !
+            0x13 regs@ LdrPCCallInterrupt
+
+            if (regs@ LdrPCRegs_eflags + @ 1 & ~~)
+                break
+            end
+
+            // reset drive and try again
+            regs@ LdrPCRegs_SIZEOF 0 memset
+            drive@ regs@ LdrPCRegs_edx + !
+            0x13 regs@ LdrPCCallInterrupt
+
+            1 i -=
+        end
+
+        if (i@ ~~)
+            LDRSTATUS_IO_ERROR ok!
+            return
+        end
+
+        // advance
+
+        currentcount@ blocksize@ * bytesread +=
+        currentcount@ count -=
+
+        if (count@ ~~)
+            break
+        end
+
+        currentcount@ blocksize@ * buf +=
+
+        currentcount@ sector +=
+
+        if (sector@ tracksize@ ==)
+            0 sector!
+            1 head +=
+
+            if (head@ numheads@ ==)
+                0 head!
+                1 cylinder +=
+            end
+        end
+    end
+
+    0 ok!
+    return
+end
+
+struct LdrPCDiskPacket
+    2 PacketSizeI
+    2 BlockCountI
+    2 OffsetI
+    2 SegmentI
+    8 Block
+endstruct
+
+fn (LdrReadFunction) private LdrPCReadLBA { length buf offset file -- bytesread ok }
+    auto blocksize
+    file@ LdrFile_BlockSize + @ blocksize!
+
+    if (offset@ blocksize@ %)
+        LDRSTATUS_UNALIGNED ok!
+        return
+    end
+
+    if (length@ blocksize@ %)
+        LDRSTATUS_UNALIGNED ok!
+        return
+    end
+
+    if (length@ ~~)
+        0 ok!
+        0 bytesread!
+        return
+    end
+
+    auto volume
+    file@ LdrFile_DriverContext + @ volume!
+
+    auto block
+    offset@ blocksize@ / volume@ LdrPCVolume_Block + @ + block!
+
+    auto count
+    length@ blocksize@ / count!
+
+    0 bytesread!
+
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    auto packet
+    LdrPCDiskPacket_SIZEOF alloc packet!
+
+    auto drive
+    volume@ LdrPCVolume_DriveB + gb drive!
+
+    while (count@)
+        if (buf@ 0x100000 >=)
+            LDRSTATUS_IO_ERROR ok!
+            return
+        end
+
+        // determine number of blocks to read. a single operation can read at most 127 blocks.
+
+        auto currentcount
+        count@ currentcount!
+
+        if (currentcount@ 127 >)
+            127 currentcount!
+        end
+
+        // perform the read
+
+        LdrPCDiskPacket_SIZEOF packet@ LdrPCDiskPacket_PacketSizeI + si
+        currentcount@ packet@ LdrPCDiskPacket_BlockCountI + si
+        buf@ 15 & packet@ LdrPCDiskPacket_OffsetI + si
+        buf@ 4 >> packet@ LdrPCDiskPacket_SegmentI + si
+        block@ packet@ LdrPCDiskPacket_Block + !
+        0 packet@ LdrPCDiskPacket_Block 4 + + !
+
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x4200 regs@ LdrPCRegs_eax + !
+        drive@ regs@ LdrPCRegs_edx + !
+        packet@ regs@ LdrPCRegs_esi + !
+        0x13 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eflags + @ 1 &)
+            LDRSTATUS_IO_ERROR ok!
+            return
+        end
+
+        // advance
+
+        currentcount@ blocksize@ * bytesread +=
+        currentcount@ count -=
+
+        if (count@ ~~)
+            break
+        end
+
+        currentcount@ blocksize@ * buf +=
+
+        currentcount@ block +=
+    end
+
+    0 ok!
+    return
+end
+
+struct LdrPCDriveParams
+    2 BufferSizeI
+    2 FlagsI
+    4 Cylinders
+    4 Heads
+    4 Sectors
+    8 Blocks
+    2 BlockSizeI
+endstruct
+
+fn private LdrPCInitVolume { volume device -- }
+    volume@ device@ LdrFile_DriverContext + !
+
+    auto regs
+    LdrPCRegs_SIZEOF alloc regs!
+
+    // check if int13 extensions are supported
+    regs@ LdrPCRegs_SIZEOF 0 memset
+    0x4100 regs@ LdrPCRegs_eax + !
+    0x55aa regs@ LdrPCRegs_ebx + !
+    volume@ LdrPCVolume_DriveB + gb regs@ LdrPCRegs_edx + !
+    0x13 regs@ LdrPCCallInterrupt
+
+    if (regs@ LdrPCRegs_eflags + @ 1 & ~~ regs@ LdrPCRegs_ebx + gi 0xaa55 == && regs@ LdrPCRegs_ecx + @ 1 & &&)
+        auto params
+        LdrPCDriveParams_SIZEOF alloc params!
+        LdrPCDriveParams_SIZEOF params@ LdrPCDriveParams_BufferSizeI + si
+        0 params@ LdrPCDriveParams_FlagsI + si
+
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x4800 regs@ LdrPCRegs_eax + !
+        volume@ LdrPCVolume_DriveB + gb regs@ LdrPCRegs_edx + !
+        params@ regs@ LdrPCRegs_esi + !
+        0x13 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eflags + 1 &)
+            "failed to initialize volume i/o\n" LdrCrash
+        end
+
+        pointerof LdrPCReadLBA device@ LdrFile_ReadFunction + !
+        params@ LdrPCDriveParams_BlockSizeI + gi device@ LdrFile_BlockSize + !
+    end else
+        regs@ LdrPCRegs_SIZEOF 0 memset
+        0x0800 regs@ LdrPCRegs_eax + !
+        volume@ LdrPCVolume_DriveB + gb regs@ LdrPCRegs_edx + !
+        0x13 regs@ LdrPCCallInterrupt
+
+        if (regs@ LdrPCRegs_eflags + 1 &)
+            "failed to initialize volume i/o\n" LdrCrash
+        end
+
+        regs@ LdrPCRegs_ecx + @ 0x3f & volume@ LdrPCVolume_TrackSizeI + si
+        regs@ LdrPCRegs_edx + gi 8 >> 1 + volume@ LdrPCVolume_NumHeadsI + si
+        volume@ LdrPCVolume_TrackSizeI gi volume@ LdrPCVolume_NumHeadsI + gi * 1024 * 1 - volume@ LdrPCVolume_MaxAddressableBlock + !
+
+        pointerof LdrPCReadCHS device@ LdrFile_ReadFunction + !
+        512 device@ LdrFile_BlockSize + !
+    end
+end
+
+fn LdrPlatformIOInit { bootdevname -- }
+    if (bootdevname@)
+        "LdrPlatformIOInit: arbitrary boot devices are not supported\n" LdrCrash
+    end
+
+    LdrBootDeviceName "bios" strcpy
+
+    LdrPCBootVolume LdrBootDevice LdrPCInitVolume
+end
 
 const LDR_PC_MEMORY_FREE 1
 
@@ -606,7 +931,7 @@ fn private LdrPCBuildDescriptors { -- }
         htop@ PAGEOFFSETMASK - PAGEOFFSETMASK | rtop!
 
         if (hbottom@ ok@ <= htop@ rtop@ >= && ok@ rtop@ <=)
-            LdrMemoryTotalRAM += rtop@ ok@ - 1 +
+            rtop@ ok@ - 1 + LdrMemoryTotalRAM +=
 
             0 ldrdesc@ LdrMemoryDescriptor_Next + !
             ok@ PAGESHIFT >> ldrdesc@ LdrMemoryDescriptor_StartPFN + !

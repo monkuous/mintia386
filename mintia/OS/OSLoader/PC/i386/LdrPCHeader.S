@@ -11,7 +11,7 @@ Header:
     .long _start
 .size Header, . - Header
 
-# [in] dx:ax = boot volume sector
+# [in] dx:ax = boot volume block
 # [in] cl = boot drive id
 # [in] si = command line
 .globl _start
