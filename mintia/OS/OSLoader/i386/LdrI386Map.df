@@ -1,0 +1,207 @@
+//
+// Implements virtual address space management for i386.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "../OSLoader.h"
+
+var LdrPlatformKernelPageDirectory 0
+public LdrPlatformKernelPageDirectory
+
+var LdrI386PageDirectory 0
+
+const PTE_V  1
+const PTE_W  2
+const PTE_D  64
+const PTE_NC 24
+
+const PTE_KPAGE (PTE_V PTE_W | PTE_D |)
+const PTE_INVALID_KPAGE 16
+
+extern LdrI386MapEnablePaging { -- }
+
+fn LdrI386MapInit { -- }
+	// create page directory
+
+	auto ok
+	auto desc
+
+	1 // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrI386MapInit: failed to allocate page directory (%i)\n" LdrCrash
+	end
+
+	auto addr
+	desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << addr!
+
+	addr@ // ptr
+	2048 // size
+	0 // word
+	memset
+
+	addr@ 2048 + // ptr
+	2048 // size
+	PTE_INVALID_KPAGE // word
+	memset
+
+	addr@ LdrI386PageDirectory!
+
+	// identity map each memory descriptor
+
+	LdrMemoryDescriptorListHead@ desc!
+
+	while (desc@)
+		if (desc@ LdrMemoryDescriptor_OriginalDescriptor + @ desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << KERNELSPACE < &&)
+			desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // vaddr
+			desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << // phyaddr
+			desc@ LdrMemoryDescriptor_OriginalExtent + @ // pages
+			0 // noncached
+			1 // reclaimablept
+			LdrPlatformMapRange
+		end
+
+		desc@ LdrMemoryDescriptor_Next + @ desc!
+	end
+
+    addr@ LdrPlatformKernelPageDirectory!
+
+	auto pdi
+	auto i
+	auto pfn
+
+	POOLSPACE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	POOLSIZE 22 >> // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrI386MapInit: failed to allocate POOLSPACE page tables (%i)\n" LdrCrash
+	end
+
+	0 i!
+
+	desc@ LdrMemoryDescriptor_StartPFN + @ pfn!
+
+	while (i@ POOLSIZE 22 >> <)
+		pfn@ 12 << PTE_V | PTE_W | PTE_D | pdi@!
+
+		pfn@ PAGESHIFT << // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		1 pfn +=
+		4 pdi +=
+		1 i +=
+	end
+
+	VIEWSPACE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	VIEWSIZE 22 >> // pages
+	OSLOADERMEM_USED // type
+	LdrMemoryAllocatePhysicalRange ok! desc!
+
+	if (ok@)
+		ok@ "LdrI386MapInit: failed to allocate VIEWSPACE page tables (%i)\n" LdrCrash
+	end
+
+	0 i!
+
+	desc@ LdrMemoryDescriptor_StartPFN + @ pfn!
+
+	while (i@ VIEWSIZE 22 >> <)
+		pfn@ 12 << PTE_V | PTE_W | PTE_D | pdi@!
+
+		pfn@ PAGESHIFT << // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		1 pfn +=
+		4 pdi +=
+		1 i +=
+	end
+
+	// recursively map the page table by inserting the page directory into one
+	// of its own PDEs.
+
+	PAGETABLE 22 >> 2 << LdrPlatformKernelPageDirectory@ + pdi!
+
+	LdrPlatformKernelPageDirectory@ PAGESHIFT >> 12 << PTE_V | PTE_W | PTE_D | pdi@!
+
+    // enable paging
+
+    LdrI386MapEnablePaging
+end
+
+fn LdrPlatformMapRange { vaddr phyaddr pages noncached reclaimablept -- }
+	while (pages@)
+		vaddr@ // vaddr
+		phyaddr@ // phyaddr
+		noncached@ // noncached
+		reclaimablept@ // reclaimablept
+		LdrPlatformMapPage
+
+		PAGESIZE vaddr +=
+		PAGESIZE phyaddr +=
+		1 pages -=
+	end
+end
+
+fn LdrPlatformMapPage { vaddr phyaddr noncached reclaimablept -- }
+	auto pdi
+	vaddr@ 22 >> 2 << LdrI386PageDirectory@ + pdi!
+
+	auto pt
+	pdi@@ 12 >> PAGESHIFT << pt!
+
+	if (pt@ 0 ==)
+		// allocate a page table
+
+		auto desc
+		auto ok
+
+		if (reclaimablept@)
+			1 // pages
+			OSLOADERMEM_RECLAIMABLE // type
+			LdrMemoryAllocatePhysicalRange ok! desc!
+		end else
+			1 // pages
+			OSLOADERMEM_USED // type
+			LdrMemoryAllocatePhysicalRange ok! desc!
+		end
+
+		if (ok@)
+			ok@ "LdrPlatformMapPage: failed to allocate page table (%i)\n" LdrCrash
+		end
+
+		desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << pt!
+
+		pt@ // ptr
+		PAGESIZE // size
+		PTE_INVALID_KPAGE // word
+		memset
+
+		pt@ PAGESHIFT >> 12 << PTE_V | PTE_W | PTE_D | pdi@!
+	end
+
+	vaddr@ PAGESHIFT >> 1023 & 2 << pt@ + pdi!
+
+	if (pdi@@ PTE_V &)
+		vaddr@ PAGESHIFT >> "LdrPlatformMapPage: vpn %x is already mapped!\n" LdrCrash
+	end
+
+	auto flags
+	PTE_KPAGE flags!
+
+	if (noncached@ LDRMEM_NONCACHED ==)
+		PTE_NC flags |=
+	end
+
+	phyaddr@ PAGESHIFT >> 12 << flags@ | pdi@!
+end

@@ -141,7 +141,15 @@ EnterNativeMode:
     movzx %sp, %esp
     pushl $2
     popfl
-    retw
+
+    mov (LdrPlatformKernelPageDirectory), %eax
+    test %eax, %eax
+    jz 1f
+    mov %eax, %cr3
+    mov %cr0, %eax
+    or $(1 << 31), %eax
+    mov %eax, %cr0
+1:  retw
 .code16
 .size EnterNativeMode, . - EnterNativeMode
 
@@ -157,7 +165,7 @@ ExitNativeMode:
     mov %ax, %gs
     mov %ax, %ss
     mov %cr0, %eax
-    and $~1, %eax
+    and $~((1 << 31) | 1), %eax
     mov %eax, %cr0
     ljmp $0, $1f
 1:  xor %ax, %ax

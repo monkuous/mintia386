@@ -283,6 +283,20 @@ fn (LdrPCMemoryFunc) private LdrPCAddFreeRegion { head tail type context -- }
         return
     end
 
+    auto ldrtype
+    OSLOADERMEM_FREE ldrtype!
+
+    // mark physical ranges beyond KERNELSPACE as reclaiamble instead of free because the loader can't access those
+
+    if (tail@ KERNELSPACE >=)
+        if (head@ KERNELSPACE <)
+            head@ KERNELSPACE 1 - type@ context@ LdrPCAddFreeRegion
+            KERNELSPACE head!
+        end
+
+        OSLOADERMEM_RECLAIMABLE ldrtype!
+    end
+
     // find insertion location (starting at the tail so that the common case of already-sorted is fast)
 
     auto prev
@@ -333,8 +347,10 @@ fn (LdrPCMemoryFunc) private LdrPCAddFreeRegion { head tail type context -- }
             return
         end
 
-        tail@ prev@ LdrMemoryDescriptor_Pages + !
-        return
+        if (prev@ LdrMemoryDescriptor_Type + @ ldrtype @ ==)
+            tail@ prev@ LdrMemoryDescriptor_Pages + !
+            return
+        end
     end
 
     // create a new descriptor
@@ -349,7 +365,7 @@ fn (LdrPCMemoryFunc) private LdrPCAddFreeRegion { head tail type context -- }
 	end
 
     next@ ldrdesc@ LdrMemoryDescriptor_Next + !
-    OSLOADERMEM_FREE ldrdesc@ LdrMemoryDescriptor_Type + !
+    ldrtype@ ldrdesc@ LdrMemoryDescriptor_Type + !
     head@ ldrdesc@ LdrMemoryDescriptor_StartPFN + !
     tail@ ldrdesc@ LdrMemoryDescriptor_Pages + !
     prev@ ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
@@ -408,7 +424,7 @@ fn (LdrPCMemoryFunc) private LdrPCRemoveReservedRegion { head tail type context 
 	        end
 
             next@ ldrdesc@ LdrMemoryDescriptor_Next + !
-            OSLOADERMEM_FREE ldrdesc@ LdrMemoryDescriptor_Type + !
+            prev@ LdrMemoryDescriptor_Type + @ ldrdesc@ LdrMemoryDescriptor_Type + !
             tail@ 1 + ldrdesc@ LdrMemoryDescriptor_StartPFN + !
             prev@ LdrMemoryDescriptor_Pages + @ ldrdesc@ LdrMemoryDescriptor_Pages + !
             prev@ ldrdesc@ LdrMemoryDescriptor_OriginalExtent + !
@@ -470,8 +486,8 @@ fn private LdrPCBuildDescriptors { -- }
     regs@ LdrPCRegs_SIZEOF 0 memset
     0x12 regs@ LdrPCCallInterrupt
 
-    regs@ LdrPCRegs_eax + gi 10 << LdrHeapTop!
-    LdrHeapTop@ LDRINITIALHEAPSIZE - PAGENUMBERMASK & LdrHeapPointer!
+    regs@ LdrPCRegs_eax + gi 10 << PAGENUMBERMASK & LdrHeapTop!
+    LdrHeapTop@ LDRINITIALHEAPSIZE - LdrHeapPointer!
 
     if (LdrHeapPointer@ pointerof _bss_end <)
         "not enough memory for heap\n" LdrCrash
@@ -601,6 +617,8 @@ fn private LdrPCBuildDescriptors { -- }
     end
 end
 
+extern LdrI386MapInit { -- }
+
 fn LdrPlatformMemoryInit { -- }
     LdrPCBuildDescriptors
 
@@ -618,7 +636,9 @@ fn LdrPlatformMemoryInit { -- }
 
     desc@ LdrMemoryDescriptor_StartPFN + @ PAGESHIFT << LdrKernelSpaceBitmap!
 
-    "TODO\n" LdrCrash
+    // create IDENTITYSPACE and enable paging
+
+    LdrI386MapInit
 end
 
 fn private LdrPCWriteChar { c -- }
