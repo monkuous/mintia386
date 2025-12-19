@@ -131,6 +131,14 @@ KeIPLCurrentGet:
     ret
 .size KeIPLCurrentGet, . - KeIPLCurrentGet
 
+.globl HALI386MapSwitch
+.type HALI386MapSwitch, @function
+HALI386MapSwitch:
+    mov 4(%esp), %eax
+    mov %eax, %cr3
+    ret
+.size HALI386MapSwitch, . - HALI386MapSwitch
+
 .pushsection "INIT$text", "ax", %progbits
 .balign 4
 .globl KiI386IdtThunks

@@ -307,3 +307,20 @@ fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
 
     pointerof KiThreadTrampoline ctx@ OSContext_SIZEOF + !
 end
+
+extern HALI386MapSwitch { pgtb -- }
+
+fn KeAddressSpaceSwitch { process -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (process@ KeProcess_PageDirectory + @ HALPlatformKernelPageDirectory@ ==)
+		HALPlatformKernelPageDirectory@ // pgtb
+		HALI386MapSwitch
+	end else
+		process@ KeProcess_PageDirectory + @ 12 >> PAGESHIFT << // pgtb
+		HALI386MapSwitch
+	end
+
+    rs@ HALCPUInterruptRestore
+end

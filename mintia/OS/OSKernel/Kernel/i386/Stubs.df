@@ -28,10 +28,6 @@ fn KeSafeGetByte { src -- byte ok }
     "TODO KeSafeGetByte\n" KeCrash
 end
 
-fn KeAddressSpaceSwitch { process -- }
-    "TODO KeAddressSpaceSwitch\n" KeCrash
-end
-
 fn KeSafeStringCopyIn { dest src max -- ok }
     "TODO KeSafeStringCopyIn\n" KeCrash
 end
