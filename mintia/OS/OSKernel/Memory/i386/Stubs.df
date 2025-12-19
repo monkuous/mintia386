@@ -1,0 +1,89 @@
+#include "<inc>/Kernel.h"
+
+fn MiPageDirectoryAlloc { process -- ok }
+    "TODO MiPageDirectoryAlloc\n" KeCrash
+end
+
+fn MiPTECreate { vaddr -- pteaddr ok }
+    "TODO MiPTECreate\n" KeCrash
+end
+
+fn MiPTESet { pte pteaddr -- }
+    "TODO MiPTESet\n" KeCrash
+end
+
+fn MiPTEUpdateByVirtual { phyaddr flags vaddr -- oldphyaddr oldflags }
+    "TODO MiPTEUpdateByVirtual\n" KeCrash
+end
+
+fn MiPageDirectoryDestroy { process -- }
+    "TODO MiPageDirectoryDestroy\n" KeCrash
+end
+
+fn MmVirtualtoPTEAddressUser { vaddr -- pteaddr }
+    "TODO MmVirtualtoPTEAddressUser\n" KeCrash
+end
+
+fn MiPageDirectoryReference { process -- }
+    "TODO MiPageDirectoryReference\n" KeCrash
+end
+
+fn MiPageDirectoryDereference { process -- }
+    "TODO MiPageDirectoryDereference\n" KeCrash
+end
+
+fn MiPTEIsZero { pte -- iszero }
+    "TODO MiPTEIsZero\n" KeCrash
+end
+
+fn MiPTEInterpret { pteaddr -- phyaddr flags ok }
+    "TODO MiPTEInterpret\n" KeCrash
+end
+
+fn MmVirtualtoPTEAddress { vaddr -- pteaddr }
+    "TODO MmVirtualtoPTEAddress\n" KeCrash
+end
+
+fn MmVirtualToPFDBE { vaddr -- pfdbe }
+    "TODO MmVirtualToPFDBE\n" KeCrash
+end
+
+fn MmVirtualAddressIsValid { vaddr -- isvalid }
+    "TODO MmVirtualAddressIsValid\n" KeCrash
+end
+
+fn MiPTESetDirty { pteaddr -- }
+    "TODO MiPTESetDirty\n" KeCrash
+end
+
+fn MiPlatformInit { -- }
+    "TODO MiPlatformInit\n" KeCrash
+end
+
+fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
+    "TODO MiPTEPin\n" KeCrash
+end
+
+fn MiPTEUnpin { vaddr ptpfdbe -- }
+    "TODO MiPTEUnpin\n" KeCrash
+end
+
+fn MmVirtualtoPTEAddressWithFail { vaddr -- pteaddr ok }
+    "TODO MmVirtualtoPTEAddressWithFail\n" KeCrash
+end
+
+fn MiPTEDelete { deref pteaddr -- }
+    "TODO MiPTEDelete\n" KeCrash
+end
+
+fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
+    "TODO MiPTEUpdate\n" KeCrash
+end
+
+fn MiPTEInitializePageTable { vaddr pfdbe process -- }
+    "TODO MiPTEInitializePageTable\n" KeCrash
+end
+
+fn MmVirtualToPhysical { vaddr -- phyaddr }
+    "TODO MmVirtualToPhysical\n" KeCrash
+end

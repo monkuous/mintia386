@@ -1,0 +1,61 @@
+#include "<inc>/Kernel.h"
+
+fn KeThreadContinue { alertable signum context thread -- ok }
+    "TODO KeThreadContinue\n" KeCrash
+end
+
+fn KeSafeCopyIn { dest src size -- ok }
+    "TODO KeSafeCopyIn\n" KeCrash
+end
+
+fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
+    "TODO KeEnterUserMode\n" KeCrash
+end
+
+fn KeSafeStringCopyOut { dest src max -- ok }
+    "TODO KeSafeStringCopyOut\n" KeCrash
+end
+
+fn KeSafeCopyOut { dest src size -- ok }
+    "TODO KeSafeCopyOut\n" KeCrash
+end
+
+fn KeIPLCurrentGet { -- ipl }
+    "TODO KeIPLCurrentGet\n" KeCrash
+end
+
+fn KeSafeProbeWrite { dest -- ok }
+    "TODO KeSafeProbeWrite\n" KeCrash
+end
+
+fn KeSafeGetByte { src -- byte ok }
+    "TODO KeSafeGetByte\n" KeCrash
+end
+
+fn KeAddressSpaceSwitch { process -- }
+    "TODO KeAddressSpaceSwitch\n" KeCrash
+end
+
+fn KeInterlockedIncrement { inc ptr -- oldcount }
+    "TODO KeInterlockedIncrement\n" KeCrash
+end
+
+fn KeSafeStringCopyIn { dest src max -- ok }
+    "TODO KeSafeStringCopyIn\n" KeCrash
+end
+
+fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
+    "TODO KiInterruptUsermode\n" KeCrash
+end
+
+fn KiCPUInit { -- }
+    "TODO KiCPUInit\n" KeCrash
+end
+
+fn KeSafeProbeSystemByte { src -- byte ok }
+    "TODO KeSafeProbeSystemByte\n" KeCrash
+end
+
+fn KeSafeMemset { ptr size word -- ok }
+    "TODO KeSafeMemset\n" KeCrash
+end

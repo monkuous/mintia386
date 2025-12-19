@@ -1,0 +1,81 @@
+#include "<inc>/HALCrash.h"
+
+fn HALPlatformConsoleGetc { -- c }
+    "TODO HALPlatformConsoleGetc\n" HALCrash
+end
+
+fn HALPlatformIsComputerOnFire { -- isonfire ok }
+    "TODO HALPlatformIsComputerOnFire\n" HALCrash
+end
+
+fn HALPlatformConsolePutc { c -- }
+    "TODO HALPlatformConsolePutc\n" HALCrash
+end
+
+fn KVFontQuery { font -- width height }
+    "TODO KVFontQuery\n" HALCrash
+end
+
+fn KVDrawEmptyRectangle { nativecolor x y w h -- }
+    "TODO KVDrawEmptyRectangle\n" HALCrash
+end
+
+fn KVI8ToNative { i8 -- nativecolor }
+    "TODO KVI8ToNative\n" HALCrash
+end
+
+fn KVDrawFilledRectangle { nativecolor x y w h -- }
+    "TODO KVDrawFilledRectangle\n" HALCrash
+end
+
+fn KVDrawCharacter { char nativefg nativebg x y font -- }
+    "TODO KVDrawCharacter\n" HALCrash
+end
+
+fn KVFontGet { name -- font ok }
+    "TODO KVFontGet\n" HALCrash
+end
+
+fn KVClearScreen { nativecolor -- }
+    "TODO KVClearScreen\n" HALCrash
+end
+
+fn KVQuery { -- w h ok }
+    "TODO KVQuery\n" HALCrash
+end
+
+fn HALNvramQuery { query -- ok }
+    "TODO HALNvramQuery\n" HALCrash
+end
+
+fn HALNvramSet { delete query -- ok }
+    "TODO HALNvramSet\n" HALCrash
+end
+
+fn HALCPUContextSwitch { old new -- }
+    "TODO HALCPUContextSwitch\n" HALCrash
+end
+
+fn KVInit { -- }
+    "TODO KVInit\n" HALCrash
+end
+
+fn HALCPUTrapFrameAbort { ok abort tf -- }
+    "TODO HALCPUTrapFrameAbort\n" HALCrash
+end
+
+fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
+    "TODO HALCPUContextInit\n" HALCrash
+end
+
+fn HALNvramRead { query index -- nextindex ok }
+    "TODO HALNvramRead\n" HALCrash
+end
+
+fn HALCPUInterruptEnable { -- }
+    "TODO HALCPUInterruptEnable\n" HALCrash
+end
+
+fn HALCPUIsUserTrapFrame { tf -- user }
+    "TODO HALCPUIsUserTrapFrame\n" HALCrash
+end

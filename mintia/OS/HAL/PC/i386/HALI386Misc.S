@@ -94,3 +94,9 @@ HALPCGetCPUModel:
     pop %ebx
     ret
 .size HALPCGetCPUModel, . - HALPCGetCPUModel
+
+.globl HALIcacheSynchronize
+.type HALIcacheSynchronize, @function
+HALIcacheSynchronize:
+    ret
+.size HALIcacheSynchronize, . - HALIcacheSynchronize
