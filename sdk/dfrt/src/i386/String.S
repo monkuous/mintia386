@@ -887,7 +887,7 @@ strncpy:
     mov (%esi,%ecx), %al
     mov %al, (%edi,%ecx)
     add $1, %ecx
-    sub $1, %ecx
+    sub $1, %edx
     test %al, %al
     jnz .Lstrncpy_loop
 
