@@ -48,10 +48,6 @@ fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
     "TODO KiInterruptUsermode\n" KeCrash
 end
 
-fn KiCPUInit { -- }
-    "TODO KiCPUInit\n" KeCrash
-end
-
 fn KeSafeProbeSystemByte { src -- byte ok }
     "TODO KeSafeProbeSystemByte\n" KeCrash
 end

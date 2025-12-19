@@ -49,6 +49,9 @@ fn PsThreadUserEntry { context1 context2 -- }
 	thread@ PsThread_StackTop + @ kteb@ OSThreadEnvironmentBlock_StackTop + !
 	thread@ PsThread_StackBottom + @ kteb@ OSThreadEnvironmentBlock_StackBottom + !
 	thread@ PsThread_TID + @ kteb@ OSThreadEnvironmentBlock_ThreadID + !
+#ifdef I386
+	thread@ PsThread_UTEB + @ kteb@ OSThreadEnvironmentBlock_Self + !
+#endif
 
 	// Copy the TEB to userspace.
 

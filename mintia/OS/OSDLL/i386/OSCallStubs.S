@@ -8,10 +8,8 @@ OSConsolePutCharacter:
 	mov 4(%esp), %edx
 
 	mov $1, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSConsolePutCharacter, . - OSConsolePutCharacter
 
@@ -26,10 +24,7 @@ OSSystemAbort:
 	mov 16(%esp), %esi
 
 	mov $2, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -40,12 +35,13 @@ OSSystemAbort:
 .type OSGetBootFlags, @function
 OSGetBootFlags:
 	mov $3, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSGetBootFlags, . - OSGetBootFlags
 
 .globl OSContinue
@@ -59,10 +55,7 @@ OSContinue:
 	mov 16(%esp), %esi
 
 	mov $4, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -73,36 +66,39 @@ OSContinue:
 .type OSQueryTime, @function
 OSQueryTime:
 	mov $5, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSQueryTime, . - OSQueryTime
 
 .globl OSQueryUptime
 .type OSQueryUptime, @function
 OSQueryUptime:
 	mov $6, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSQueryUptime, . - OSQueryUptime
 
 .globl OSTimeZoneGet
 .type OSTimeZoneGet, @function
 OSTimeZoneGet:
 	mov $7, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSTimeZoneGet, . - OSTimeZoneGet
 
 .globl OSTimeZoneSet
@@ -111,12 +107,13 @@ OSTimeZoneSet:
 	mov 8(%esp), %edx
 
 	mov $8, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSTimeZoneSet, . - OSTimeZoneSet
 
 .globl OSTimeSet
@@ -126,10 +123,8 @@ OSTimeSet:
 	mov 8(%esp), %ecx
 
 	mov $9, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSTimeSet, . - OSTimeSet
 
@@ -139,10 +134,8 @@ OSShutdownSystem:
 	mov 4(%esp), %edx
 
 	mov $10, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSShutdownSystem, . - OSShutdownSystem
 
@@ -152,10 +145,8 @@ OSVersion:
 	mov 4(%esp), %edx
 
 	mov $11, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSVersion, . - OSVersion
 
@@ -172,7 +163,7 @@ OSEventCreate:
 	mov 28(%esp), %edi
 
 	mov $12, %eax
-	int $0x80
+	int $0x30
 
 	mov 12(%esp), %eax
 	mov %edx, 0(%eax)
@@ -181,7 +172,7 @@ OSEventCreate:
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
 	add $8, %esp
-	ret
+	ret $4
 .size OSEventCreate, . - OSEventCreate
 
 .globl OSEventReset
@@ -190,12 +181,13 @@ OSEventReset:
 	mov 8(%esp), %edx
 
 	mov $13, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSEventReset, . - OSEventReset
 
 .globl OSEventSignal
@@ -204,10 +196,8 @@ OSEventSignal:
 	mov 4(%esp), %edx
 
 	mov $14, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSEventSignal, . - OSEventSignal
 
@@ -217,10 +207,8 @@ OSEventPulse:
 	mov 4(%esp), %edx
 
 	mov $15, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSEventPulse, . - OSEventPulse
 
@@ -230,12 +218,13 @@ OSEventReadState:
 	mov 8(%esp), %edx
 
 	mov $16, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSEventReadState, . - OSEventReadState
 
 .globl OSSemaphoreCreate
@@ -249,7 +238,7 @@ OSSemaphoreCreate:
 	mov 20(%esp), %esi
 
 	mov $17, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -257,7 +246,7 @@ OSSemaphoreCreate:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSSemaphoreCreate, . - OSSemaphoreCreate
 
 .globl OSSemaphoreRelease
@@ -267,10 +256,8 @@ OSSemaphoreRelease:
 	mov 8(%esp), %ecx
 
 	mov $18, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSSemaphoreRelease, . - OSSemaphoreRelease
 
@@ -280,12 +267,13 @@ OSSemaphoreReadState:
 	mov 8(%esp), %edx
 
 	mov $19, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSSemaphoreReadState, . - OSSemaphoreReadState
 
 .globl OSMutexCreate
@@ -295,12 +283,13 @@ OSMutexCreate:
 	mov 12(%esp), %ecx
 
 	mov $20, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSMutexCreate, . - OSMutexCreate
 
 .globl OSMutexRelease
@@ -309,10 +298,8 @@ OSMutexRelease:
 	mov 4(%esp), %edx
 
 	mov $21, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSMutexRelease, . - OSMutexRelease
 
@@ -322,12 +309,13 @@ OSMutexReadState:
 	mov 8(%esp), %edx
 
 	mov $22, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSMutexReadState, . - OSMutexReadState
 
 .globl OSTimerCreate
@@ -337,12 +325,13 @@ OSTimerCreate:
 	mov 12(%esp), %ecx
 
 	mov $23, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSTimerCreate, . - OSTimerCreate
 
 .globl OSTimerReset
@@ -351,12 +340,13 @@ OSTimerReset:
 	mov 8(%esp), %edx
 
 	mov $24, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSTimerReset, . - OSTimerReset
 
 .globl OSTimerEnqueue
@@ -366,10 +356,8 @@ OSTimerEnqueue:
 	mov 8(%esp), %ecx
 
 	mov $25, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSTimerEnqueue, . - OSTimerEnqueue
 
@@ -379,10 +367,8 @@ OSTimerDequeue:
 	mov 4(%esp), %edx
 
 	mov $26, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSTimerDequeue, . - OSTimerDequeue
 
@@ -392,12 +378,13 @@ OSTimerReadState:
 	mov 8(%esp), %edx
 
 	mov $27, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSTimerReadState, . - OSTimerReadState
 
 .globl OSGetStatistics
@@ -406,10 +393,8 @@ OSGetStatistics:
 	mov 4(%esp), %edx
 
 	mov $28, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSGetStatistics, . - OSGetStatistics
 
@@ -419,10 +404,8 @@ OSNvramVariableQuery:
 	mov 4(%esp), %edx
 
 	mov $29, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSNvramVariableQuery, . - OSNvramVariableQuery
 
@@ -433,10 +416,8 @@ OSNvramVariableSet:
 	mov 8(%esp), %ecx
 
 	mov $30, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSNvramVariableSet, . - OSNvramVariableSet
 
@@ -447,36 +428,39 @@ OSNvramVariableRead:
 	mov 12(%esp), %ecx
 
 	mov $31, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSNvramVariableRead, . - OSNvramVariableRead
 
 .globl OSIsComputerOn
 .type OSIsComputerOn, @function
 OSIsComputerOn:
 	mov $32, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSIsComputerOn, . - OSIsComputerOn
 
 .globl OSIsComputerOnFire
 .type OSIsComputerOnFire, @function
 OSIsComputerOnFire:
 	mov $33, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSIsComputerOnFire, . - OSIsComputerOnFire
 
 .globl OSOpenRelative
@@ -496,7 +480,7 @@ OSOpenRelative:
 	mov 44(%esp), %ebp
 
 	mov $34, %eax
-	int $0x80
+	int $0x30
 
 	mov 20(%esp), %eax
 	mov %edx, 0(%eax)
@@ -507,7 +491,7 @@ OSOpenRelative:
 	mov 8(%esp), %ebx
 	mov 12(%esp), %ebp
 	add $16, %esp
-	ret
+	ret $4
 .size OSOpenRelative, . - OSOpenRelative
 
 .globl OSClose
@@ -516,10 +500,8 @@ OSClose:
 	mov 4(%esp), %edx
 
 	mov $35, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSClose, . - OSClose
 
@@ -530,10 +512,8 @@ OSQuery:
 	mov 8(%esp), %ecx
 
 	mov $36, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSQuery, . - OSQuery
 
@@ -552,10 +532,7 @@ OSWaitForMultipleObjects:
 	mov 32(%esp), %ebx
 
 	mov $37, %eax
-	int $0x80
-
-	mov 12(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -575,10 +552,7 @@ OSWaitForObject:
 	mov 16(%esp), %esi
 
 	mov $38, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -598,7 +572,7 @@ OSHandleDuplicate:
 	mov 28(%esp), %edi
 
 	mov $39, %eax
-	int $0x80
+	int $0x30
 
 	mov 12(%esp), %eax
 	mov %edx, 0(%eax)
@@ -607,7 +581,7 @@ OSHandleDuplicate:
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
 	add $8, %esp
-	ret
+	ret $4
 .size OSHandleDuplicate, . - OSHandleDuplicate
 
 .globl OSObjectDirectoryCountQuery
@@ -616,12 +590,13 @@ OSObjectDirectoryCountQuery:
 	mov 8(%esp), %edx
 
 	mov $40, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSObjectDirectoryCountQuery, . - OSObjectDirectoryCountQuery
 
 .globl OSObjectDirectoryQueryAll
@@ -635,7 +610,7 @@ OSObjectDirectoryQueryAll:
 	mov 20(%esp), %esi
 
 	mov $41, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -643,7 +618,7 @@ OSObjectDirectoryQueryAll:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSObjectDirectoryQueryAll, . - OSObjectDirectoryQueryAll
 
 .globl OSObjectDirectoryCreate
@@ -653,12 +628,13 @@ OSObjectDirectoryCreate:
 	mov 12(%esp), %ecx
 
 	mov $42, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSObjectDirectoryCreate, . - OSObjectDirectoryCreate
 
 .globl OSObjectDirectoryInsert
@@ -668,10 +644,8 @@ OSObjectDirectoryInsert:
 	mov 8(%esp), %ecx
 
 	mov $43, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSObjectDirectoryInsert, . - OSObjectDirectoryInsert
 
@@ -681,10 +655,8 @@ OSObjectDirectoryRemove:
 	mov 4(%esp), %edx
 
 	mov $44, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSObjectDirectoryRemove, . - OSObjectDirectoryRemove
 
@@ -701,10 +673,7 @@ OSSetSecurity:
 	mov 24(%esp), %edi
 
 	mov $45, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -729,7 +698,7 @@ SysCreateRelative:
 	mov 44(%esp), %ebp
 
 	mov $46, %eax
-	int $0x80
+	int $0x30
 
 	mov 20(%esp), %eax
 	mov %edx, 0(%eax)
@@ -740,7 +709,7 @@ SysCreateRelative:
 	mov 8(%esp), %ebx
 	mov 12(%esp), %ebp
 	add $16, %esp
-	ret
+	ret $4
 .size SysCreateRelative, . - SysCreateRelative
 
 .globl OSFileQuery
@@ -750,10 +719,8 @@ OSFileQuery:
 	mov 8(%esp), %ecx
 
 	mov $47, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFileQuery, . - OSFileQuery
 
@@ -768,7 +735,7 @@ OSFileTruncate:
 	mov 20(%esp), %esi
 
 	mov $48, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -776,7 +743,7 @@ OSFileTruncate:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSFileTruncate, . - OSFileTruncate
 
 .globl OSFileSeek
@@ -790,7 +757,7 @@ OSFileSeek:
 	mov 20(%esp), %esi
 
 	mov $49, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -798,7 +765,7 @@ OSFileSeek:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSFileSeek, . - OSFileSeek
 
 .globl OSFileRead
@@ -816,7 +783,7 @@ OSFileRead:
 	mov 36(%esp), %ebx
 
 	mov $50, %eax
-	int $0x80
+	int $0x30
 
 	mov 16(%esp), %eax
 	mov %edx, 0(%eax)
@@ -826,7 +793,7 @@ OSFileRead:
 	mov 4(%esp), %edi
 	mov 8(%esp), %ebx
 	add $12, %esp
-	ret
+	ret $4
 .size OSFileRead, . - OSFileRead
 
 .globl OSFileWrite
@@ -842,7 +809,7 @@ OSFileWrite:
 	mov 28(%esp), %edi
 
 	mov $51, %eax
-	int $0x80
+	int $0x30
 
 	mov 12(%esp), %eax
 	mov %edx, 0(%eax)
@@ -851,7 +818,7 @@ OSFileWrite:
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
 	add $8, %esp
-	ret
+	ret $4
 .size OSFileWrite, . - OSFileWrite
 
 .globl OSFileFlush
@@ -861,10 +828,8 @@ OSFileFlush:
 	mov 8(%esp), %ecx
 
 	mov $52, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFileFlush, . - OSFileFlush
 
@@ -875,10 +840,8 @@ OSFileSetInformation:
 	mov 8(%esp), %ecx
 
 	mov $53, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFileSetInformation, . - OSFileSetInformation
 
@@ -899,10 +862,7 @@ OSFileReadAsync:
 	mov 40(%esp), %ebp
 
 	mov $54, %eax
-	int $0x80
-
-	mov 16(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -929,10 +889,7 @@ OSFileWriteAsync:
 	mov 40(%esp), %ebp
 
 	mov $55, %eax
-	int $0x80
-
-	mov 16(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -949,10 +906,8 @@ OSFileCancelIO:
 	mov 8(%esp), %ecx
 
 	mov $56, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFileCancelIO, . - OSFileCancelIO
 
@@ -969,10 +924,7 @@ OSDirectoryRename:
 	mov 24(%esp), %edi
 
 	mov $57, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -987,10 +939,8 @@ OSDirectoryUnlink:
 	mov 8(%esp), %ecx
 
 	mov $58, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSDirectoryUnlink, . - OSDirectoryUnlink
 
@@ -1005,7 +955,7 @@ OSDirectoryRead:
 	mov 20(%esp), %esi
 
 	mov $59, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1013,7 +963,7 @@ OSDirectoryRead:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSDirectoryRead, . - OSDirectoryRead
 
 .globl OSPageFileCreateRelative
@@ -1031,10 +981,7 @@ OSPageFileCreateRelative:
 	mov 32(%esp), %ebx
 
 	mov $60, %eax
-	int $0x80
-
-	mov 12(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -1050,10 +997,8 @@ OSPageFileQuery:
 	mov 8(%esp), %ecx
 
 	mov $61, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSPageFileQuery, . - OSPageFileQuery
 
@@ -1068,7 +1013,7 @@ OSIOControl:
 	mov 20(%esp), %esi
 
 	mov $62, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1076,7 +1021,7 @@ OSIOControl:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSIOControl, . - OSIOControl
 
 .globl OSGetBootDevicePath
@@ -1085,10 +1030,8 @@ OSGetBootDevicePath:
 	mov 4(%esp), %edx
 
 	mov $63, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSGetBootDevicePath, . - OSGetBootDevicePath
 
@@ -1103,10 +1046,7 @@ OSFilesystemMount:
 	mov 16(%esp), %esi
 
 	mov $64, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -1119,10 +1059,8 @@ OSFilesystemUnmount:
 	mov 4(%esp), %edx
 
 	mov $65, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFilesystemUnmount, . - OSFilesystemUnmount
 
@@ -1133,24 +1071,26 @@ OSMountQueryAll:
 	mov 12(%esp), %ecx
 
 	mov $66, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSMountQueryAll, . - OSMountQueryAll
 
 .globl OSMountCountQuery
 .type OSMountCountQuery, @function
 OSMountCountQuery:
 	mov $67, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSMountCountQuery, . - OSMountCountQuery
 
 .globl OSMountUpdateFlags
@@ -1160,10 +1100,8 @@ OSMountUpdateFlags:
 	mov 8(%esp), %ecx
 
 	mov $68, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSMountUpdateFlags, . - OSMountUpdateFlags
 
@@ -1174,10 +1112,8 @@ OSMountGetFilesystemName:
 	mov 8(%esp), %ecx
 
 	mov $69, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSMountGetFilesystemName, . - OSMountGetFilesystemName
 
@@ -1188,10 +1124,8 @@ OSMountSet:
 	mov 8(%esp), %ecx
 
 	mov $70, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSMountSet, . - OSMountSet
 
@@ -1199,10 +1133,8 @@ OSMountSet:
 .type OSFlushModifiedPages, @function
 OSFlushModifiedPages:
 	mov $71, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSFlushModifiedPages, . - OSFlushModifiedPages
 
@@ -1217,7 +1149,7 @@ OSSectionCreate:
 	mov 20(%esp), %esi
 
 	mov $72, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1225,7 +1157,7 @@ OSSectionCreate:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSSectionCreate, . - OSSectionCreate
 
 .globl OSMapView
@@ -1234,12 +1166,13 @@ OSMapView:
 	lea 8(%esp), %edx
 
 	mov $73, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSMapView, . - OSMapView
 
 .globl OSUnmapView
@@ -1253,10 +1186,7 @@ OSUnmapView:
 	mov 16(%esp), %esi
 
 	mov $74, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -1276,10 +1206,7 @@ OSRemapView:
 	mov 24(%esp), %edi
 
 	mov $75, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -1298,10 +1225,7 @@ OSFlushView:
 	mov 16(%esp), %esi
 
 	mov $76, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -1323,7 +1247,7 @@ OSAllocate:
 	mov 36(%esp), %ebx
 
 	mov $77, %eax
-	int $0x80
+	int $0x30
 
 	mov 16(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1333,7 +1257,7 @@ OSAllocate:
 	mov 4(%esp), %edi
 	mov 8(%esp), %ebx
 	add $12, %esp
-	ret
+	ret $4
 .size OSAllocate, . - OSAllocate
 
 .globl OSMemoryQuery
@@ -1342,10 +1266,8 @@ OSMemoryQuery:
 	mov 4(%esp), %edx
 
 	mov $78, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSMemoryQuery, . - OSMemoryQuery
 
@@ -1353,10 +1275,8 @@ OSMemoryQuery:
 .type OSWorkingSetPurge, @function
 OSWorkingSetPurge:
 	mov $79, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSWorkingSetPurge, . - OSWorkingSetPurge
 
@@ -1364,7 +1284,8 @@ OSWorkingSetPurge:
 .type OSSynchronizeIcache, @function
 OSSynchronizeIcache:
 	mov $80, %eax
-	int $0x80
+	int $0x30
+
 	ret
 .size OSSynchronizeIcache, . - OSSynchronizeIcache
 
@@ -1383,7 +1304,7 @@ OSProcessCreate:
 	mov 36(%esp), %ebx
 
 	mov $81, %eax
-	int $0x80
+	int $0x30
 
 	mov 16(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1393,7 +1314,7 @@ OSProcessCreate:
 	mov 4(%esp), %edi
 	mov 8(%esp), %ebx
 	add $12, %esp
-	ret
+	ret $4
 .size OSProcessCreate, . - OSProcessCreate
 
 .globl OSProcessSignal
@@ -1403,10 +1324,8 @@ OSProcessSignal:
 	mov 8(%esp), %ecx
 
 	mov $82, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessSignal, . - OSProcessSignal
 
@@ -1417,12 +1336,13 @@ OSProcessOpenByPID:
 	mov 12(%esp), %ecx
 
 	mov $83, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSProcessOpenByPID, . - OSProcessOpenByPID
 
 .globl OSProcessQuery
@@ -1432,10 +1352,8 @@ OSProcessQuery:
 	mov 8(%esp), %ecx
 
 	mov $84, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessQuery, . - OSProcessQuery
 
@@ -1446,10 +1364,8 @@ OSProcessQueryByPID:
 	mov 8(%esp), %ecx
 
 	mov $85, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessQueryByPID, . - OSProcessQueryByPID
 
@@ -1459,12 +1375,13 @@ OSProcessReadStatus:
 	mov 8(%esp), %edx
 
 	mov $86, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSProcessReadStatus, . - OSProcessReadStatus
 
 .globl OSProcessSetConsoleGroup
@@ -1474,10 +1391,8 @@ OSProcessSetConsoleGroup:
 	mov 8(%esp), %ecx
 
 	mov $87, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessSetConsoleGroup, . - OSProcessSetConsoleGroup
 
@@ -1488,10 +1403,8 @@ OSProcessBasePrioritySet:
 	mov 8(%esp), %ecx
 
 	mov $88, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessBasePrioritySet, . - OSProcessBasePrioritySet
 
@@ -1501,10 +1414,8 @@ OSProcessSignalActivation:
 	mov 4(%esp), %edx
 
 	mov $89, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSProcessSignalActivation, . - OSProcessSignalActivation
 
@@ -1515,12 +1426,13 @@ OSProcessWaitForActivation:
 	mov 12(%esp), %ecx
 
 	mov $90, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSProcessWaitForActivation, . - OSProcessWaitForActivation
 
 .globl OSProcessExit
@@ -1529,7 +1441,8 @@ OSProcessExit:
 	mov 4(%esp), %edx
 
 	mov $91, %eax
-	int $0x80
+	int $0x30
+
 	ret
 .size OSProcessExit, . - OSProcessExit
 
@@ -1537,12 +1450,13 @@ OSProcessExit:
 .type OSProcessCountQuery, @function
 OSProcessCountQuery:
 	mov $92, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSProcessCountQuery, . - OSProcessCountQuery
 
 .globl OSProcessQueryAll
@@ -1552,12 +1466,13 @@ OSProcessQueryAll:
 	mov 12(%esp), %ecx
 
 	mov $93, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSProcessQueryAll, . - OSProcessQueryAll
 
 .globl OSSetQuota
@@ -1567,10 +1482,8 @@ OSSetQuota:
 	mov 8(%esp), %ecx
 
 	mov $94, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSSetQuota, . - OSSetQuota
 
@@ -1581,10 +1494,8 @@ OSQuotaQuery:
 	mov 8(%esp), %ecx
 
 	mov $95, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSQuotaQuery, . - OSQuotaQuery
 
@@ -1592,10 +1503,8 @@ OSQuotaQuery:
 .type OSThreadGetExceptionStatus, @function
 OSThreadGetExceptionStatus:
 	mov $96, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadGetExceptionStatus, . - OSThreadGetExceptionStatus
 
@@ -1605,10 +1514,8 @@ OSThreadSleep:
 	mov 4(%esp), %edx
 
 	mov $97, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadSleep, . - OSThreadSleep
 
@@ -1619,10 +1526,8 @@ OSThreadSleepEx:
 	mov 8(%esp), %ecx
 
 	mov $98, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadSleepEx, . - OSThreadSleepEx
 
@@ -1643,7 +1548,7 @@ OSThreadCreate:
 	mov 44(%esp), %ebp
 
 	mov $99, %eax
-	int $0x80
+	int $0x30
 
 	mov 20(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1654,7 +1559,7 @@ OSThreadCreate:
 	mov 8(%esp), %ebx
 	mov 12(%esp), %ebp
 	add $16, %esp
-	ret
+	ret $4
 .size OSThreadCreate, . - OSThreadCreate
 
 .globl OSThreadTerminate
@@ -1664,10 +1569,8 @@ OSThreadTerminate:
 	mov 8(%esp), %ecx
 
 	mov $100, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadTerminate, . - OSThreadTerminate
 
@@ -1677,10 +1580,8 @@ OSThreadSuspend:
 	mov 4(%esp), %edx
 
 	mov $101, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadSuspend, . - OSThreadSuspend
 
@@ -1690,10 +1591,8 @@ OSThreadResume:
 	mov 4(%esp), %edx
 
 	mov $102, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadResume, . - OSThreadResume
 
@@ -1703,12 +1602,13 @@ OSThreadReadStatus:
 	mov 8(%esp), %edx
 
 	mov $103, %eax
-	int $0x80
+	int $0x30
 
 	mov 4(%esp), %eax
 	mov %edx, 0(%eax)
 	mov %ecx, 4(%eax)
-	ret
+
+	ret $4
 .size OSThreadReadStatus, . - OSThreadReadStatus
 
 .globl OSThreadQuery
@@ -1718,10 +1618,8 @@ OSThreadQuery:
 	mov 8(%esp), %ecx
 
 	mov $104, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadQuery, . - OSThreadQuery
 
@@ -1732,10 +1630,8 @@ OSThreadSignal:
 	mov 8(%esp), %ecx
 
 	mov $105, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadSignal, . - OSThreadSignal
 
@@ -1746,10 +1642,8 @@ OSThreadMaskSignal:
 	mov 8(%esp), %ecx
 
 	mov $106, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadMaskSignal, . - OSThreadMaskSignal
 
@@ -1760,10 +1654,8 @@ OSThreadDeliverOnWaitSignal:
 	mov 8(%esp), %ecx
 
 	mov $107, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSThreadDeliverOnWaitSignal, . - OSThreadDeliverOnWaitSignal
 
@@ -1782,7 +1674,7 @@ OSJobCreate:
 	mov 36(%esp), %ebx
 
 	mov $108, %eax
-	int $0x80
+	int $0x30
 
 	mov 16(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1792,7 +1684,7 @@ OSJobCreate:
 	mov 4(%esp), %edi
 	mov 8(%esp), %ebx
 	add $12, %esp
-	ret
+	ret $4
 .size OSJobCreate, . - OSJobCreate
 
 .globl OSJobAddProcess
@@ -1802,10 +1694,8 @@ OSJobAddProcess:
 	mov 8(%esp), %ecx
 
 	mov $109, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSJobAddProcess, . - OSJobAddProcess
 
@@ -1815,10 +1705,8 @@ OSJobRemoveProcess:
 	mov 4(%esp), %edx
 
 	mov $110, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSJobRemoveProcess, . - OSJobRemoveProcess
 
@@ -1833,10 +1721,7 @@ OSJobSignal:
 	mov 16(%esp), %esi
 
 	mov $111, %eax
-	int $0x80
-
-	mov 4(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	add $4, %esp
@@ -1849,10 +1734,8 @@ OSSetSystemConsole:
 	mov 4(%esp), %edx
 
 	mov $112, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSSetSystemConsole, . - OSSetSystemConsole
 
@@ -1863,10 +1746,8 @@ OSConsoleSignal:
 	mov 8(%esp), %ecx
 
 	mov $113, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSConsoleSignal, . - OSConsoleSignal
 
@@ -1876,10 +1757,8 @@ OSIsAConsole:
 	mov 4(%esp), %edx
 
 	mov $114, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSIsAConsole, . - OSIsAConsole
 
@@ -1894,7 +1773,7 @@ OSDuplexCreate:
 	mov 20(%esp), %esi
 
 	mov $115, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1903,7 +1782,7 @@ OSDuplexCreate:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSDuplexCreate, . - OSDuplexCreate
 
 .globl OSCheckPermission
@@ -1913,10 +1792,8 @@ OSCheckPermission:
 	mov 8(%esp), %ecx
 
 	mov $116, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSCheckPermission, . - OSCheckPermission
 
@@ -1927,10 +1804,8 @@ OSGrantPermission:
 	mov 8(%esp), %ecx
 
 	mov $117, %eax
-	int $0x80
+	int $0x30
 
-	mov 0(%esp), %eax
-	mov %edx, 0(%eax)
 	ret
 .size OSGrantPermission, . - OSGrantPermission
 
@@ -1947,7 +1822,7 @@ OSPortCreate:
 	mov 28(%esp), %edi
 
 	mov $118, %eax
-	int $0x80
+	int $0x30
 
 	mov 12(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1956,7 +1831,7 @@ OSPortCreate:
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
 	add $8, %esp
-	ret
+	ret $4
 .size OSPortCreate, . - OSPortCreate
 
 .globl OSPortConnectRelative
@@ -1974,7 +1849,7 @@ OSPortConnectRelative:
 	mov 36(%esp), %ebx
 
 	mov $119, %eax
-	int $0x80
+	int $0x30
 
 	mov 16(%esp), %eax
 	mov %edx, 0(%eax)
@@ -1984,7 +1859,7 @@ OSPortConnectRelative:
 	mov 4(%esp), %edi
 	mov 8(%esp), %ebx
 	add $12, %esp
-	ret
+	ret $4
 .size OSPortConnectRelative, . - OSPortConnectRelative
 
 .globl OSPortAccept
@@ -2000,10 +1875,7 @@ OSPortAccept:
 	mov 24(%esp), %edi
 
 	mov $120, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -2024,10 +1896,7 @@ OSPortSendAndWaitReceive:
 	mov 24(%esp), %edi
 
 	mov $121, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -2048,10 +1917,7 @@ OSPortSendAndWaitReply:
 	mov 24(%esp), %edi
 
 	mov $122, %eax
-	int $0x80
-
-	mov 8(%esp), %eax
-	mov %edx, 0(%eax)
+	int $0x30
 
 	mov 0(%esp), %esi
 	mov 4(%esp), %edi
@@ -2070,7 +1936,7 @@ OSPortOpenProcessByClientID:
 	mov 20(%esp), %esi
 
 	mov $123, %eax
-	int $0x80
+	int $0x30
 
 	mov 8(%esp), %eax
 	mov %edx, 0(%eax)
@@ -2078,5 +1944,5 @@ OSPortOpenProcessByClientID:
 
 	mov 0(%esp), %esi
 	add $4, %esp
-	ret
+	ret $4
 .size OSPortOpenProcessByClientID, . - OSPortOpenProcessByClientID

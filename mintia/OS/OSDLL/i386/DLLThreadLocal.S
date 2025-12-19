@@ -108,7 +108,7 @@ OSInterlockedIncrement:
 .globl OSThreadCurrentTEB
 .type OSThreadCurrentTEB, @function
 OSThreadCurrentTEB:
-    mov %gs:(0), %eax
+    mov %fs:(4), %eax
     ret
 .size OSThreadCurrentTEB, . - OSThreadCurrentTEB
 

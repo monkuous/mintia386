@@ -296,21 +296,19 @@ if stubs then
 			end
 
 			stubs:write(string.format("\tmov $%d, %%eax\n", sys.n))
-			stubs:write("\tint $0x80\n")
+			stubs:write("\tint $0x30\n\n")
 
-			if lastret >= 0 then
-				stubs:write("\n")
-
+			if lastret > 0 then
 				stubs:write(string.format("\tmov %d(%%esp), %%eax\n", argoffs - 4))
 
 				for reg = 0, lastret do
 					stubs:write(string.format("\tmov %s, %d(%%eax)\n", regnames[FIRSTREG + reg], reg * 4))
 				end
+
+				stubs:write("\n")
 			end
 
 			if savedneeded > 0 then
-				stubs:write("\n")
-
 				for reg = 0, savedneeded - 1 do
 					stubs:write(string.format("\tmov %d(%%esp), %s\n", reg * 4, regnames[FIRSTSAVED + reg]))
 				end
@@ -318,7 +316,11 @@ if stubs then
 				stubs:write(string.format("\tadd $%d, %%esp\n", savedneeded * 4))
 			end
 
-			stubs:write("\tret\n")
+			if lastret <= 0 then
+				stubs:write("\tret\n")
+			else
+				stubs:write("\tret $4\n")
+			end
 		end
 
 		if not NATIVEASM then
@@ -332,7 +334,7 @@ if trampolines then
 
 	trampolines:write(string.format("\n.globl OSCallCount\n.type OSCallCount, @object\nOSCallCount: .long %d\n.size OSCallCount, . - OSCallCount\n", #syscalls))
 
-	trampolines:write("\n.globl OSCallTable\n.type OSCallTable, @object\nOSCallTable:")
+	trampolines:write("\n.globl OSCallTable\n.type OSCallTable, @object\nOSCallTable:\n")
 
 	trampolines:write(string.format("\t.long %-48s # 0\n", "0"))
 
@@ -352,7 +354,7 @@ if trampolines then
 		if NATIVEASM then
 			trampolines:write(string.format("OST%s:\n", sys.name))
 		else
-			trampolines:write(string.format("\n.globl OST%s\n.type OST%s, @function\nOST%s:", sys.name, sys.name, sys.name))
+			trampolines:write(string.format("\n.globl OST%s\n.type OST%s, @function\nOST%s:\n", sys.name, sys.name, sys.name))
 		end
 
 		if arch == "xr17032" then
@@ -418,22 +420,26 @@ if trampolines then
 			end
 
 			local retoffs = realargs * 4
-			local framesize = band((retoffs + retsize + 4 + 15), -16) - 4
+			local framesize = retoffs + retsize + 4 + 15
+			framesize = framesize - (framesize % 16)
+			framesize = framesize - 4
 			trampolines:write(string.format("\tsub $%d, %%esp\n\n", framesize))
 
 			local argoffs = 0
 
 			if #sys.rets > 1 then
 				trampolines:write(string.format("\tlea %d(%%esp), %%eax\n", retoffs))
-				trampolines:write(string.format("\tmov %%eax, 0(%%esp)\n\n"))
+				trampolines:write("\tmov %eax, 0(%esp)\n\n")
 				argoffs = 4
+				framesize = framesize - 4
+				retoffs = retoffs - 4
 			end
 
 			local lastarg = #sys.args - 1
 
 			if lastarg >= 0 and lastarg <= LASTREG - FIRSTREG then
 				for reg = 0, lastarg do
-					trampolines:write(string.format("\tmov %d(%%esi), %%eax # %s\n", (reg + FIRSTREG - 1) * 4), regnames[reg + FIRSTREG])
+					trampolines:write(string.format("\tmov %d(%%esi), %%eax # %s\n", (reg + FIRSTREG - 1) * 4, regnames[reg + FIRSTREG]))
 					trampolines:write(string.format("\tmov %%eax, %d(%%esp)\n", argoffs))
 					argoffs = argoffs + 4
 				end
@@ -444,7 +450,7 @@ if trampolines then
 				trampolines:write(string.format("\tmov $%d, 0(%%esp)\n", (lastarg + 1) * 4))
 				trampolines:write("\tmov 4(%esi), %eax # %edx\n")
 				trampolines:write("\tmov %eax, 4(%esp)\n")
-				trampolines:write(string.format("\tlea %d(%%esp), %eax\n", argoffs + 16))
+				trampolines:write(string.format("\tlea %d(%%esp), %%eax\n", argoffs + 16))
 				trampolines:write("\tmov %eax, 8(%esp)\n")
 				trampolines:write("\tcall KeSafeCopyIn\n")
 				trampolines:write("\tadd $16, %esp\n")
@@ -470,6 +476,10 @@ if trampolines then
 			trampolines:write(string.format("\tadd $%d, %%esp\n", framesize))
 			trampolines:write("\tret\n")
 
+			if #sys.rets > 1 then
+				framesize = framesize + 4
+			end
+
 			if lastarg > LASTREG - FIRSTREG then
 				local statusindex = 0
 
@@ -477,13 +487,15 @@ if trampolines then
 					if sys.rets[statusindex + 1].name == "ok" then
 						break
 					end
+
+					statusindex = statusindex + 1
 				end
 
 				if statusindex >= #sys.rets then
 					error(sys.name..": too many parameters for status-less syscall")
 				end
 
-				trampolines:write(string.format("\n1:\tmov %%eax, %d(%%esi) # %s\n", (FIRSTREG + statusindex - 1) * 4), regnames[FIRSTREG + statusindex])
+				trampolines:write(string.format("\n1:\tmov %%eax, %d(%%esi) # %s\n", (FIRSTREG + statusindex - 1) * 4, regnames[FIRSTREG + statusindex]))
 				trampolines:write(string.format("\n\tadd $%d, %%esp\n", framesize))
 				trampolines:write("\tret\n")
 			end

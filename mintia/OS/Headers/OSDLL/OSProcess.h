@@ -52,7 +52,7 @@ struct OSThreadInformation
 	4 UserTimeMs
 	4 SystemTimeMs
 	4 DPCTimeMs
-	
+
 	48 Reserved
 endstruct
 
@@ -61,6 +61,9 @@ extern OSThreadCurrentTID { -- tid }
 
 struct OSThreadEnvironmentBlock
 	4 ThreadID
+#ifdef I386
+	4 Self
+#endif
 
 	4 StackTop
 	4 StackBottom

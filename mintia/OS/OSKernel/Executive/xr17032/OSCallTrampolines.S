@@ -9,7 +9,8 @@ OSCallCount: .long 123
 
 .globl OSCallTable
 .type OSCallTable, @object
-OSCallTable:	.long 0                                                # 0
+OSCallTable:
+	.long 0                                                # 0
 	.long OSTOSConsolePutCharacter                         # 1
 	.long OSTOSSystemAbort                                 # 2
 	.long OSTOSGetBootFlags                                # 3
@@ -137,7 +138,8 @@ OSCallTable:	.long 0                                                # 0
 
 .globl OSTOSConsolePutCharacter
 .type OSTOSConsolePutCharacter, @function
-OSTOSConsolePutCharacter:	subi sp, sp, 4
+OSTOSConsolePutCharacter:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -153,7 +155,8 @@ OSTOSConsolePutCharacter:	subi sp, sp, 4
 
 .globl OSTOSSystemAbort
 .type OSTOSSystemAbort, @function
-OSTOSSystemAbort:	subi sp, sp, 4
+OSTOSSystemAbort:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -171,7 +174,8 @@ OSTOSSystemAbort:	subi sp, sp, 4
 
 .globl OSTOSGetBootFlags
 .type OSTOSGetBootFlags, @function
-OSTOSGetBootFlags:	subi sp, sp, 4
+OSTOSGetBootFlags:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSGetBootFlags
@@ -187,7 +191,8 @@ OSTOSGetBootFlags:	subi sp, sp, 4
 
 .globl OSTOSContinue
 .type OSTOSContinue, @function
-OSTOSContinue:	subi sp, sp, 4
+OSTOSContinue:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -205,7 +210,8 @@ OSTOSContinue:	subi sp, sp, 4
 
 .globl OSTOSQueryTime
 .type OSTOSQueryTime, @function
-OSTOSQueryTime:	subi sp, sp, 4
+OSTOSQueryTime:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSQueryTime
@@ -221,7 +227,8 @@ OSTOSQueryTime:	subi sp, sp, 4
 
 .globl OSTOSQueryUptime
 .type OSTOSQueryUptime, @function
-OSTOSQueryUptime:	subi sp, sp, 4
+OSTOSQueryUptime:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSQueryUptime
@@ -237,7 +244,8 @@ OSTOSQueryUptime:	subi sp, sp, 4
 
 .globl OSTOSTimeZoneGet
 .type OSTOSTimeZoneGet, @function
-OSTOSTimeZoneGet:	subi sp, sp, 4
+OSTOSTimeZoneGet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSTimeZoneGet
@@ -253,7 +261,8 @@ OSTOSTimeZoneGet:	subi sp, sp, 4
 
 .globl OSTOSTimeZoneSet
 .type OSTOSTimeZoneSet, @function
-OSTOSTimeZoneSet:	subi sp, sp, 4
+OSTOSTimeZoneSet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -270,7 +279,8 @@ OSTOSTimeZoneSet:	subi sp, sp, 4
 
 .globl OSTOSTimeSet
 .type OSTOSTimeSet, @function
-OSTOSTimeSet:	subi sp, sp, 4
+OSTOSTimeSet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -287,7 +297,8 @@ OSTOSTimeSet:	subi sp, sp, 4
 
 .globl OSTOSShutdownSystem
 .type OSTOSShutdownSystem, @function
-OSTOSShutdownSystem:	subi sp, sp, 4
+OSTOSShutdownSystem:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -303,7 +314,8 @@ OSTOSShutdownSystem:	subi sp, sp, 4
 
 .globl OSTOSVersion
 .type OSTOSVersion, @function
-OSTOSVersion:	subi sp, sp, 4
+OSTOSVersion:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -319,7 +331,8 @@ OSTOSVersion:	subi sp, sp, 4
 
 .globl OSTOSEventCreate
 .type OSTOSEventCreate, @function
-OSTOSEventCreate:	subi sp, sp, 4
+OSTOSEventCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -339,7 +352,8 @@ OSTOSEventCreate:	subi sp, sp, 4
 
 .globl OSTOSEventReset
 .type OSTOSEventReset, @function
-OSTOSEventReset:	subi sp, sp, 4
+OSTOSEventReset:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -356,7 +370,8 @@ OSTOSEventReset:	subi sp, sp, 4
 
 .globl OSTOSEventSignal
 .type OSTOSEventSignal, @function
-OSTOSEventSignal:	subi sp, sp, 4
+OSTOSEventSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -372,7 +387,8 @@ OSTOSEventSignal:	subi sp, sp, 4
 
 .globl OSTOSEventPulse
 .type OSTOSEventPulse, @function
-OSTOSEventPulse:	subi sp, sp, 4
+OSTOSEventPulse:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -388,7 +404,8 @@ OSTOSEventPulse:	subi sp, sp, 4
 
 .globl OSTOSEventReadState
 .type OSTOSEventReadState, @function
-OSTOSEventReadState:	subi sp, sp, 4
+OSTOSEventReadState:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -405,7 +422,8 @@ OSTOSEventReadState:	subi sp, sp, 4
 
 .globl OSTOSSemaphoreCreate
 .type OSTOSSemaphoreCreate, @function
-OSTOSSemaphoreCreate:	subi sp, sp, 4
+OSTOSSemaphoreCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -424,7 +442,8 @@ OSTOSSemaphoreCreate:	subi sp, sp, 4
 
 .globl OSTOSSemaphoreRelease
 .type OSTOSSemaphoreRelease, @function
-OSTOSSemaphoreRelease:	subi sp, sp, 4
+OSTOSSemaphoreRelease:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -441,7 +460,8 @@ OSTOSSemaphoreRelease:	subi sp, sp, 4
 
 .globl OSTOSSemaphoreReadState
 .type OSTOSSemaphoreReadState, @function
-OSTOSSemaphoreReadState:	subi sp, sp, 4
+OSTOSSemaphoreReadState:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -458,7 +478,8 @@ OSTOSSemaphoreReadState:	subi sp, sp, 4
 
 .globl OSTOSMutexCreate
 .type OSTOSMutexCreate, @function
-OSTOSMutexCreate:	subi sp, sp, 4
+OSTOSMutexCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -476,7 +497,8 @@ OSTOSMutexCreate:	subi sp, sp, 4
 
 .globl OSTOSMutexRelease
 .type OSTOSMutexRelease, @function
-OSTOSMutexRelease:	subi sp, sp, 4
+OSTOSMutexRelease:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -492,7 +514,8 @@ OSTOSMutexRelease:	subi sp, sp, 4
 
 .globl OSTOSMutexReadState
 .type OSTOSMutexReadState, @function
-OSTOSMutexReadState:	subi sp, sp, 4
+OSTOSMutexReadState:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -509,7 +532,8 @@ OSTOSMutexReadState:	subi sp, sp, 4
 
 .globl OSTOSTimerCreate
 .type OSTOSTimerCreate, @function
-OSTOSTimerCreate:	subi sp, sp, 4
+OSTOSTimerCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -527,7 +551,8 @@ OSTOSTimerCreate:	subi sp, sp, 4
 
 .globl OSTOSTimerReset
 .type OSTOSTimerReset, @function
-OSTOSTimerReset:	subi sp, sp, 4
+OSTOSTimerReset:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -544,7 +569,8 @@ OSTOSTimerReset:	subi sp, sp, 4
 
 .globl OSTOSTimerEnqueue
 .type OSTOSTimerEnqueue, @function
-OSTOSTimerEnqueue:	subi sp, sp, 4
+OSTOSTimerEnqueue:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -561,7 +587,8 @@ OSTOSTimerEnqueue:	subi sp, sp, 4
 
 .globl OSTOSTimerDequeue
 .type OSTOSTimerDequeue, @function
-OSTOSTimerDequeue:	subi sp, sp, 4
+OSTOSTimerDequeue:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -577,7 +604,8 @@ OSTOSTimerDequeue:	subi sp, sp, 4
 
 .globl OSTOSTimerReadState
 .type OSTOSTimerReadState, @function
-OSTOSTimerReadState:	subi sp, sp, 4
+OSTOSTimerReadState:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -594,7 +622,8 @@ OSTOSTimerReadState:	subi sp, sp, 4
 
 .globl OSTOSGetStatistics
 .type OSTOSGetStatistics, @function
-OSTOSGetStatistics:	subi sp, sp, 4
+OSTOSGetStatistics:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -610,7 +639,8 @@ OSTOSGetStatistics:	subi sp, sp, 4
 
 .globl OSTOSNvramVariableQuery
 .type OSTOSNvramVariableQuery, @function
-OSTOSNvramVariableQuery:	subi sp, sp, 4
+OSTOSNvramVariableQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -626,7 +656,8 @@ OSTOSNvramVariableQuery:	subi sp, sp, 4
 
 .globl OSTOSNvramVariableSet
 .type OSTOSNvramVariableSet, @function
-OSTOSNvramVariableSet:	subi sp, sp, 4
+OSTOSNvramVariableSet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -643,7 +674,8 @@ OSTOSNvramVariableSet:	subi sp, sp, 4
 
 .globl OSTOSNvramVariableRead
 .type OSTOSNvramVariableRead, @function
-OSTOSNvramVariableRead:	subi sp, sp, 4
+OSTOSNvramVariableRead:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -661,7 +693,8 @@ OSTOSNvramVariableRead:	subi sp, sp, 4
 
 .globl OSTOSIsComputerOn
 .type OSTOSIsComputerOn, @function
-OSTOSIsComputerOn:	subi sp, sp, 4
+OSTOSIsComputerOn:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSIsComputerOn
@@ -677,7 +710,8 @@ OSTOSIsComputerOn:	subi sp, sp, 4
 
 .globl OSTOSIsComputerOnFire
 .type OSTOSIsComputerOnFire, @function
-OSTOSIsComputerOnFire:	subi sp, sp, 4
+OSTOSIsComputerOnFire:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSIsComputerOnFire
@@ -693,7 +727,8 @@ OSTOSIsComputerOnFire:	subi sp, sp, 4
 
 .globl OSTOSOpenRelative
 .type OSTOSOpenRelative, @function
-OSTOSOpenRelative:	subi sp, sp, 12
+OSTOSOpenRelative:
+	subi sp, sp, 12
 	mov  long [sp + 8], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -719,7 +754,8 @@ OSTOSOpenRelative:	subi sp, sp, 12
 
 .globl OSTOSClose
 .type OSTOSClose, @function
-OSTOSClose:	subi sp, sp, 4
+OSTOSClose:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -735,7 +771,8 @@ OSTOSClose:	subi sp, sp, 4
 
 .globl OSTOSQuery
 .type OSTOSQuery, @function
-OSTOSQuery:	subi sp, sp, 4
+OSTOSQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -752,7 +789,8 @@ OSTOSQuery:	subi sp, sp, 4
 
 .globl OSTOSWaitForMultipleObjects
 .type OSTOSWaitForMultipleObjects, @function
-OSTOSWaitForMultipleObjects:	subi sp, sp, 8
+OSTOSWaitForMultipleObjects:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -774,7 +812,8 @@ OSTOSWaitForMultipleObjects:	subi sp, sp, 8
 
 .globl OSTOSWaitForObject
 .type OSTOSWaitForObject, @function
-OSTOSWaitForObject:	subi sp, sp, 4
+OSTOSWaitForObject:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -792,7 +831,8 @@ OSTOSWaitForObject:	subi sp, sp, 4
 
 .globl OSTOSHandleDuplicate
 .type OSTOSHandleDuplicate, @function
-OSTOSHandleDuplicate:	subi sp, sp, 4
+OSTOSHandleDuplicate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -812,7 +852,8 @@ OSTOSHandleDuplicate:	subi sp, sp, 4
 
 .globl OSTOSObjectDirectoryCountQuery
 .type OSTOSObjectDirectoryCountQuery, @function
-OSTOSObjectDirectoryCountQuery:	subi sp, sp, 4
+OSTOSObjectDirectoryCountQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -829,7 +870,8 @@ OSTOSObjectDirectoryCountQuery:	subi sp, sp, 4
 
 .globl OSTOSObjectDirectoryQueryAll
 .type OSTOSObjectDirectoryQueryAll, @function
-OSTOSObjectDirectoryQueryAll:	subi sp, sp, 4
+OSTOSObjectDirectoryQueryAll:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -848,7 +890,8 @@ OSTOSObjectDirectoryQueryAll:	subi sp, sp, 4
 
 .globl OSTOSObjectDirectoryCreate
 .type OSTOSObjectDirectoryCreate, @function
-OSTOSObjectDirectoryCreate:	subi sp, sp, 4
+OSTOSObjectDirectoryCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -866,7 +909,8 @@ OSTOSObjectDirectoryCreate:	subi sp, sp, 4
 
 .globl OSTOSObjectDirectoryInsert
 .type OSTOSObjectDirectoryInsert, @function
-OSTOSObjectDirectoryInsert:	subi sp, sp, 4
+OSTOSObjectDirectoryInsert:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -883,7 +927,8 @@ OSTOSObjectDirectoryInsert:	subi sp, sp, 4
 
 .globl OSTOSObjectDirectoryRemove
 .type OSTOSObjectDirectoryRemove, @function
-OSTOSObjectDirectoryRemove:	subi sp, sp, 4
+OSTOSObjectDirectoryRemove:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -899,7 +944,8 @@ OSTOSObjectDirectoryRemove:	subi sp, sp, 4
 
 .globl OSTOSSetSecurity
 .type OSTOSSetSecurity, @function
-OSTOSSetSecurity:	subi sp, sp, 4
+OSTOSSetSecurity:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -918,7 +964,8 @@ OSTOSSetSecurity:	subi sp, sp, 4
 
 .globl OSTSysCreateRelative
 .type OSTSysCreateRelative, @function
-OSTSysCreateRelative:	subi sp, sp, 12
+OSTSysCreateRelative:
+	subi sp, sp, 12
 	mov  long [sp + 8], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -944,7 +991,8 @@ OSTSysCreateRelative:	subi sp, sp, 12
 
 .globl OSTOSFileQuery
 .type OSTOSFileQuery, @function
-OSTOSFileQuery:	subi sp, sp, 4
+OSTOSFileQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -961,7 +1009,8 @@ OSTOSFileQuery:	subi sp, sp, 4
 
 .globl OSTOSFileTruncate
 .type OSTOSFileTruncate, @function
-OSTOSFileTruncate:	subi sp, sp, 4
+OSTOSFileTruncate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -980,7 +1029,8 @@ OSTOSFileTruncate:	subi sp, sp, 4
 
 .globl OSTOSFileSeek
 .type OSTOSFileSeek, @function
-OSTOSFileSeek:	subi sp, sp, 4
+OSTOSFileSeek:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -999,7 +1049,8 @@ OSTOSFileSeek:	subi sp, sp, 4
 
 .globl OSTOSFileRead
 .type OSTOSFileRead, @function
-OSTOSFileRead:	subi sp, sp, 8
+OSTOSFileRead:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1022,7 +1073,8 @@ OSTOSFileRead:	subi sp, sp, 8
 
 .globl OSTOSFileWrite
 .type OSTOSFileWrite, @function
-OSTOSFileWrite:	subi sp, sp, 4
+OSTOSFileWrite:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1042,7 +1094,8 @@ OSTOSFileWrite:	subi sp, sp, 4
 
 .globl OSTOSFileFlush
 .type OSTOSFileFlush, @function
-OSTOSFileFlush:	subi sp, sp, 4
+OSTOSFileFlush:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1059,7 +1112,8 @@ OSTOSFileFlush:	subi sp, sp, 4
 
 .globl OSTOSFileSetInformation
 .type OSTOSFileSetInformation, @function
-OSTOSFileSetInformation:	subi sp, sp, 4
+OSTOSFileSetInformation:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1076,7 +1130,8 @@ OSTOSFileSetInformation:	subi sp, sp, 4
 
 .globl OSTOSFileReadAsync
 .type OSTOSFileReadAsync, @function
-OSTOSFileReadAsync:	subi sp, sp, 12
+OSTOSFileReadAsync:
+	subi sp, sp, 12
 	mov  long [sp + 8], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1101,7 +1156,8 @@ OSTOSFileReadAsync:	subi sp, sp, 12
 
 .globl OSTOSFileWriteAsync
 .type OSTOSFileWriteAsync, @function
-OSTOSFileWriteAsync:	subi sp, sp, 12
+OSTOSFileWriteAsync:
+	subi sp, sp, 12
 	mov  long [sp + 8], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1126,7 +1182,8 @@ OSTOSFileWriteAsync:	subi sp, sp, 12
 
 .globl OSTOSFileCancelIO
 .type OSTOSFileCancelIO, @function
-OSTOSFileCancelIO:	subi sp, sp, 4
+OSTOSFileCancelIO:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1143,7 +1200,8 @@ OSTOSFileCancelIO:	subi sp, sp, 4
 
 .globl OSTOSDirectoryRename
 .type OSTOSDirectoryRename, @function
-OSTOSDirectoryRename:	subi sp, sp, 4
+OSTOSDirectoryRename:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1162,7 +1220,8 @@ OSTOSDirectoryRename:	subi sp, sp, 4
 
 .globl OSTOSDirectoryUnlink
 .type OSTOSDirectoryUnlink, @function
-OSTOSDirectoryUnlink:	subi sp, sp, 4
+OSTOSDirectoryUnlink:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1179,7 +1238,8 @@ OSTOSDirectoryUnlink:	subi sp, sp, 4
 
 .globl OSTOSDirectoryRead
 .type OSTOSDirectoryRead, @function
-OSTOSDirectoryRead:	subi sp, sp, 4
+OSTOSDirectoryRead:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1198,7 +1258,8 @@ OSTOSDirectoryRead:	subi sp, sp, 4
 
 .globl OSTOSPageFileCreateRelative
 .type OSTOSPageFileCreateRelative, @function
-OSTOSPageFileCreateRelative:	subi sp, sp, 8
+OSTOSPageFileCreateRelative:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1220,7 +1281,8 @@ OSTOSPageFileCreateRelative:	subi sp, sp, 8
 
 .globl OSTOSPageFileQuery
 .type OSTOSPageFileQuery, @function
-OSTOSPageFileQuery:	subi sp, sp, 4
+OSTOSPageFileQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1237,7 +1299,8 @@ OSTOSPageFileQuery:	subi sp, sp, 4
 
 .globl OSTOSIOControl
 .type OSTOSIOControl, @function
-OSTOSIOControl:	subi sp, sp, 4
+OSTOSIOControl:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1256,7 +1319,8 @@ OSTOSIOControl:	subi sp, sp, 4
 
 .globl OSTOSGetBootDevicePath
 .type OSTOSGetBootDevicePath, @function
-OSTOSGetBootDevicePath:	subi sp, sp, 4
+OSTOSGetBootDevicePath:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1272,7 +1336,8 @@ OSTOSGetBootDevicePath:	subi sp, sp, 4
 
 .globl OSTOSFilesystemMount
 .type OSTOSFilesystemMount, @function
-OSTOSFilesystemMount:	subi sp, sp, 4
+OSTOSFilesystemMount:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1290,7 +1355,8 @@ OSTOSFilesystemMount:	subi sp, sp, 4
 
 .globl OSTOSFilesystemUnmount
 .type OSTOSFilesystemUnmount, @function
-OSTOSFilesystemUnmount:	subi sp, sp, 4
+OSTOSFilesystemUnmount:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1306,7 +1372,8 @@ OSTOSFilesystemUnmount:	subi sp, sp, 4
 
 .globl OSTOSMountQueryAll
 .type OSTOSMountQueryAll, @function
-OSTOSMountQueryAll:	subi sp, sp, 4
+OSTOSMountQueryAll:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1324,7 +1391,8 @@ OSTOSMountQueryAll:	subi sp, sp, 4
 
 .globl OSTOSMountCountQuery
 .type OSTOSMountCountQuery, @function
-OSTOSMountCountQuery:	subi sp, sp, 4
+OSTOSMountCountQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSMountCountQuery
@@ -1340,7 +1408,8 @@ OSTOSMountCountQuery:	subi sp, sp, 4
 
 .globl OSTOSMountUpdateFlags
 .type OSTOSMountUpdateFlags, @function
-OSTOSMountUpdateFlags:	subi sp, sp, 4
+OSTOSMountUpdateFlags:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1357,7 +1426,8 @@ OSTOSMountUpdateFlags:	subi sp, sp, 4
 
 .globl OSTOSMountGetFilesystemName
 .type OSTOSMountGetFilesystemName, @function
-OSTOSMountGetFilesystemName:	subi sp, sp, 4
+OSTOSMountGetFilesystemName:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1374,7 +1444,8 @@ OSTOSMountGetFilesystemName:	subi sp, sp, 4
 
 .globl OSTOSMountSet
 .type OSTOSMountSet, @function
-OSTOSMountSet:	subi sp, sp, 4
+OSTOSMountSet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1391,7 +1462,8 @@ OSTOSMountSet:	subi sp, sp, 4
 
 .globl OSTOSFlushModifiedPages
 .type OSTOSFlushModifiedPages, @function
-OSTOSFlushModifiedPages:	subi sp, sp, 4
+OSTOSFlushModifiedPages:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSFlushModifiedPages
@@ -1406,7 +1478,8 @@ OSTOSFlushModifiedPages:	subi sp, sp, 4
 
 .globl OSTOSSectionCreate
 .type OSTOSSectionCreate, @function
-OSTOSSectionCreate:	subi sp, sp, 4
+OSTOSSectionCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1425,7 +1498,8 @@ OSTOSSectionCreate:	subi sp, sp, 4
 
 .globl OSTOSMapView
 .type OSTOSMapView, @function
-OSTOSMapView:	subi sp, sp, 16
+OSTOSMapView:
+	subi sp, sp, 16
 	mov  long [sp + 12], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1454,7 +1528,8 @@ OSTOSMapView:	subi sp, sp, 16
 
 .globl OSTOSUnmapView
 .type OSTOSUnmapView, @function
-OSTOSUnmapView:	subi sp, sp, 4
+OSTOSUnmapView:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1472,7 +1547,8 @@ OSTOSUnmapView:	subi sp, sp, 4
 
 .globl OSTOSRemapView
 .type OSTOSRemapView, @function
-OSTOSRemapView:	subi sp, sp, 4
+OSTOSRemapView:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1491,7 +1567,8 @@ OSTOSRemapView:	subi sp, sp, 4
 
 .globl OSTOSFlushView
 .type OSTOSFlushView, @function
-OSTOSFlushView:	subi sp, sp, 4
+OSTOSFlushView:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1509,7 +1586,8 @@ OSTOSFlushView:	subi sp, sp, 4
 
 .globl OSTOSAllocate
 .type OSTOSAllocate, @function
-OSTOSAllocate:	subi sp, sp, 8
+OSTOSAllocate:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1532,7 +1610,8 @@ OSTOSAllocate:	subi sp, sp, 8
 
 .globl OSTOSMemoryQuery
 .type OSTOSMemoryQuery, @function
-OSTOSMemoryQuery:	subi sp, sp, 4
+OSTOSMemoryQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1548,7 +1627,8 @@ OSTOSMemoryQuery:	subi sp, sp, 4
 
 .globl OSTOSWorkingSetPurge
 .type OSTOSWorkingSetPurge, @function
-OSTOSWorkingSetPurge:	subi sp, sp, 4
+OSTOSWorkingSetPurge:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSWorkingSetPurge
@@ -1563,7 +1643,8 @@ OSTOSWorkingSetPurge:	subi sp, sp, 4
 
 .globl OSTOSSynchronizeIcache
 .type OSTOSSynchronizeIcache, @function
-OSTOSSynchronizeIcache:	subi sp, sp, 4
+OSTOSSynchronizeIcache:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSSynchronizeIcache
@@ -1577,7 +1658,8 @@ OSTOSSynchronizeIcache:	subi sp, sp, 4
 
 .globl OSTOSProcessCreate
 .type OSTOSProcessCreate, @function
-OSTOSProcessCreate:	subi sp, sp, 8
+OSTOSProcessCreate:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1600,7 +1682,8 @@ OSTOSProcessCreate:	subi sp, sp, 8
 
 .globl OSTOSProcessSignal
 .type OSTOSProcessSignal, @function
-OSTOSProcessSignal:	subi sp, sp, 4
+OSTOSProcessSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1617,7 +1700,8 @@ OSTOSProcessSignal:	subi sp, sp, 4
 
 .globl OSTOSProcessOpenByPID
 .type OSTOSProcessOpenByPID, @function
-OSTOSProcessOpenByPID:	subi sp, sp, 4
+OSTOSProcessOpenByPID:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1635,7 +1719,8 @@ OSTOSProcessOpenByPID:	subi sp, sp, 4
 
 .globl OSTOSProcessQuery
 .type OSTOSProcessQuery, @function
-OSTOSProcessQuery:	subi sp, sp, 4
+OSTOSProcessQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1652,7 +1737,8 @@ OSTOSProcessQuery:	subi sp, sp, 4
 
 .globl OSTOSProcessQueryByPID
 .type OSTOSProcessQueryByPID, @function
-OSTOSProcessQueryByPID:	subi sp, sp, 4
+OSTOSProcessQueryByPID:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1669,7 +1755,8 @@ OSTOSProcessQueryByPID:	subi sp, sp, 4
 
 .globl OSTOSProcessReadStatus
 .type OSTOSProcessReadStatus, @function
-OSTOSProcessReadStatus:	subi sp, sp, 4
+OSTOSProcessReadStatus:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1686,7 +1773,8 @@ OSTOSProcessReadStatus:	subi sp, sp, 4
 
 .globl OSTOSProcessSetConsoleGroup
 .type OSTOSProcessSetConsoleGroup, @function
-OSTOSProcessSetConsoleGroup:	subi sp, sp, 4
+OSTOSProcessSetConsoleGroup:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1703,7 +1791,8 @@ OSTOSProcessSetConsoleGroup:	subi sp, sp, 4
 
 .globl OSTOSProcessBasePrioritySet
 .type OSTOSProcessBasePrioritySet, @function
-OSTOSProcessBasePrioritySet:	subi sp, sp, 4
+OSTOSProcessBasePrioritySet:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1720,7 +1809,8 @@ OSTOSProcessBasePrioritySet:	subi sp, sp, 4
 
 .globl OSTOSProcessSignalActivation
 .type OSTOSProcessSignalActivation, @function
-OSTOSProcessSignalActivation:	subi sp, sp, 4
+OSTOSProcessSignalActivation:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1736,7 +1826,8 @@ OSTOSProcessSignalActivation:	subi sp, sp, 4
 
 .globl OSTOSProcessWaitForActivation
 .type OSTOSProcessWaitForActivation, @function
-OSTOSProcessWaitForActivation:	subi sp, sp, 4
+OSTOSProcessWaitForActivation:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1754,7 +1845,8 @@ OSTOSProcessWaitForActivation:	subi sp, sp, 4
 
 .globl OSTOSProcessExit
 .type OSTOSProcessExit, @function
-OSTOSProcessExit:	subi sp, sp, 4
+OSTOSProcessExit:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1769,7 +1861,8 @@ OSTOSProcessExit:	subi sp, sp, 4
 
 .globl OSTOSProcessCountQuery
 .type OSTOSProcessCountQuery, @function
-OSTOSProcessCountQuery:	subi sp, sp, 4
+OSTOSProcessCountQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSProcessCountQuery
@@ -1785,7 +1878,8 @@ OSTOSProcessCountQuery:	subi sp, sp, 4
 
 .globl OSTOSProcessQueryAll
 .type OSTOSProcessQueryAll, @function
-OSTOSProcessQueryAll:	subi sp, sp, 4
+OSTOSProcessQueryAll:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1803,7 +1897,8 @@ OSTOSProcessQueryAll:	subi sp, sp, 4
 
 .globl OSTOSSetQuota
 .type OSTOSSetQuota, @function
-OSTOSSetQuota:	subi sp, sp, 4
+OSTOSSetQuota:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1820,7 +1915,8 @@ OSTOSSetQuota:	subi sp, sp, 4
 
 .globl OSTOSQuotaQuery
 .type OSTOSQuotaQuery, @function
-OSTOSQuotaQuery:	subi sp, sp, 4
+OSTOSQuotaQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1837,7 +1933,8 @@ OSTOSQuotaQuery:	subi sp, sp, 4
 
 .globl OSTOSThreadGetExceptionStatus
 .type OSTOSThreadGetExceptionStatus, @function
-OSTOSThreadGetExceptionStatus:	subi sp, sp, 4
+OSTOSThreadGetExceptionStatus:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 
 	jal  OSThreadGetExceptionStatus
@@ -1852,7 +1949,8 @@ OSTOSThreadGetExceptionStatus:	subi sp, sp, 4
 
 .globl OSTOSThreadSleep
 .type OSTOSThreadSleep, @function
-OSTOSThreadSleep:	subi sp, sp, 4
+OSTOSThreadSleep:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1868,7 +1966,8 @@ OSTOSThreadSleep:	subi sp, sp, 4
 
 .globl OSTOSThreadSleepEx
 .type OSTOSThreadSleepEx, @function
-OSTOSThreadSleepEx:	subi sp, sp, 4
+OSTOSThreadSleepEx:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1885,7 +1984,8 @@ OSTOSThreadSleepEx:	subi sp, sp, 4
 
 .globl OSTOSThreadCreate
 .type OSTOSThreadCreate, @function
-OSTOSThreadCreate:	subi sp, sp, 12
+OSTOSThreadCreate:
+	subi sp, sp, 12
 	mov  long [sp + 8], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1911,7 +2011,8 @@ OSTOSThreadCreate:	subi sp, sp, 12
 
 .globl OSTOSThreadTerminate
 .type OSTOSThreadTerminate, @function
-OSTOSThreadTerminate:	subi sp, sp, 4
+OSTOSThreadTerminate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1928,7 +2029,8 @@ OSTOSThreadTerminate:	subi sp, sp, 4
 
 .globl OSTOSThreadSuspend
 .type OSTOSThreadSuspend, @function
-OSTOSThreadSuspend:	subi sp, sp, 4
+OSTOSThreadSuspend:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1944,7 +2046,8 @@ OSTOSThreadSuspend:	subi sp, sp, 4
 
 .globl OSTOSThreadResume
 .type OSTOSThreadResume, @function
-OSTOSThreadResume:	subi sp, sp, 4
+OSTOSThreadResume:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1960,7 +2063,8 @@ OSTOSThreadResume:	subi sp, sp, 4
 
 .globl OSTOSThreadReadStatus
 .type OSTOSThreadReadStatus, @function
-OSTOSThreadReadStatus:	subi sp, sp, 4
+OSTOSThreadReadStatus:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -1977,7 +2081,8 @@ OSTOSThreadReadStatus:	subi sp, sp, 4
 
 .globl OSTOSThreadQuery
 .type OSTOSThreadQuery, @function
-OSTOSThreadQuery:	subi sp, sp, 4
+OSTOSThreadQuery:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -1994,7 +2099,8 @@ OSTOSThreadQuery:	subi sp, sp, 4
 
 .globl OSTOSThreadSignal
 .type OSTOSThreadSignal, @function
-OSTOSThreadSignal:	subi sp, sp, 4
+OSTOSThreadSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2011,7 +2117,8 @@ OSTOSThreadSignal:	subi sp, sp, 4
 
 .globl OSTOSThreadMaskSignal
 .type OSTOSThreadMaskSignal, @function
-OSTOSThreadMaskSignal:	subi sp, sp, 4
+OSTOSThreadMaskSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2028,7 +2135,8 @@ OSTOSThreadMaskSignal:	subi sp, sp, 4
 
 .globl OSTOSThreadDeliverOnWaitSignal
 .type OSTOSThreadDeliverOnWaitSignal, @function
-OSTOSThreadDeliverOnWaitSignal:	subi sp, sp, 4
+OSTOSThreadDeliverOnWaitSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2045,7 +2153,8 @@ OSTOSThreadDeliverOnWaitSignal:	subi sp, sp, 4
 
 .globl OSTOSJobCreate
 .type OSTOSJobCreate, @function
-OSTOSJobCreate:	subi sp, sp, 8
+OSTOSJobCreate:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2068,7 +2177,8 @@ OSTOSJobCreate:	subi sp, sp, 8
 
 .globl OSTOSJobAddProcess
 .type OSTOSJobAddProcess, @function
-OSTOSJobAddProcess:	subi sp, sp, 4
+OSTOSJobAddProcess:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2085,7 +2195,8 @@ OSTOSJobAddProcess:	subi sp, sp, 4
 
 .globl OSTOSJobRemoveProcess
 .type OSTOSJobRemoveProcess, @function
-OSTOSJobRemoveProcess:	subi sp, sp, 4
+OSTOSJobRemoveProcess:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -2101,7 +2212,8 @@ OSTOSJobRemoveProcess:	subi sp, sp, 4
 
 .globl OSTOSJobSignal
 .type OSTOSJobSignal, @function
-OSTOSJobSignal:	subi sp, sp, 4
+OSTOSJobSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2119,7 +2231,8 @@ OSTOSJobSignal:	subi sp, sp, 4
 
 .globl OSTOSSetSystemConsole
 .type OSTOSSetSystemConsole, @function
-OSTOSSetSystemConsole:	subi sp, sp, 4
+OSTOSSetSystemConsole:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -2135,7 +2248,8 @@ OSTOSSetSystemConsole:	subi sp, sp, 4
 
 .globl OSTOSConsoleSignal
 .type OSTOSConsoleSignal, @function
-OSTOSConsoleSignal:	subi sp, sp, 4
+OSTOSConsoleSignal:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2152,7 +2266,8 @@ OSTOSConsoleSignal:	subi sp, sp, 4
 
 .globl OSTOSIsAConsole
 .type OSTOSIsAConsole, @function
-OSTOSIsAConsole:	subi sp, sp, 4
+OSTOSIsAConsole:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 
@@ -2168,7 +2283,8 @@ OSTOSIsAConsole:	subi sp, sp, 4
 
 .globl OSTOSDuplexCreate
 .type OSTOSDuplexCreate, @function
-OSTOSDuplexCreate:	subi sp, sp, 4
+OSTOSDuplexCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2188,7 +2304,8 @@ OSTOSDuplexCreate:	subi sp, sp, 4
 
 .globl OSTOSCheckPermission
 .type OSTOSCheckPermission, @function
-OSTOSCheckPermission:	subi sp, sp, 4
+OSTOSCheckPermission:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2205,7 +2322,8 @@ OSTOSCheckPermission:	subi sp, sp, 4
 
 .globl OSTOSGrantPermission
 .type OSTOSGrantPermission, @function
-OSTOSGrantPermission:	subi sp, sp, 4
+OSTOSGrantPermission:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2222,7 +2340,8 @@ OSTOSGrantPermission:	subi sp, sp, 4
 
 .globl OSTOSPortCreate
 .type OSTOSPortCreate, @function
-OSTOSPortCreate:	subi sp, sp, 4
+OSTOSPortCreate:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2242,7 +2361,8 @@ OSTOSPortCreate:	subi sp, sp, 4
 
 .globl OSTOSPortConnectRelative
 .type OSTOSPortConnectRelative, @function
-OSTOSPortConnectRelative:	subi sp, sp, 8
+OSTOSPortConnectRelative:
+	subi sp, sp, 8
 	mov  long [sp + 4], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2265,7 +2385,8 @@ OSTOSPortConnectRelative:	subi sp, sp, 8
 
 .globl OSTOSPortAccept
 .type OSTOSPortAccept, @function
-OSTOSPortAccept:	subi sp, sp, 4
+OSTOSPortAccept:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2284,7 +2405,8 @@ OSTOSPortAccept:	subi sp, sp, 4
 
 .globl OSTOSPortSendAndWaitReceive
 .type OSTOSPortSendAndWaitReceive, @function
-OSTOSPortSendAndWaitReceive:	subi sp, sp, 4
+OSTOSPortSendAndWaitReceive:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2303,7 +2425,8 @@ OSTOSPortSendAndWaitReceive:	subi sp, sp, 4
 
 .globl OSTOSPortSendAndWaitReply
 .type OSTOSPortSendAndWaitReply, @function
-OSTOSPortSendAndWaitReply:	subi sp, sp, 4
+OSTOSPortSendAndWaitReply:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2
@@ -2322,7 +2445,8 @@ OSTOSPortSendAndWaitReply:	subi sp, sp, 4
 
 .globl OSTOSPortOpenProcessByClientID
 .type OSTOSPortOpenProcessByClientID, @function
-OSTOSPortOpenProcessByClientID:	subi sp, sp, 4
+OSTOSPortOpenProcessByClientID:
+	subi sp, sp, 4
 	mov  long [sp + 0], lr
 	mov  a0, long [s17 + 4] # t1
 	mov  a1, long [s17 + 8] # t2

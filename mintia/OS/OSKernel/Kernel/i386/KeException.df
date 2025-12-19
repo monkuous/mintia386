@@ -1,0 +1,297 @@
+#include "<df>/dragonfruit.h"
+#include "<inc>/HALCrash.h"
+
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/HALDebug.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Security.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/Process.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "../KeInternal.h"
+#include "../../../OSLoader/OSLoaderGlobal.h"
+
+struct Tss
+    4 Previous
+    4 esp0
+    4 ss0
+    4 esp1
+    4 ss1
+    4 esp2
+    4 ss2
+    4 cr3
+    4 eip
+    4 eflags
+    4 eax
+    4 ecx
+    4 edx
+    4 ebx
+    4 esp
+    4 ebp
+    4 esi
+    4 edi
+    4 es
+    4 cs
+    4 ss
+    4 ds
+    4 fs
+    4 gs
+    4 ldt
+    2 trapI
+    2 IOMapBaseI
+endstruct
+
+table Gdt
+    0x00000000 0x00000000 // Null (used as GDTR)
+    0x0000ffff 0x00cf9b00 // Kernel code
+    0x0000ffff 0x00cf9300 // Kernel data
+    0x0000ffff 0x00cffb00 // User code
+    0x0000ffff 0x00cff300 // User data
+    0x0000ffff 0x00cff300 // User TEB
+    0x00000000 0x00000000 // Task
+endtable
+
+buffer Tss Tss_SIZEOF
+
+const GDT_SEL_KCODE 0x08
+const GDT_SEL_KDATA 0x10
+const GDT_SEL_UCODE 0x1b
+const GDT_SEL_UDATA 0x23
+const GDT_SEL_UTEB  0x2b
+const GDT_SEL_TASK  0x30
+const GDT_SIZE      0x38
+
+table Idt[(VECTOR_NUM 2 *)]
+
+externptr KiI386IdtThunks
+
+extern KiI386Init { tr gdtr idtr code data -- }
+
+fn KiCPUInit { -- }
+    fnsection "INIT$text"
+
+    // create tss
+    GDT_SEL_KDATA Tss Tss_ss0 + !
+    Tss_SIZEOF Tss Tss_IOMapBaseI + si
+
+    Tss 16 << Tss_SIZEOF 1 - | Gdt GDT_SEL_TASK + !
+    Tss 0xff000000 & Tss 16 >> 0xff & | 0x8900 | Gdt GDT_SEL_TASK 4 + + !
+
+    // create idt
+    auto i
+    0 i!
+
+    while (i@ VECTOR_NUM <)
+        auto thunk
+        [i@]KiI386IdtThunks@ thunk!
+
+        if (thunk@)
+            thunk@ 0xffff & GDT_SEL_KCODE 16 << | [i@ 2 *]Idt!
+            thunk@ 0xffff0000 & 0x8e00 | [i@ 2 * 1 +]Idt!
+        end
+
+        1 i +=
+    end
+
+    // allow userspace to call interrupt 0x30
+    0x6000 [VECTOR_SYSCALL 2 * 1 +]Idt |=
+
+    // create gdtr and idtr
+    GDT_SIZE 1 - Gdt!
+    Gdt Gdt 2 + !
+
+    auto idtr
+    6 alloc idtr!
+    VECTOR_NUM 8 * 1 - idtr@!
+    Idt idtr@ 2 + !
+
+    // set all the cpu registers
+    GDT_SEL_TASK Gdt idtr@ GDT_SEL_KCODE GDT_SEL_KDATA KiI386Init
+end
+
+const VECTOR_DE      0x00
+const VECTOR_DB      0x01
+const VECTOR_NMI     0x02
+const VECTOR_BP      0x03
+const VECTOR_OF      0x04
+const VECTOR_BR      0x05
+const VECTOR_UD      0x06
+const VECTOR_NM      0x07
+const VECTOR_DF      0x08
+const VECTOR_CS      0x09
+const VECTOR_TS      0x0a
+const VECTOR_NP      0x0b
+const VECTOR_SS      0x0c
+const VECTOR_GP      0x0d
+const VECTOR_PF      0x0e
+const VECTOR_MF      0x10
+const VECTOR_AC      0x11
+const VECTOR_SYSCALL 0x30
+const VECTOR_NUM     0x31
+
+const EXCNAMESMAX 0x12
+
+table ExceptionNames
+    "#DE"
+    "#DB"
+    "NMI"
+    "#BP"
+    "#OF"
+    "#BR"
+    "#UD"
+    "#NM"
+    "#DF"
+    "#CS"
+    "#TS"
+    "#NP"
+    "#SS"
+    "#GP"
+    "#PF"
+    0
+    "#MF"
+    "#AC"
+endtable
+
+const PF_WRITE 0x02
+
+extern PsDispatchUsermodeInterrupts { trapframe -- }
+
+externptr KeIPLCurrent
+
+extern KiI386Syscall { tf -- }
+
+fn KiI386Trap { cr2 tf -- }
+	auto handled
+	1 handled!
+
+	auto signal
+	0 signal!
+
+	cr2@ tf@ OSContext_cr2 + !
+	KeIPLCurrent@ KiOldIPL!
+
+	if (tf@ OSContext_cs + @ I386_CS_USER &)
+		tf@ KeThreadCurrent@ KeThread_TrapFrame + !
+	end
+
+    auto vector
+    tf@ OSContext_vector + @ vector!
+
+	0 handled!
+
+	if (vector@ 0x20 >= vector@ 0x2f <=)
+		1 KeStatistics OSStatistics_Interrupts + +=
+
+		tf@ HALInterrupt
+
+		if (KeIPLCurrent@ IPLDPC <)
+			if (KiPendingSoftwareInterrupts@)
+				KiDispatchSoftwareInterrupts
+			end
+		end
+
+		0 signal!
+		1 handled!
+	end elseif (vector@ VECTOR_NMI ~=)
+		HALCPUInterruptEnable
+
+		if (vector@ VECTOR_SYSCALL ==)
+			1 KeStatistics OSStatistics_SystemCalls + +=
+
+			tf@ KiI386Syscall
+
+			1 handled!
+		end elseif (vector@ VECTOR_PF ==)
+			tf@ OSContext_error + @ PF_WRITE & ~~ ~~ // writing
+			cr2@ // badaddr
+			tf@ // trapframe
+			MmPageFault handled!
+        end elseif (vector@ VECTOR_DE ==)
+            OSSIGNAL_FPE signal!
+        end elseif (vector@ VECTOR_OF ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_BR ==)
+            OSSIGNAL_ILL signal!
+		end elseif (vector@ VECTOR_UD ==)
+			OSSIGNAL_ILL signal!
+		end elseif (vector@ VECTOR_NM ==)
+			OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_CS ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_TS ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_NP ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_SS ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_GP ==)
+            OSSIGNAL_ILL signal!
+        end elseif (vector@ VECTOR_MF ==)
+            OSSIGNAL_FPE signal!
+		end elseif (vector@ VECTOR_AC ==)
+			OSSIGNAL_BUS signal!
+		end elseif (vector@ VECTOR_BP == vector@ VECTOR_DB == ||)
+			1 handled!
+			// TODO debugging stuff
+		end
+
+		if (signal@)
+			if (tf@ OSContext_cs + @ I386_CS_USER &)
+				signal@ // signal
+				KeThreadCurrent@ // thread
+				KeThreadSignal drop
+
+				1 handled!
+			end
+		end
+
+		HALCPUInterruptDisable drop
+	end
+
+	if (handled@ ~~)
+		auto excname
+
+		if (vector@ EXCNAMESMAX >)
+			"UNKNOWN" excname!
+		end else
+			[vector@]ExceptionNames@ excname!
+
+            if (excname@ ~~)
+                "UNKNOWN" excname!
+            end
+		end
+
+		if (vector@ VECTOR_NMI ==)
+			if (HALDebug)
+				return
+			end
+
+			return
+		end
+
+		excname@
+		cr2@
+		tf@ OSContext_eip + @
+		tf@ OSContext_cs + @
+		KeIPLCurrent@
+		"Fault: IPL=%d CS=%04x EIP=%08x CR2=%08x VECTOR=%s\n" KeCrash
+	end
+
+	if (tf@ OSContext_cs + @ I386_CS_USER &)
+		if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+			tf@ PsDispatchUsermodeInterrupts
+		end
+	end
+end

@@ -25,6 +25,7 @@ table DLLContextNames
 	"ebp"    "cr2"
 	"ds"     "es"
 	"fs"     "gs"
+	"vector" "error"
 	"eip"    "cs"
 	"eflags" "esp"
 	"ss"

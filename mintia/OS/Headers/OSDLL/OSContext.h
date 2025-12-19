@@ -93,12 +93,13 @@ struct OSContext
 	4 ebp    4 cr2
 	4 ds     4 es
 	4 fs     4 gs
+	4 vector 4 error
 	4 eip    4 cs
 	4 eflags 4 esp
 	4 ss
 endstruct
 
-const OSCONTEXTCOUNT 17
+const OSCONTEXTCOUNT 19
 
 const I386_CS_USER 3
 
