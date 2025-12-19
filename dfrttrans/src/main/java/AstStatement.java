@@ -117,7 +117,7 @@ public interface AstStatement {
         @Override
         public void print(PrintStream stream, int indentLevel) {
             Utils.writeIndent(stream, indentLevel);
-            stream.printf("unsigned char %s[%d];%n", symbol.name(), size);
+            stream.printf("__attribute__((aligned(4))) unsigned char %s[%d];%n", symbol.name(), size);
         }
     }
 }
