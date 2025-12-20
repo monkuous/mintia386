@@ -28,10 +28,6 @@ fn MiPageDirectoryDereference { process -- }
     "TODO MiPageDirectoryDereference\n" KeCrash
 end
 
-fn MmVirtualToPFDBE { vaddr -- pfdbe }
-    "TODO MmVirtualToPFDBE\n" KeCrash
-end
-
 fn MmVirtualAddressIsValid { vaddr -- isvalid }
     "TODO MmVirtualAddressIsValid\n" KeCrash
 end

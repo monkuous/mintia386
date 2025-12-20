@@ -127,3 +127,16 @@ fn MmVirtualToPhysical { vaddr -- phyaddr }
 
 	vaddr@ PAGEOFFSETMASK & phyaddr +=
 end
+
+fn MmVirtualToPFDBE { vaddr -- pfdbe }
+	auto pte
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + @ pte!
+
+	if (DEBUGCHECKS)
+		if (pte@ PTE_V & ~~)
+			"MmVirtualToPFDBE: invalid PTE\n" KeCrash
+		end
+	end
+
+	pte@ 12 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+end
