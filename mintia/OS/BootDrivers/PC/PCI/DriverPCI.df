@@ -111,7 +111,7 @@ fn private EnumerateSingle { bus slot function -- multifunction ok }
     function@
     slot@
     bus@
-    "PCI: %02x:%02x.%d: %04x: %04x:%04x (rev %02x, prog-if %02x)\n" Printf
+    "%02x:%02x.%d: %04x: %04x:%04x (rev %02x, prog-if %02x)\n" "PCI" HALLog
 
     0 ok!
 
