@@ -1193,10 +1193,10 @@ fn (LdrPCMemoryFunc) private LdrPCRemoveReservedRegion { head tail type context 
     end
 end
 
-const LDRINITIALHEAPSIZE 8192
+const LDRINITIALHEAPSIZE 262144
 
 fn private LdrPCBuildDescriptors { -- }
-	// initialize the heap as an 8KB chunk at the end of low memory.
+	// initialize the heap as an 256KB chunk at the end of low memory.
 
     auto regs
     LdrPCRegs_SIZEOF alloc regs!
