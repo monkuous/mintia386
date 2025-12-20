@@ -5,3 +5,4 @@
 # format: drivername
 
 PCI.sys
+AHCI.sys

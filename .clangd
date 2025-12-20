@@ -1,0 +1,2 @@
+CompileFlags:
+    Add: [-ffreestanding, --target=i386-unknown-linux-gnu, -std=gnu23, -xc, -Wall, -Wextra, -Wno-memset-transposed-args]

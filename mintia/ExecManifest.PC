@@ -6,3 +6,4 @@
 
 /mintia/BootDrivers/PC.sys Root/mintia/BootDrivers/PC.sys 493
 /mintia/BootDrivers/PCI.sys Root/mintia/BootDrivers/PCI.sys 493
+/mintia/BootDrivers/AHCI.sys Root/mintia/BootDrivers/AHCI.sys 493
