@@ -7,7 +7,7 @@
 #include "<inc>/HALLog.h"
 #include "<inc>/HALDriver.h"
 #include "<inc>/HALRTC.h"
-#include "<inc>/HALPCIO.h"
+#include "<inc>/HALPCI.h"
 #include "<inc>/HALInterrupt.h"
 #include "<inc>/HALCPU.h"
 
@@ -35,9 +35,9 @@ fn (FDriverInit) DriverInitPIT { stage -- ok }
 	if (stage@ STAGE_PRETASKING ==)
 		// start the clock interrupt
 
-        PIT_CHANNEL_0 PIT_ACCESS_BOTH | PIT_MODE_RATE | PIT_BINARY | PITPORTCMD HALPCOutb
-        PIT_DIVISOR 0xff & PITPORTCH0 HALPCOutb
-        PIT_DIVISOR 8 >> PITPORTCH0 HALPCOutb
+        PIT_CHANNEL_0 PIT_ACCESS_BOTH | PIT_MODE_RATE | PIT_BINARY | PITPORTCMD HALPCIOutb
+        PIT_DIVISOR 0xff & PITPORTCH0 HALPCIOutb
+        PIT_DIVISOR 8 >> PITPORTCH0 HALPCIOutb
 
 		pointerof DriverPITInterrupt // function
 		PITINTERRUPT // interrupt number

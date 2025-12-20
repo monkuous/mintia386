@@ -7,7 +7,7 @@
 #include "../../OSLoader/OSLoaderGlobal.h"
 
 #include "<inc>/HALLog.h"
-#include "<inc>/HALPCIO.h"
+#include "<inc>/HALPCI.h"
 
 #include "<inc>/HALIPL.h"
 #include "<inc>/HALInterrupt.h"
@@ -39,20 +39,20 @@ var HALPCPICMask (0xffff 1 PIC1_IRQ << ~ &)
 fn HALPCPICInit { -- }
 	fnsection "INIT$text"
 
-    ICW1_INIT ICW1_ICW4 | PIC0_CMD HALPCOutb
-    ICW1_INIT ICW1_ICW4 | PIC1_CMD HALPCOutb
+    ICW1_INIT ICW1_ICW4 | PIC0_CMD HALPCIOutb
+    ICW1_INIT ICW1_ICW4 | PIC1_CMD HALPCIOutb
 
-    0x20 PIC0_DAT HALPCOutb
-    0x28 PIC1_DAT HALPCOutb
+    0x20 PIC0_DAT HALPCIOutb
+    0x28 PIC1_DAT HALPCIOutb
 
-    1 PIC1_IRQ << PIC0_DAT HALPCOutb
-    PIC1_IRQ PIC1_DAT HALPCOutb
+    1 PIC1_IRQ << PIC0_DAT HALPCIOutb
+    PIC1_IRQ PIC1_DAT HALPCIOutb
 
-    ICW4_8086 PIC0_DAT HALPCOutb
-    ICW4_8086 PIC1_DAT HALPCOutb
+    ICW4_8086 PIC0_DAT HALPCIOutb
+    ICW4_8086 PIC1_DAT HALPCIOutb
 
-    HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
-    HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
+    HALPCPICMask@ 0xff & PIC0_DAT HALPCIOutb
+    HALPCPICMask@ 8 >> PIC1_DAT HALPCIOutb
 
 	auto i
 	0 i!
@@ -75,9 +75,9 @@ fn HALPlatformInterruptRegister { handler int ipl -- }
 	1 int@ << ~ HALPCPICMask &=
 
 	if (int@ 8 <)
-		HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
+		HALPCPICMask@ 0xff & PIC0_DAT HALPCIOutb
 	end else
-		HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
+		HALPCPICMask@ 8 >> PIC1_DAT HALPCIOutb
 	end
 end
 
@@ -92,9 +92,9 @@ fn HALPlatformInterruptUnregister { int -- }
 	1 int@ << HALPCPICMask |=
 
 	if (int@ 8 <)
-		HALPCPICMask@ 0xff & PIC0_DAT HALPCOutb
+		HALPCPICMask@ 0xff & PIC0_DAT HALPCIOutb
 	end else
-		HALPCPICMask@ 8 >> PIC1_DAT HALPCOutb
+		HALPCPICMask@ 8 >> PIC1_DAT HALPCIOutb
 	end
 
 	spf@ [int@ 2 *]HALPlatformInterruptHandlers!

@@ -11,7 +11,28 @@ endstruct
 
 fnptr HALPCICallbackF { device -- }
 
+const PCICOMMAND 0x04
+const PCICOMMANDIO   0x0001
+const PCICOMMANDMEM  0x0002
+const PCICOMMANDDMA  0x0004
+const PCICOMMANDNIRQ 0x0400
+
+const PCISTATUS 0x06
+const PCISTATUSCAPABILITIES 0x0010
+
 extern HALPCIEnumerate { func vendor devid revision class interface -- count }
+
+extern HALPCIGetInterrupt { device -- irq ok }
+extern HALPCIGetIOBAR { device idx -- base ok }
+extern HALPCIGetMemoryBAR { device idx -- phyaddr size ok }
+
+extern HALPCIInb { port -- value }
+extern HALPCIIni { port -- value }
+extern HALPCIInl { port -- value }
+
+extern HALPCIOutb { value port -- }
+extern HALPCIOuti { value port -- }
+extern HALPCIOutl { value port -- }
 
 extern HALPCIReadb { device offset -- value }
 extern HALPCIReadi { device offset -- value }

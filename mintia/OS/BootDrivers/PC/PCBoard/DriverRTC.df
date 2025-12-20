@@ -7,7 +7,7 @@
 #include "<inc>/HALLog.h"
 #include "<inc>/HALDriver.h"
 #include "<inc>/HALRTC.h"
-#include "<inc>/HALPCIO.h"
+#include "<inc>/HALPCI.h"
 #include "<inc>/HALInterrupt.h"
 #include "<inc>/HALCPU.h"
 
@@ -53,23 +53,23 @@ struct RTCData
 endstruct
 
 fn private ReadRTC { buffer -- }
-    RTC_SECONDS RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_SecondsB + sb
+    RTC_SECONDS RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_SecondsB + sb
 
-    RTC_MINUTES RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_MinutesB + sb
+    RTC_MINUTES RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_MinutesB + sb
 
-    RTC_HOURS RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_HoursB + sb
+    RTC_HOURS RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_HoursB + sb
 
-    RTC_DAY RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_DayB + sb
+    RTC_DAY RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_DayB + sb
 
-    RTC_MONTH RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_MonthB + sb
+    RTC_MONTH RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_MonthB + sb
 
-    RTC_YEAR RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb buffer@ RTCData_YearB + sb
+    RTC_YEAR RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb buffer@ RTCData_YearB + sb
 end
 
 fn private UpdateRTC { -- }
@@ -167,16 +167,16 @@ fn (FDriverInit) DriverInitRTC { stage -- ok }
 	if (stage@ STAGE_PRETASKING ==)
 		// start the clock interrupt
 
-        RTC_B RTCPORTIDX HALPCOutb
-        RTCPORTDAT HALPCInb DriverRTCRegB!
+        RTC_B RTCPORTIDX HALPCIOutb
+        RTCPORTDAT HALPCIInb DriverRTCRegB!
 
         DriverRTCRegB@ RTC_B_SET RTC_B_PIE | RTC_B_AIE | ~ & RTC_B_UIE | DriverRTCRegB!
 
-        RTC_B RTCPORTIDX HALPCOutb
-        DriverRTCRegB@ RTCPORTDAT HALPCOutb
+        RTC_B RTCPORTIDX HALPCIOutb
+        DriverRTCRegB@ RTCPORTDAT HALPCIOutb
 
-        RTC_C RTCPORTIDX HALPCOutb
-        RTCPORTDAT HALPCInb drop
+        RTC_C RTCPORTIDX HALPCIOutb
+        RTCPORTDAT HALPCIInb drop
 
 		pointerof DriverRTCInterrupt // function
 		RTCINTERRUPT // interrupt number
@@ -295,41 +295,41 @@ fn (HALRTCSetF) private DriverRTCSet { time -- ok }
 	HALCPUInterruptDisable rs!
 
     // set the SET bit in register B to prevent increments during update
-    RTC_B RTCPORTIDX HALPCOutb
-    DriverRTCRegB@ RTC_B_SET | RTCPORTDAT HALPCOutb
+    RTC_B RTCPORTIDX HALPCIOutb
+    DriverRTCRegB@ RTC_B_SET | RTCPORTDAT HALPCIOutb
 
-    RTC_SECONDS RTCPORTIDX HALPCOutb
-    seconds@ RTCPORTDAT HALPCOutb
+    RTC_SECONDS RTCPORTIDX HALPCIOutb
+    seconds@ RTCPORTDAT HALPCIOutb
 
-    RTC_MINUTES RTCPORTIDX HALPCOutb
-    minutes@ RTCPORTDAT HALPCOutb
+    RTC_MINUTES RTCPORTIDX HALPCIOutb
+    minutes@ RTCPORTDAT HALPCIOutb
 
-    RTC_HOURS RTCPORTIDX HALPCOutb
-    hours@ RTCPORTDAT HALPCOutb
+    RTC_HOURS RTCPORTIDX HALPCIOutb
+    hours@ RTCPORTDAT HALPCIOutb
 
-    RTC_WEEKDAY RTCPORTIDX HALPCOutb
-    weekday@ RTCPORTDAT HALPCOutb
+    RTC_WEEKDAY RTCPORTIDX HALPCIOutb
+    weekday@ RTCPORTDAT HALPCIOutb
 
-    RTC_DAY RTCPORTIDX HALPCOutb
-    day@ RTCPORTDAT HALPCOutb
+    RTC_DAY RTCPORTIDX HALPCIOutb
+    day@ RTCPORTDAT HALPCIOutb
 
-    RTC_MONTH RTCPORTIDX HALPCOutb
-    month@ RTCPORTDAT HALPCOutb
+    RTC_MONTH RTCPORTIDX HALPCIOutb
+    month@ RTCPORTDAT HALPCIOutb
 
-    RTC_YEAR RTCPORTIDX HALPCOutb
-    year@ RTCPORTDAT HALPCOutb
+    RTC_YEAR RTCPORTIDX HALPCIOutb
+    year@ RTCPORTDAT HALPCIOutb
 
     // restore register B to enable increments again
-    RTC_B RTCPORTIDX HALPCOutb
-    DriverRTCRegB@ RTCPORTDAT HALPCOutb
+    RTC_B RTCPORTIDX HALPCIOutb
+    DriverRTCRegB@ RTCPORTDAT HALPCIOutb
 
 	rs@ HALCPUInterruptRestore
 end
 
 fn (HALInterruptHandler) private DriverRTCInterrupt { trapframe int -- }
     auto cause
-    RTC_C RTCPORTIDX HALPCOutb
-    RTCPORTDAT HALPCInb cause!
+    RTC_C RTCPORTIDX HALPCIOutb
+    RTCPORTDAT HALPCIInb cause!
 
     if (cause@ RTC_C_UF &)
         UpdateRTC

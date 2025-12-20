@@ -6,15 +6,13 @@
 
 #include "<inc>/HALLog.h"
 #include "<inc>/HALPCI.h"
-#include "<inc>/HALPCIO.h"
 
 #include "<inc>/HALIPL.h"
 #include "<inc>/HALInterrupt.h"
 #include "<inc>/HALCPU.h"
 #include "<inc>/HALCrash.h"
 
-const PCIPORTADDR 0xcf8
-const PCIPORTDATA 0xcfc
+#include "<ll>/OSDLL/OS.h"
 
 var HALPCIEnumerateFunction 0
 public HALPCIEnumerateFunction
@@ -30,6 +28,62 @@ fn HALPCIEnumerate { func vendor devid revision class interface -- count }
 
 	func@ vendor@ devid@ revision@ class@ interface@
 	enumfunc@ HALPCIEnumerateF count!
+end
+
+fn HALPCIGetIOBAR { device idx -- base ok }
+    auto data
+    device@ 0x10 idx@ 4 * + HALPCIReadl data!
+
+    if (data@ -1 ==)
+        STATUS_NOT_FOUND ok!
+    end elseif (data@ 1 &)
+        data@ 0xfffffffc & base!
+        0 ok!
+    end else
+        STATUS_INVALID_OBJECT_TYPE ok!
+    end
+end
+
+fn HALPCIGetMemoryBAR { device idx -- phyaddr size ok }
+    auto data
+    auto data2
+    device@ 0x10 idx@ 4 * + HALPCIReadl data!
+
+    if (data@ -1 ==)
+        STATUS_NOT_FOUND ok!
+        return
+    end elseif (data@ 1 &)
+        STATUS_INVALID_OBJECT_TYPE ok!
+        return
+    end
+
+    if (data@ 1 >> 3 & 2 ==)
+        device@ 0x10 idx@ 1 + 4 * + HALPCIReadl data2!
+
+        if (data2@)
+            STATUS_BAD_ADDRESS ok!
+            return
+        end
+    end
+
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    auto cmd
+    device@ PCICOMMAND HALPCIReadi cmd!
+    device@ PCICOMMAND cmd@ PCICOMMANDIO PCICOMMANDMEM | ~ & HALPCIWritei
+
+    device@ 0x10 idx@ 4 * + -1 HALPCIWritel
+    device@ 0x10 idx@ 4 * + HALPCIReadl data2!
+    device@ 0x10 idx@ 4 * + data@ HALPCIWritel
+
+    device@ PCICOMMAND cmd@ HALPCIWritei
+
+    rs@ HALCPUInterruptRestore
+
+    data@ 0xfffffff0 & phyaddr!
+    data2@ ~ 1 + size!
+    0 ok!
 end
 
 fn HALPCIReadb { device offset -- value }
@@ -61,64 +115,3 @@ fn HALPCIWritel { device offset value -- }
     device@ HALPCIDevice_BusB + gb device@ HALPCIDevice_SlotB + gb device@ HALPCIDevice_FunctionB + gb offset@
     value@ HALPCIWriteRawl
 end
-
-fn HALPCIReadRawb { bus slot func offset -- value }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    PCIPORTDATA offset@ 3 & | HALPCInb value!
-
-    rs@ HALCPUInterruptRestore
-end
-
-fn HALPCIReadRawi { bus slot func offset -- value }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    PCIPORTDATA offset@ 2 & | HALPCIni value!
-
-    rs@ HALCPUInterruptRestore
-end
-
-fn HALPCIReadRawl { bus slot func offset -- value }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    PCIPORTDATA HALPCInl value!
-
-    rs@ HALCPUInterruptRestore
-end
-
-fn HALPCIWriteRawb { bus slot func offset value -- }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    value@ PCIPORTDATA offset@ 3 & | HALPCOutb
-
-    rs@ HALCPUInterruptRestore
-end
-
-fn HALPCIWriteRawi { bus slot func offset value -- }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    value@ PCIPORTDATA offset@ 2 & | HALPCOuti
-
-    rs@ HALCPUInterruptRestore
-end
-
-fn HALPCIWriteRawl { bus slot func offset value -- }
-    auto rs
-    HALCPUInterruptDisable rs!
-
-    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCOutl
-    value@ PCIPORTDATA HALPCOutl
-
-    rs@ HALCPUInterruptRestore
-end
-

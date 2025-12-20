@@ -1,54 +1,54 @@
 .section "text", "ax", %progbits
 
-.globl HALPCInb
-.type HALPCInb, @function
-HALPCInb:
+.globl HALPCIInb
+.type HALPCIInb, @function
+HALPCIInb:
     mov 4(%esp), %edx
     inb %dx, %al
     movzx %al, %eax
     ret
-.size HALPCInb, . - HALPCInb
+.size HALPCIInb, . - HALPCIInb
 
-.globl HALPCIni
-.type HALPCIni, @function
-HALPCIni:
+.globl HALPCIIni
+.type HALPCIIni, @function
+HALPCIIni:
     mov 4(%esp), %edx
     inw %dx, %ax
     movzx %ax, %eax
     ret
-.size HALPCIni, . - HALPCIni
+.size HALPCIIni, . - HALPCIIni
 
-.globl HALPCInl
-.type HALPCInl, @function
-HALPCInl:
+.globl HALPCIInl
+.type HALPCIInl, @function
+HALPCIInl:
     mov 4(%esp), %edx
     inl %dx, %eax
     ret
-.size HALPCInl, . - HALPCInl
+.size HALPCIInl, . - HALPCIInl
 
-.globl HALPCOutb
-.type HALPCOutb, @function
-HALPCOutb:
+.globl HALPCIOutb
+.type HALPCIOutb, @function
+HALPCIOutb:
     mov 4(%esp), %edx
     mov 8(%esp), %eax
     outb %al, %dx
     ret
-.size HALPCOutb, . - HALPCOutb
+.size HALPCIOutb, . - HALPCIOutb
 
-.globl HALPCOuti
-.type HALPCOuti, @function
-HALPCOuti:
+.globl HALPCIOuti
+.type HALPCIOuti, @function
+HALPCIOuti:
     mov 4(%esp), %edx
     mov 8(%esp), %eax
     outw %ax, %dx
     ret
-.size HALPCOuti, . - HALPCOuti
+.size HALPCIOuti, . - HALPCIOuti
 
-.globl HALPCOutl
-.type HALPCOutl, @function
-HALPCOutl:
+.globl HALPCIOutl
+.type HALPCIOutl, @function
+HALPCIOutl:
     mov 4(%esp), %edx
     mov 8(%esp), %eax
     outl %eax, %dx
     ret
-.size HALPCOutl, . - HALPCOutl
+.size HALPCIOutl, . - HALPCIOutl

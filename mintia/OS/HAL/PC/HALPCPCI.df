@@ -1,0 +1,89 @@
+//
+// Implements the parts of PC-specific PCI support that need to be in the HAL.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALPCI.h"
+
+#include "<inc>/HALIPL.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALCrash.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+const PCIPORTADDR 0xcf8
+const PCIPORTDATA 0xcfc
+
+fn HALPCIGetInterrupt { device -- irq ok }
+    device@ 0x3c HALPCIReadb irq!
+
+    if (irq@ 0xff ~=)
+        0 ok!
+    end else
+        STATUS_NOT_FOUND ok!
+    end
+end
+
+fn HALPCIReadRawb { bus slot func offset -- value }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    PCIPORTDATA offset@ 3 & | HALPCIInb value!
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn HALPCIReadRawi { bus slot func offset -- value }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    PCIPORTDATA offset@ 2 & | HALPCIIni value!
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn HALPCIReadRawl { bus slot func offset -- value }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    PCIPORTDATA HALPCIInl value!
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn HALPCIWriteRawb { bus slot func offset value -- }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    value@ PCIPORTDATA offset@ 3 & | HALPCIOutb
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn HALPCIWriteRawi { bus slot func offset value -- }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    value@ PCIPORTDATA offset@ 2 & | HALPCIOuti
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn HALPCIWriteRawl { bus slot func offset value -- }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    0x80000000 bus@ 16 << | slot@ 11 << | func@ 8 << | offset@ 0xfc & | PCIPORTADDR HALPCIOutl
+    value@ PCIPORTDATA HALPCIOutl
+
+    rs@ HALCPUInterruptRestore
+end
+
