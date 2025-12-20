@@ -8,8 +8,8 @@ HALInterrupt:
     mov %ebx, (%esp)
     mov %esi, 4(%esp)
 
-    mov 16(%esp), %ecx
-    mov 56(%ecx), %esi # vector
+    mov 12(%esp), %ecx
+    mov 48(%ecx), %esi # vector
     sub $0x20, %esi
 
     # save old ipl
