@@ -26,7 +26,8 @@ HALInterrupt:
     mov %eax, 12(%esp)
 
     # call handler
-    mov %ecx, (%esp)
+    mov %ecx, 4(%esp)
+    mov %esi, (%esp)
     calll *HALPlatformInterruptHandlers(,%esi,8)
 
     # switch to old stack
