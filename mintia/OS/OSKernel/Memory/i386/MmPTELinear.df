@@ -140,3 +140,24 @@ fn MmVirtualToPFDBE { vaddr -- pfdbe }
 
 	pte@ 12 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
 end
+
+fn MiPTESet { pte pteaddr -- }
+	if (pteaddr@ PAGETABLE < pteaddr@ PAGETABLETOP >= ||)
+		pte@ pteaddr@!
+		return
+	end
+
+	auto vaddr
+	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
+
+	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+		// this is a user page.
+		if (pte@ PTE_V &)
+			PTE_U pte |=
+		end
+	end
+
+	pte@ pteaddr@!
+
+	vaddr@ HALI386TLBFlush
+end

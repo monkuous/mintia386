@@ -8,10 +8,6 @@ fn MiPTECreate { vaddr -- pteaddr ok }
     "TODO MiPTECreate\n" KeCrash
 end
 
-fn MiPTESet { pte pteaddr -- }
-    "TODO MiPTESet\n" KeCrash
-end
-
 fn MiPageDirectoryDestroy { process -- }
     "TODO MiPageDirectoryDestroy\n" KeCrash
 end
