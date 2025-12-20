@@ -404,6 +404,10 @@ end
 
 var InitialContext 0
 
+#ifdef I386
+externptr KiI386Tss
+#endif
+
 fn KiThreadSwitch { thread -- }
 	if (DEBUGCHECKS)
 		if (KeIPLCurrentGet IPLDPC ~=)
@@ -452,6 +456,10 @@ fn KiThreadSwitch { thread -- }
 
 	thread@ KeThread_KernelStackTop + @ KeThreadCurrentStackTop!
 	thread@ KeThread_KernelStackTop + @ KETHREADSTACKSIZE - KeThreadCurrentStackBottom!
+
+#ifdef I386
+	thread@ KeThread_KernelStackTop + @ KiI386Tss 4 + !
+#endif
 
 	old@ thread@ KeThread_Context + @ HALCPUContextSwitch
 

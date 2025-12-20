@@ -63,7 +63,8 @@ table Gdt
     0x00000000 0x00000000 // Task
 endtable
 
-buffer Tss Tss_SIZEOF
+buffer KiI386Tss Tss_SIZEOF
+public KiI386Tss
 
 const GDT_SEL_KCODE 0x08
 const GDT_SEL_KDATA 0x10
@@ -83,11 +84,11 @@ fn KiCPUInit { -- }
     fnsection "INIT$text"
 
     // create tss
-    GDT_SEL_KDATA Tss Tss_ss0 + !
-    Tss_SIZEOF Tss Tss_IOMapBaseI + si
+    GDT_SEL_KDATA KiI386Tss Tss_ss0 + !
+    Tss_SIZEOF KiI386Tss Tss_IOMapBaseI + si
 
-    Tss 16 << Tss_SIZEOF 1 - | Gdt GDT_SEL_TASK + !
-    Tss 0xff000000 & Tss 16 >> 0xff & | 0x8900 | Gdt GDT_SEL_TASK 4 + + !
+    KiI386Tss 16 << Tss_SIZEOF 1 - | Gdt GDT_SEL_TASK + !
+    KiI386Tss 0xff000000 & KiI386Tss 16 >> 0xff & | 0x8900 | Gdt GDT_SEL_TASK 4 + + !
 
     // create idt
     auto i
