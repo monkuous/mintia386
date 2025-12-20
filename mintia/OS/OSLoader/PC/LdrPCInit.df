@@ -112,7 +112,7 @@ end
 extern LdrPCHalt { -- }
 
 fn LdrPlatformExit { ret -- }
-    ret@ "bootloader exited with code %i\n" Printf
+    ret@ "\nBootloader exited with code %i\nPress Ctrl+Alt+Del to restart.\n" Printf
     LdrPCHalt
 end
 
@@ -133,7 +133,7 @@ fn LdrPlatformBootDriversLoadAll { -- }
 	LdrBootDevice // device
 	LdrResourceFileParse ok!
 
-	if (ok@ ok@ LDRSTATUS_NOT_FOUND ~=)
+	if (ok@ ok@ LDRSTATUS_NOT_FOUND ~= &&)
 		ok@ "LdrBootDriversLoadAll: couldn't open /mintia/PCHardwareConfig.txt (%i)\n" Printf
 		return
 	end
@@ -184,14 +184,13 @@ fn LdrPlatformStartSystem { -- }
     end
 end
 
+const LDRPCIOBUFFERSIZE 0x10000
+
+buffer LdrPCIOBuffer LDRPCIOBUFFERSIZE
+
 fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread ok }
     auto blocksize
     file@ LdrFile_BlockSize + @ blocksize!
-
-    if (buf@ blocksize@ %)
-        LDRSTATUS_UNALIGNED ok!
-        return
-    end
 
     if (offset@ blocksize@ %)
         LDRSTATUS_UNALIGNED ok!
@@ -243,15 +242,27 @@ fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread 
     block@ tracksize@ / numheads@ / cylinder!
 
     while (count@)
-        if (buf@ 0x100000 >=)
-            LDRSTATUS_IO_ERROR ok!
-            return
-        end
-
         // determine number of blocks to read. a single operation cannot cross a 64K boundary, or a track boundary.
 
         auto segmentcount
         0x10000 buf@ 0xffff & - blocksize@ / segmentcount!
+
+        auto realbuf
+        buf@ realbuf!
+
+        if (buf@ 0x100000 >= segmentcount@ 0 == |)
+            LdrPCIOBuffer realbuf!
+            0x10000 realbuf@ 0xffff & - blocksize@ / segmentcount!
+
+            if (segmentcount@ 0 ==)
+                realbuf@ 0xffff + 0xffff ~ & realbuf!
+                0x10000 blocksize@ / segmentcount!
+            end
+
+            if (segmentcount@ LdrPCIOBuffer LDRPCIOBUFFERSIZE + realbuf@ - blocksize@ / >)
+                LdrPCIOBuffer LDRPCIOBUFFERSIZE + realbuf@ - blocksize@ / segmentcount!
+            end
+        end
 
         auto currentcount
         tracksize@ sector@ - currentcount!
@@ -274,8 +285,8 @@ fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread 
             0x200 count@ | regs@ LdrPCRegs_eax + !
             sector@ 1 + cylinder@ 0xff & 8 << | cylinder@ 0x300 & 2 >> | regs@ LdrPCRegs_ecx + !
             head@ 8 << drive@ | regs@ LdrPCRegs_edx + !
-            buf@ 4 >> regs@ LdrPCRegs_esI + si
-            buf@ 15 & regs@ LdrPCRegs_ebx + !
+            realbuf@ 4 >> regs@ LdrPCRegs_esI + si
+            realbuf@ 15 & regs@ LdrPCRegs_ebx + !
             0x13 regs@ LdrPCCallInterrupt
 
             if (regs@ LdrPCRegs_eflags + @ 1 & ~~)
@@ -293,6 +304,10 @@ fn (LdrReadFunction) private LdrPCReadCHS { length buf offset file -- bytesread 
         if (i@ ~~)
             LDRSTATUS_IO_ERROR ok!
             return
+        end
+
+        if (realbuf@ buf@ ~=)
+            buf@ realbuf@ currentcount@ blocksize@ * memcpy
         end
 
         // advance
@@ -372,15 +387,28 @@ fn (LdrReadFunction) private LdrPCReadLBA { length buf offset file -- bytesread 
     volume@ LdrPCVolume_DriveB + gb drive!
 
     while (count@)
-        if (buf@ 0x100000 >=)
-            LDRSTATUS_IO_ERROR ok!
-            return
-        end
-
         // determine number of blocks to read. a single operation can read at most 127 blocks.
 
         auto currentcount
         count@ currentcount!
+
+        auto realbuf
+        buf@ realbuf!
+
+        if (buf@ 0x100000 blocksize@ - >)
+            LdrPCIOBuffer realbuf!
+
+            if (currentcount@ LDRPCIOBUFFERSIZE blocksize@ / >)
+                LDRPCIOBUFFERSIZE blocksize@ / currentcount!
+            end
+        end else
+            auto maxlowmem
+            0x100000 buf@ - blocksize@ / maxlowmem!
+
+            if (currentcount@ maxlowmem@ >)
+                maxlowmem@ currentcount!
+            end
+        end
 
         if (currentcount@ 127 >)
             127 currentcount!
@@ -390,8 +418,8 @@ fn (LdrReadFunction) private LdrPCReadLBA { length buf offset file -- bytesread 
 
         LdrPCDiskPacket_SIZEOF packet@ LdrPCDiskPacket_PacketSizeI + si
         currentcount@ packet@ LdrPCDiskPacket_BlockCountI + si
-        buf@ 15 & packet@ LdrPCDiskPacket_OffsetI + si
-        buf@ 4 >> packet@ LdrPCDiskPacket_SegmentI + si
+        realbuf@ 15 & packet@ LdrPCDiskPacket_OffsetI + si
+        realbuf@ 4 >> packet@ LdrPCDiskPacket_SegmentI + si
         block@ packet@ LdrPCDiskPacket_Block + !
         0 packet@ LdrPCDiskPacket_Block 4 + + !
 
@@ -404,6 +432,10 @@ fn (LdrReadFunction) private LdrPCReadLBA { length buf offset file -- bytesread 
         if (regs@ LdrPCRegs_eflags + @ 1 &)
             LDRSTATUS_IO_ERROR ok!
             return
+        end
+
+        if (realbuf@ buf@ ~=)
+            buf@ realbuf@ currentcount@ blocksize@ * memcpy
         end
 
         // advance
