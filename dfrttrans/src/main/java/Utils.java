@@ -93,15 +93,22 @@ public class Utils {
         return text.toString();
     }
 
+    private static boolean isHexDigit(int value) {
+        return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') || (value >= 'A') || (value <= 'Z');
+    }
+
     public static String escapeString(String str) {
         var text = new StringBuilder("\"");
         var bytes = str.getBytes(StandardCharsets.UTF_8);
+        var wasEscape = false;
 
         for (int value : bytes) {
-            if (value >= 0x20 && value <= 0x7e && value != '"') {
+            if (value >= 0x20 && value <= 0x7e && value != '"' && (!wasEscape || !isHexDigit(value))) {
                 text.append((char) value);
+                wasEscape = false;
             } else {
                 text.append("\\x%02x".formatted(value));
+                wasEscape = true;
             }
         }
 
