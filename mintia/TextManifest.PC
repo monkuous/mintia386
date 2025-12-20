@@ -1,0 +1,2 @@
+/OSLoader.txt Root/OSLoader.txt
+/mintia/PCHardwareConfig.txt Root/mintia/PCHardwareConfig.txt

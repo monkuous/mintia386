@@ -1,0 +1,189 @@
+//
+// Implements the PC PCI driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALPCI.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+
+#include "<inc>/Kernel.h"
+#include "<inc>/Memory.h"
+
+#include "<ll>/OSDLL/OSStatistics.h"
+#include "<ll>/OSDLL/OSContext.h"
+
+struct PCIDeviceImpl
+    HALPCIDevice_SIZEOF Base
+    1 MultifunctionB
+    4 Next
+endstruct
+
+const PCI_SLOT_MAX 31
+const PCI_FUNC_MAX 7
+
+const PCI_CLASS_BRIDGE 0x604
+
+var PCIDevices 0
+var PCIDevicesTail 0
+
+fn private GetDevice { bus slot function -- device }
+    PCIDevices@ device!
+
+    while (device@)
+        if (device@ HALPCIDevice_BusB + gb bus@ ==
+            device@ HALPCIDevice_SlotB + gb slot@ == &&
+            device@ HALPCIDevice_FunctionB + gb function@ == &&)
+            return
+        end
+
+        device@ PCIDeviceImpl_Next + @ device!
+    end
+end
+
+fn private EnumerateSingle { bus slot function -- multifunction ok }
+    auto device
+    bus@ slot@ function@ GetDevice device!
+
+    if (device@)
+        0 multifunction!
+        0 ok!
+        return
+    end
+
+    auto vendev
+    bus@ slot@ function@ 0 HALPCIReadRawl vendev!
+
+    if (vendev@ 0xffffffff ==
+        vendev@ 0x00000000 == ||
+        vendev@ 0x0000ffff == ||
+        vendev@ 0xffff0000 == ||)
+        0 multifunction!
+        0 ok!
+        return
+    end
+
+    PCIDeviceImpl_SIZEOF // bytes
+    'PCId' // tag
+    CANBLOCK // flags
+    MmAllocWithTag ok! device!
+
+    if (ok@)
+        return
+    end
+
+    0 device@ PCIDeviceImpl_Next + !
+    bus@ device@ HALPCIDevice_BusB + sb
+    slot@ device@ HALPCIDevice_SlotB + sb
+    function@ device@ HALPCIDevice_FunctionB + sb
+
+    vendev@ 0xffff & device@ HALPCIDevice_VendorI + si
+    vendev@ 16 >> device@ HALPCIDevice_DeviceI + si
+
+    bus@ slot@ function@ 8 HALPCIReadRawl vendev!
+
+    vendev@ 16 >> device@ HALPCIDevice_ClassI + si
+    vendev@ 0xff & device@ HALPCIDevice_RevisionB + sb
+    vendev@ 8 >> 0xff & device@ HALPCIDevice_InterfaceB + sb
+
+    bus@ slot@ function@ 0xe HALPCIReadRawb vendev!
+
+    vendev@ 0x80 & ~~ ~~ multifunction!
+    multifunction@ device@ PCIDeviceImpl_MultifunctionB + sb
+
+    if (PCIDevicesTail@)
+        device@ PCIDevicesTail@ PCIDeviceImpl_Next + !
+    end else
+        device@ PCIDevices!
+    end
+
+    device@ PCIDevicesTail!
+
+    device@ HALPCIDevice_InterfaceB + gb
+    device@ HALPCIDevice_RevisionB + gb
+    device@ HALPCIDevice_DeviceI + gi
+    device@ HALPCIDevice_VendorI + gi
+    device@ HALPCIDevice_ClassI + gi
+    function@
+    slot@
+    bus@
+    "PCI: %02x:%02x.%d: %04x: %04x:%04x (rev %02x, prog-if %02x)\n" Printf
+
+    0 ok!
+
+    if (device@ HALPCIDevice_ClassI + gi PCI_CLASS_BRIDGE ==)
+        bus@ slot@ function@ 0x19 HALPCIReadRawb EnumerateBus ok!
+    end
+end
+
+fn private EnumerateBus { bus -- ok }
+    auto slot
+    0 slot!
+
+    while (slot@ PCI_SLOT_MAX <=)
+        auto multifunction
+        bus@ slot@ 0 EnumerateSingle ok! multifunction!
+
+        if (ok@)
+            return
+        end
+
+        if (multifunction@)
+            auto function
+            1 function!
+
+            while (function@ PCI_FUNC_MAX <=)
+                bus@ slot@ function@ EnumerateSingle ok! drop
+
+                if (ok@)
+                    return
+                end
+
+                1 function +=
+            end
+        end
+
+        1 slot +=
+    end
+
+    0 ok!
+end
+
+fn (FDriverInit) DriverInit { stage -- ok }
+	if (stage@ STAGE_THREAD ==)
+        0 EnumerateBus ok!
+
+        if (ok@ ~~)
+            pointerof FindDevice HALPCIEnumerateFunction!
+        end
+    end
+
+    0 ok!
+end
+
+fn (HALPCIEnumerateF) private FindDevice { func vendor devid revision class interface -- count }
+    0 count!
+
+    auto device
+    PCIDevices@ device!
+
+    while (device@)
+        if (vendor@ -1 == vendor@ device@ HALPCIDevice_VendorI + gi == ||
+            devid@ -1 == devid@ device@ HALPCIDevice_DeviceI + gi == || &&
+            revision@ -1 == revision@ device@ HALPCIDevice_RevisionB + gb == || &&
+            class@ -1 == class@ device@ HALPCIDevice_ClassI + gi == || &&
+            interface@ -1 == interface@ device@ HALPCIDevice_InterfaceB + gb == || &&)
+            if (func@)
+                device@ func@ HALPCICallbackF
+            end
+
+            1 count +=
+        end
+
+        device@ PCIDeviceImpl_Next + @ device!
+    end
+end

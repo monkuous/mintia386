@@ -1,3 +1,4 @@
 ARCHITECTURE := i386
 
-KERNELMODULES += BootDrivers/PC/PCBoard
+KERNELMODULES += BootDrivers/PC/PCBoard \
+	BootDrivers/PC/PCI

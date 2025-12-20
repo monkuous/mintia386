@@ -120,6 +120,7 @@ all: $(PROJECT) | $(DISTIMAGE)
 update:
 	$(FSTOOL) udf / ExecManifest.$(PLATFORM) .$(ARCHITECTURE).$(CHKFRE)
 	$(FSTOOL) udf / ExecManifest .$(ARCHITECTURE).$(CHKFRE)
+	$(FSTOOL) udf / TextManifest.$(PLATFORM)
 	$(FSTOOL) ud / TextManifest
 	$(FSTOOL) ud / TextManifestSuffixed $(TEXTSUFFIX)
 
@@ -130,8 +131,11 @@ $(DISTIMAGE): | $(REPO)/build
 	rm -f OS/OSLoader/$(PLATFORM)/bootcode/.new
 	$(FSTOOL) udf / ExecManifest.$(PLATFORM) .$(ARCHITECTURE).$(CHKFRE)
 	$(FSTOOL) udf / ExecManifest .$(ARCHITECTURE).$(CHKFRE)
+	$(FSTOOL) udf / TextManifest.$(PLATFORM)
 	$(FSTOOL) ud / TextManifest
 	$(FSTOOL) ud / TextManifestSuffixed $(TEXTSUFFIX)
+	$(FSTOOL) udf / TextManifest .$(PLATFORM)
+	$(FSTOOL) udf / TextManifestSuffixed $(TEXTSUFFIX).$(PLATFORM)
 
 $(DFLIBBIN): $(SDK)/lib/$(ARCHITECTURE)/dfrt/dfrt.f.o | $(DISTIMAGE)
 	cp $(SDK)/lib/$(ARCHITECTURE)/dfrt/dfrt.f.o $(DFLIBBIN)

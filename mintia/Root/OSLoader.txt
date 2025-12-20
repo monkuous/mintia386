@@ -1,1 +1,1 @@
-ROOTDEV=dks0s
+ROOTDEV=dks0s0

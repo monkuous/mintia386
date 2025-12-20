@@ -127,6 +127,16 @@ fn LdrPlatformBootDriversLoadAll { -- }
 	if (ok@)
 		ok@ "LdrBootDrivers: failed to load PC.sys (%i)\n" LdrCrash
 	end
+
+	pointerof LdrBootDriverCallback // callback
+	"/mintia/PCHardwareConfig.txt" // path
+	LdrBootDevice // device
+	LdrResourceFileParse ok!
+
+	if (ok@ ok@ LDRSTATUS_NOT_FOUND ~=)
+		ok@ "LdrBootDriversLoadAll: couldn't open /mintia/PCHardwareConfig.txt (%i)\n" Printf
+		return
+	end
 end
 
 extern LdrPCCallInterrupt { vec regs -- }
