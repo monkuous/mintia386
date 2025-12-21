@@ -437,19 +437,19 @@ static unsigned long InitializePort(struct AHCIPort *port) {
         blockSize = 512;
     }
 
+    if (blocks * blockSize < blocks || blocks * blockSize >= 0x100000000) {
+        Printf("port %d: truncating disk to 4GB\n", port->index);
+        blocks = 0xffffffffU / blockSize;
+    }
+
     Printf("port %d: %d blocks (block size: %d)\n", port->index, blocks, blockSize);
 
     if (blockSize == 0 || (blockSize & (blockSize - 1)) != 0) {
-        Printf("port %d: block size must be a power of two\n");
+        Printf("port %d: block size must be a power of two\n", port->index);
         return 0;
     }
 
     port->blockLog = __builtin_ctzg(blockSize);
-
-    if ((blocks << port->blockLog) < blocks || (blocks << port->blockLog) >= 0x100000000) {
-        Printf("port %d: disk is >=4GB; this is not supported! skipping.\n");
-        return 0;
-    }
 
     char name[32];
     strcpy("dks", name);
