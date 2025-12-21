@@ -27,7 +27,3 @@ end
 fn KVClearScreen { nativecolor -- }
     "TODO KVClearScreen\n" HALCrash
 end
-
-fn KVQuery { -- w h ok }
-    "TODO KVQuery\n" HALCrash
-end
