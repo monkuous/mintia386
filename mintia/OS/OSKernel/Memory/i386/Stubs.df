@@ -1,9 +1,5 @@
 #include "<inc>/Kernel.h"
 
-fn MiPageDirectoryDestroy { process -- }
-    "TODO MiPageDirectoryDestroy\n" KeCrash
-end
-
 fn MiPageDirectoryReference { process -- }
     "TODO MiPageDirectoryReference\n" KeCrash
 end

@@ -68,3 +68,16 @@ fn MiPageDirectoryCopy { pdir -- }
 
 	ipl@ KeIPLLower
 end
+
+fn MiPageDirectoryDestroy { process -- }
+	fnsection "PAGE$text"
+
+	process@ KeProcess_PageDirectory + MiSystemPageFree
+
+	auto quotablock
+	process@ PsProcess_PagedArea + @ PsProcessPaged_QuotaBlock + @ quotablock!
+
+	1 // charge
+	quotablock@ // quotablock
+	MmQuotaBlockUnchargeWS
+end
