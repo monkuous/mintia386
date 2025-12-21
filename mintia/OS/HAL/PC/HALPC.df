@@ -127,3 +127,15 @@ fn HALPlatformIsComputerOnFire { -- isonfire ok }
     0 isonfire!
     0 ok!
 end
+
+fn HALNvramQuery { query -- ok }
+    STATUS_NOT_SUPPORTED ok!
+end
+
+fn HALNvramSet { delete query -- ok }
+    STATUS_NOT_SUPPORTED ok!
+end
+
+fn HALNvramRead { query index -- nextindex ok }
+    STATUS_NOT_SUPPORTED ok!
+end

@@ -35,15 +35,3 @@ end
 fn KVQuery { -- w h ok }
     "TODO KVQuery\n" HALCrash
 end
-
-fn HALNvramQuery { query -- ok }
-    "TODO HALNvramQuery\n" HALCrash
-end
-
-fn HALNvramSet { delete query -- ok }
-    "TODO HALNvramSet\n" HALCrash
-end
-
-fn HALNvramRead { query index -- nextindex ok }
-    "TODO HALNvramRead\n" HALCrash
-end
