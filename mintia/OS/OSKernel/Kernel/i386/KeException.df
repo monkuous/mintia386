@@ -404,3 +404,87 @@ fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
 	context@ trapframe@ OSContext_eax + !
 	userfunc@ trapframe@ OSContext_edx + !
 end
+
+fn KeThreadContinue { alertable signum context thread -- ok }
+	// Restore context and continue out of a usermode interrupt handler.
+
+	if (signum@ -1 ~=)
+		if (signum@ ~~)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+
+		if (signum@ 32 >=)
+			STATUS_INVALID_ARGUMENT ok!
+
+			return
+		end
+	end
+
+	0 ok!
+
+	auto tf
+	thread@ KeThread_TrapFrame + @ tf!
+
+	auto cs
+	tf@ OSContext_cs + @ cs!
+
+	if (DEBUGCHECKS)
+		if (cs@ I386_CS_USER & ~~)
+			tf@ "KeThreadContinue: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	tf@ // dest
+	context@ // src
+	OSContext_SIZEOF // size
+	memcpy
+
+	// don't modify segments to prevent privilege escalations and faults
+	GDT_SEL_UCODE tf@ OSContext_cs + !
+	GDT_SEL_UDATA tf@ OSContext_ds + !
+	GDT_SEL_UDATA tf@ OSContext_es + !
+	GDT_SEL_UTEB tf@ OSContext_fs + !
+	GDT_SEL_UDATA tf@ OSContext_gs + !
+	GDT_SEL_UDATA tf@ OSContext_ss + !
+
+	// ensure we don't set iopl, vm86, vif, or vip, and that we set if
+	tf@ OSContext_eflags + @ 0x1a3000 ~ & 0x200 | tf@ OSContext_eflags + !
+
+	auto rs
+	HALCPUInterruptDisable rs!
+
+	if (signum@ -1 ~=)
+		// atomically unmask the signal.
+
+		1 signum@ << thread@ KeThread_SignalAcceptMask + |=
+
+		if (thread@ KeThread_SignalAcceptMask + @
+			thread@ KeThread_SignalDeliverOnWaitMask + @ ~ &
+			thread@ KeThread_Signals + @ &)
+
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	if (alertable@)
+		// check for another user APC to deliver, so that they "chain"
+		// properly.
+
+		if (thread@ KeThread_UserAPCListHead + @)
+			1 thread@ KeThread_UserAPCTriggeredB + sb
+			1 thread@ KeThread_UserInterruptB + sb
+		end
+	end
+
+	// Perform a direct return to avoid corrupting the newly-built trapframe
+	// on our way out from the syscall handler, and to make sure we can't
+	// miss any user APCs that get enqueued after we return.
+
+	if (thread@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
+end

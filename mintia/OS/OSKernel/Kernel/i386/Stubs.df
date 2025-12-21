@@ -1,5 +1,0 @@
-#include "<inc>/Kernel.h"
-
-fn KeThreadContinue { alertable signum context thread -- ok }
-    "TODO KeThreadContinue\n" KeCrash
-end
