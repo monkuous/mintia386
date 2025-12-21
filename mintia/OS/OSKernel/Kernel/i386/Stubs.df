@@ -7,7 +7,3 @@ end
 fn KeSafeProbeWrite { dest -- ok }
     "TODO KeSafeProbeWrite\n" KeCrash
 end
-
-fn KeSafeGetByte { src -- byte ok }
-    "TODO KeSafeGetByte\n" KeCrash
-end

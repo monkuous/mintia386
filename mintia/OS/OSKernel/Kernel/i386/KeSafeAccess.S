@@ -259,3 +259,31 @@ KeSafeMemset:
     add $28, %esp
     ret
 .size KeSafeMemset, . - KeSafeMemset
+
+# 8(%esp) - src
+# returns:
+# 0(4(%esp)) - byte
+# 4(4(%esp)) - ok
+.globl KeSafeGetByte
+.type KeSafeGetByte, @function
+KeSafeGetByte:
+    mov 8(%esp), %eax
+    mov 4(%esp), %edx
+
+    cmp $MMHIGHESTUSERADDRESS, %eax
+    jae 1f
+
+    mov (KeThreadCurrent), %ecx
+    movl $SafeGetSystemByteFailure, KeThread_SafeAccessAbort(%ecx)
+
+    movzbl (%eax), %eax
+
+    movl $0, KeThread_SafeAccessAbort(%ecx)
+
+    mov %eax, (%edx)
+    movl $0, 4(%edx)
+    ret $4
+
+1:  movl $STATUS_FAULT, 4(%edx)
+    ret $4
+.size KeSafeGetByte, . - KeSafeGetByte
