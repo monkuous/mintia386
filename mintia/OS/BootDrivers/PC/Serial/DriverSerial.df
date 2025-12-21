@@ -45,10 +45,7 @@ const DLM 1
 const IER_RDA  0x01
 const IER_THRE 0x02
 
-const IIR_PENDING 0x01
-const IIR_ID_MASK 0x06
-const IIR_ID_THRE 0x02
-const IIR_ID_RDA  0x04
+const IIR_NO_PENDING 0x01
 
 const LCR_WORD_8 0x03
 const LCR_DLAB   0x80
@@ -77,19 +74,19 @@ var Port 0
 
 fn (HALInterruptHandler) DriverSerialInterrupt { trapframe int -- }
     auto serialport
-    Port@ serialport!
+    Port@ CoDuplexGetContext serialport!
 
     auto iir
     serialport@ SerialPort_Base + @ IIR + HALPCIInb iir!
 
-    if (iir@ IIR_PENDING ~~)
+    if (iir@ IIR_NO_PENDING &)
         return
     end
 
 	auto dpc
-	serialport@ CoDuplexGetContext SerialPort_DPC + dpc!
+	serialport@ SerialPort_DPC + dpc!
 
-	serialport@ // context1
+	Port@ // context1
 	0 // context2
 	DPCHIGHIMPORTANCE // importance
 	dpc@ // dpc
@@ -170,9 +167,7 @@ fn (KeDPCFunction) DriverSerialDPCFunction { context1 context2 dpc -- }
 	context1@ DriverSerialFlush
 end
 
-fn SerialCreate { name base -- deviceobject }
-	auto serialport
-
+fn SerialCreate { name base -- serialport deviceobject }
 	SerialPort_SIZEOF // bytes
 	'SrlP' // tag
 	0 // flags
