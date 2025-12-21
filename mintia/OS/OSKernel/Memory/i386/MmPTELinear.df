@@ -382,3 +382,18 @@ fn MiPTEUnpin { vaddr ptpfdbe -- }
 
 	ptpfdbe@ MmEvictablePageDereference drop
 end
+
+fn MmVirtualAddressIsValid { vaddr -- isvalid }
+	auto pteaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pteaddr!
+
+	if (pteaddr@@ PTE_V & ~~)
+		0 isvalid!
+
+		return
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	pteaddr@@ PTE_V & isvalid!
+end
