@@ -77,7 +77,7 @@ OSFastMutexTryAcquire:
 
     mov $-1, %eax
     xor %ecx, %ecx
-    lock cmpxchg %ecx, 4(%edx)
+    cmpxchg %ecx, 4(%edx)
     jnz .Ltryacquire_contended
 
     mov %fs:(0), %eax
@@ -100,7 +100,7 @@ OSFastMutexTryAcquire:
 OSInterlockedIncrement:
     mov 4(%esp), %edx
     mov 8(%esp), %eax
-    lock xadd %eax, (%edx)
+    xadd %eax, (%edx)
     ret
 .size OSInterlockedIncrement, . - OSInterlockedIncrement
 

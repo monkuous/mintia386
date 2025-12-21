@@ -5,6 +5,6 @@
 KeInterlockedIncrement:
     mov 4(%esp), %edx
     mov 8(%esp), %eax
-    lock xadd %eax, (%edx)
+    xadd %eax, (%edx)
     ret
 .size KeInterlockedIncrement, . - KeInterlockedIncrement
