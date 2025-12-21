@@ -104,7 +104,7 @@ fn MiPageDirectoryReference { process -- }
 	// re-create recursive mapping of page tables since the physical
 	// address of the page directory may have changed.
 
-	pdir@ PAGESHIFT >> 5 << PTE_V | PTE_W |
+	pdir@ PAGESHIFT >> 12 << PTE_V | PTE_W |
 	qp@ PAGETABLE 22 >> 2 << + !
 
 	qp@ MiUnmapQuickPage
