@@ -6,7 +6,6 @@
 .globl DLLMain
 .type DLLMain, @function
 DLLMain:
-    pushl $0
     sub  $12, %esp
     call DLLMainHL
     nop
