@@ -19,15 +19,15 @@
 #include "../OSDLL.h"
 
 table DLLContextNames
-	"eax"    "edx"
-	"ecx"    "esi"
-	"edi"    "ebx"
-	"ebp"    "cr2"
-	"ds"     "es"
-	"fs"     "gs"
-	"vector" "error"
-	"eip"    "cs"
-	"eflags" "esp"
+	"eax" "edx"
+	"ecx" "esi"
+	"edi" "ebx"
+	"ebp" "cr2"
+	"ds"  "es"
+	"fs"  "gs"
+	"vec" "errc"
+	"eip" "cs"
+	"efl" "esp"
 	"ss"
 endtable
 
