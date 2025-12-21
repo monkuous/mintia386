@@ -32,3 +32,11 @@ DLLMainTrampoline:
     call OSExit
     nop
 .size DLLMainTrampoline, . - DLLMainTrampoline
+
+.globl DLLThreadExit
+.type DLLThreadExit, @function
+DLLThreadExit:
+    mov %eax, (%esp)
+    call OSThreadExit
+    int3
+.size DLLThreadExit, . - DLLThreadExit
