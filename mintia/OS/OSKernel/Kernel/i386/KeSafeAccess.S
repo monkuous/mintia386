@@ -136,3 +136,44 @@ KeSafeStringCopyIn:
     add $28, %esp
     ret
 .size KeSafeStringCopyIn, . - KeSafeStringCopyIn
+
+# 4(%esp) - size
+# 8(%esp) - src
+# 12(%esp) - dest
+# returns:
+# %eax - 0 if success, STATUS_FAULT if fault
+.globl KeSafeCopyIn
+.type KeSafeCopyIn, @function
+KeSafeCopyIn:
+    sub $28, %esp
+    mov %ebx, 12(%esp)
+
+    mov 32(%esp), %eax
+    mov 36(%esp), %edx
+    mov 40(%esp), %ecx
+
+    cmp $MMHIGHESTUSERADDRESS, %edx
+    jae 1f
+
+    mov %eax, 0(%esp)
+    mov %edx, 4(%esp)
+    mov %ecx, 8(%esp)
+
+    mov (KeThreadCurrent), %ebx
+    movl $SafeAccessFailure, KeThread_SafeAccessAbort(%ebx)
+    movl %esp, KeThread_SafeAccessSP(%ebx)
+
+    call _df_memcpy
+
+    movl $0, KeThread_SafeAccessAbort(%ebx)
+
+    xor %eax, %eax
+    mov 12(%esp), %ebx
+    add $28, %esp
+    ret
+
+1:  mov $STATUS_FAULT, %eax
+    mov 12(%esp), %ebx
+    add $28, %esp
+    ret
+.size KeSafeCopyIn, . - KeSafeCopyIn
