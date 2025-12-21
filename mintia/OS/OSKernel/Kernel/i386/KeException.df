@@ -488,3 +488,8 @@ fn KeThreadContinue { alertable signum context thread -- ok }
 
 	tf@ KiContinue
 end
+
+fn HALCPUTrapFrameAbort { ok abort tf -- }
+	ok@ tf@ OSContext_eax + !
+	abort@ tf@ OSContext_eip + !
+end

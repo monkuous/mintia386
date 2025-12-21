@@ -48,10 +48,6 @@ fn HALNvramSet { delete query -- ok }
     "TODO HALNvramSet\n" HALCrash
 end
 
-fn HALCPUTrapFrameAbort { ok abort tf -- }
-    "TODO HALCPUTrapFrameAbort\n" HALCrash
-end
-
 fn HALNvramRead { query index -- nextindex ok }
     "TODO HALNvramRead\n" HALCrash
 end
