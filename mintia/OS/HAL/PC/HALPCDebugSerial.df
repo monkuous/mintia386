@@ -1,0 +1,71 @@
+//
+// Implements a tiny serial driver for the serial-mode HAL console.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<inc>/HALConsole.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALMap.h"
+
+#include "<inc>/HALPCI.h"
+
+const COM_BASE 0x3f8
+
+const RBR 0
+const THR 0
+const IER 1
+const IIR 2
+const LCR 3
+const MCR 4
+const LSR 5
+const MSR 6
+
+const DLL 0
+const DLM 1
+
+const LCR_WORD_8 0x03
+const LCR_DLAB   0x80
+
+const LSR_DR   0x01
+const LSR_THRE 0x20
+
+const MCR_DTR  0x01
+const MCR_RTS  0x02
+const MCR_OUT1 0x04
+const MCR_OUT2 0x08
+
+const CLOCK 115200
+const BAUD_RATE 115200
+
+const DIVISOR (CLOCK BAUD_RATE 2 / + BAUD_RATE /)
+
+var HALPCSerialInited 0
+public HALPCSerialInited
+
+fn private EnsureInit { -- }
+    if (HALPCSerialInited@)
+        return
+    end
+
+    0 COM_BASE IER + HALPCIOutb
+    LCR_DLAB COM_BASE LCR + HALPCIOutb
+    DIVISOR 0xff & COM_BASE DLL + HALPCIOutb
+    DIVISOR 8 >> COM_BASE DLM + HALPCIOutb
+    LCR_WORD_8 COM_BASE LCR + HALPCIOutb
+    MCR_DTR MCR_RTS | MCR_OUT1 | MCR_OUT2 | COM_BASE MCR + HALPCIOutb
+
+    1 HALPCSerialInited!
+end
+
+fn HALPlatformConsolePutc { c -- }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+    EnsureInit
+
+    while (COM_BASE LSR + HALPCIInb LSR_THRE & ~~) end
+    c@ COM_BASE THR + HALPCIOutb
+
+    rs@ HALCPUInterruptRestore
+end
