@@ -4,10 +4,6 @@ fn HALPlatformConsoleGetc { -- c }
     "TODO HALPlatformConsoleGetc\n" HALCrash
 end
 
-fn HALPlatformIsComputerOnFire { -- isonfire ok }
-    "TODO HALPlatformIsComputerOnFire\n" HALCrash
-end
-
 fn KVFontQuery { font -- width height }
     "TODO KVFontQuery\n" HALCrash
 end
