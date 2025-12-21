@@ -633,13 +633,10 @@ fn CoVideoConsoleDrawConstructionStripes { x y w h -- }
 
 	// draw alternating yellow and black stripes
 
-	auto fullstripes
-	w@ h@ / 1 - fullstripes!
-
 	auto color
 	1 color!
 
-	while (fullstripes@)
+	while (1)
 		auto cx
 		x@ cx!
 
@@ -648,20 +645,25 @@ fn CoVideoConsoleDrawConstructionStripes { x y w h -- }
 		h@ cw!
 
 		while (cw@)
-			if (color@)
-				216 KVI8ToNative // nativecolor
-				cx@ // x
-				cy@ // y
-				h@ // w
-				1 // h
-				KVDrawFilledRectangle
-			end else
-				0 KVI8ToNative // nativecolor
-				cx@ // x
-				cy@ // y
-				h@ // w
-				1 // h
-				KVDrawFilledRectangle
+			if (cx@ CoVideoConsoleScreenWidth@ <)
+				auto rw
+				CoVideoConsoleScreenWidth@ cx@ - h@ min rw!
+
+				if (color@)
+					216 KVI8ToNative // nativecolor
+					cx@ // x
+					cy@ // y
+					rw@ // w
+					1 // h
+					KVDrawFilledRectangle
+				end else
+					0 KVI8ToNative // nativecolor
+					cx@ // x
+					cy@ // y
+					rw@ // w
+					1 // h
+					KVDrawFilledRectangle
+				end
 			end
 
 			1 cx -=
@@ -669,36 +671,12 @@ fn CoVideoConsoleDrawConstructionStripes { x y w h -- }
 			1 cw -=
 		end
 
-		color@ ~~ color!
-		h@ x +=
-		1 fullstripes -=
-	end
-
-	// draw the last stripe
-
-	0 cw!
-	y@ cy!
-
-	while (cw@ h@ <)
-		if (color@)
-			216 KVI8ToNative // nativecolor
-			x@ // x
-			cy@ // y
-			cw@ // w
-			1 // h
-			KVDrawFilledRectangle
-		end else
-			0 KVI8ToNative // nativecolor
-			x@ // x
-			cy@ // y
-			cw@ // w
-			1 // h
-			KVDrawFilledRectangle
+		if (x@ CoVideoConsoleScreenWidth@ >=)
+			break
 		end
 
-		1 x -=
-		1 cw +=
-		1 cy +=
+		color@ ~~ color!
+		h@ x +=
 	end
 end
 
