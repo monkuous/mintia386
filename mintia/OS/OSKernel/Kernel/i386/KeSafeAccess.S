@@ -22,11 +22,12 @@ KeSafeProbeSystemByte:
     mov 8(%esp), %eax
     mov 4(%esp), %edx
 
-    movl $SafeGetSystemByteFailure, (KeThreadCurrent + KeThread_SafeAccessAbort)
+    mov (KeThreadCurrent), %ecx
+    movl $SafeGetSystemByteFailure, KeThread_SafeAccessAbort(%ecx)
 
     movzbl (%eax), %eax
 
-    movl $0, (KeThreadCurrent + KeThread_SafeAccessAbort)
+    movl $0, KeThread_SafeAccessAbort(%ecx)
 
     mov %eax, (%edx)
     movl $0, 4(%edx)
@@ -35,7 +36,7 @@ KeSafeProbeSystemByte:
 
 .type SafeGetSystemByteFailure, @function
 SafeGetSystemByteFailure:
-    movl $0, (KeThreadCurrent + KeThread_SafeAccessAbort)
+    movl $0, KeThread_SafeAccessAbort(%ecx)
     mov %eax, 4(%edx)
     ret $4
 .size SafeGetSystemByteFailure, . - SafeGetSystemByteFailure
@@ -52,11 +53,12 @@ SafeGetSystemByteFailure:
 .globl KeSafeCopyOut
 .type KeSafeCopyOut, @function
 KeSafeCopyOut:
-    sub $12, %esp
+    sub $28, %esp
+    mov %ebx, 12(%esp)
 
-    mov 16(%esp), %eax
-    mov 20(%esp), %edx
-    mov 24(%esp), %ecx
+    mov 32(%esp), %eax
+    mov 36(%esp), %edx
+    mov 40(%esp), %ecx
 
     cmp $MMHIGHESTUSERADDRESS, %ecx
     jae 1f
@@ -65,28 +67,32 @@ KeSafeCopyOut:
     mov %edx, 4(%esp)
     mov %ecx, 8(%esp)
 
-    movl $SafeAccessFailure, (KeThreadCurrent + KeThread_SafeAccessAbort)
-    movl %esp, (KeThreadCurrent + KeThread_SafeAccessSP)
+    mov (KeThreadCurrent), %ebx
+    movl $SafeAccessFailure, KeThread_SafeAccessAbort(%ebx)
+    movl %esp, KeThread_SafeAccessSP(%ebx)
 
     call _df_memcpy
 
-    movl $0, (KeThreadCurrent + KeThread_SafeAccessAbort)
+    movl $0, KeThread_SafeAccessAbort(%ebx)
 
     xor %eax, %eax
-    add $12, %esp
+    mov 12(%esp), %ebx
+    add $28, %esp
     ret
 
 1:  mov $STATUS_FAULT_WRITE, %eax
-    add $12, %esp
+    mov 12(%esp), %ebx
+    add $28, %esp
     ret
 .size KeSafeCopyOut, . - KeSafeCopyOut
 
 .type SafeAccessFailure, @function
 SafeAccessFailure:
-    movl $0, (KeThreadCurrent + KeThread_SafeAccessAbort)
-    movl (KeThreadCurrent + KeThread_SafeAccessSP), %esp
+    movl $0, KeThread_SafeAccessAbort(%ebx)
+    movl KeThread_SafeAccessSP(%ebx), %esp
 
-    add $12, %esp
+    mov 12(%esp), %ebx
+    add $28, %esp
     ret
 .size SafeAccessFailure, . - SafeAccessFailure
 
@@ -98,11 +104,12 @@ SafeAccessFailure:
 .globl KeSafeStringCopyIn
 .type KeSafeStringCopyIn, @function
 KeSafeStringCopyIn:
-    sub $12, %esp
+    sub $28, %esp
+    mov %ebx, 12(%esp)
 
-    mov 16(%esp), %eax
-    mov 20(%esp), %edx
-    mov 24(%esp), %ecx
+    mov 32(%esp), %eax
+    mov 36(%esp), %edx
+    mov 40(%esp), %ecx
 
     cmp $MMHIGHESTUSERADDRESS, %ecx
     jae 1f
@@ -111,18 +118,21 @@ KeSafeStringCopyIn:
     mov %edx, 4(%esp)
     mov %ecx, 8(%esp)
 
-    movl $SafeAccessFailure, (KeThreadCurrent + KeThread_SafeAccessAbort)
-    movl %esp, (KeThreadCurrent + KeThread_SafeAccessSP)
+    mov (KeThreadCurrent), %ebx
+    movl $SafeAccessFailure, KeThread_SafeAccessAbort(%ebx)
+    movl %esp, KeThread_SafeAccessSP(%ebx)
 
     call strncpy
 
-    movl $0, (KeThreadCurrent + KeThread_SafeAccessAbort)
+    movl $0, KeThread_SafeAccessAbort(%ebx)
 
     xor %eax, %eax
-    add $12, %esp
+    mov 12(%esp), %ebx
+    add $28, %esp
     ret
 
 1:  mov $STATUS_FAULT, %eax
-    add $12, %esp
+    mov 12(%esp), %ebx
+    add $28, %esp
     ret
 .size KeSafeStringCopyIn, . - KeSafeStringCopyIn
