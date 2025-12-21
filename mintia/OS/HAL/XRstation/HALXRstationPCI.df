@@ -1,0 +1,22 @@
+#include "<inc>/HALPCI.h"
+
+fn HALPCIReadRawb { bus slot func offset -- value }
+    -1 value!
+end
+
+fn HALPCIReadRawi { bus slot func offset -- value }
+    -1 value!
+end
+
+fn HALPCIReadRawl { bus slot func offset -- value }
+    -1 value!
+end
+
+fn HALPCIWriteRawb { bus slot func offset value -- }
+end
+
+fn HALPCIWriteRawi { bus slot func offset value -- }
+end
+
+fn HALPCIWriteRawl { bus slot func offset value -- }
+end
