@@ -69,3 +69,18 @@ fn HALPlatformConsolePutc { c -- }
 
     rs@ HALCPUInterruptRestore
 end
+
+fn HALPlatformConsoleGetc { -- c }
+	auto rs
+	HALCPUInterruptDisable rs!
+
+    EnsureInit
+
+    if (COM_BASE LSR + HALPCIInb LSR_DR &)
+        COM_BASE RBR + HALPCIInb c!
+    end else
+        ERR c!
+    end
+
+    rs@ HALCPUInterruptRestore
+end
