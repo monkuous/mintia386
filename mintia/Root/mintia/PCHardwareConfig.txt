@@ -4,5 +4,6 @@
 # typically based on device tree information.
 # format: drivername
 
+Serial.sys
 PCI.sys
 AHCI.sys
