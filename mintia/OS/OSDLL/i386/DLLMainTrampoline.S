@@ -51,3 +51,15 @@ DLLSignalDispatch:
     call DLLSignalDispatchHL
     int3
 .size DLLSignalDispatch, . - DLLSignalDispatch
+
+.globl DLLAPCDispatch
+.type DLLAPCDispatch, @function
+DLLAPCDispatch:
+    mov %esp, %ecx
+    sub $16, %esp
+    mov %eax, (%esp)
+    mov %ecx, 4(%esp)
+    mov %edx, 8(%esp)
+    call DLLAPCDispatchHL
+    int3
+.size DLLAPCDispatch, . - DLLAPCDispatch
