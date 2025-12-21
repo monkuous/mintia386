@@ -119,6 +119,10 @@ struct PsOSDLLInfo
 	4 TryAcquireEnd
 #endif
 
+#ifdef I386
+	4 ThreadEntryFunction
+#endif
+
 	4 HeadSize
 
 	4 TextOffset

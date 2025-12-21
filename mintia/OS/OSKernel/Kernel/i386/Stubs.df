@@ -8,10 +8,6 @@ fn KeSafeCopyIn { dest src size -- ok }
     "TODO KeSafeCopyIn\n" KeCrash
 end
 
-fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
-    "TODO KeEnterUserMode\n" KeCrash
-end
-
 fn KeSafeStringCopyOut { dest src max -- ok }
     "TODO KeSafeStringCopyOut\n" KeCrash
 end

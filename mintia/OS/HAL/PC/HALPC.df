@@ -27,6 +27,17 @@ public HALPlatformModel
 buffer HALCPUModel 64
 public HALCPUModel
 
+table KiI386Gdt
+    0x00000000 0x00000000 // Null (used as GDTR)
+    0x0000ffff 0x00cf9b00 // Kernel code
+    0x0000ffff 0x00cf9300 // Kernel data
+    0x0000ffff 0x00cffb00 // User code
+    0x0000ffff 0x00cff300 // User data
+    0x0000ffff 0x00cff300 // User TEB
+    0x00000000 0x00000000 // Task
+endtable
+public KiI386Gdt
+
 fn HALPlatformInfo { -- }
 	// we're supposed to print platform info in this function
 

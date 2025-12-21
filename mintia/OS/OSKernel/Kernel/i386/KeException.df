@@ -53,15 +53,7 @@ struct Tss
     2 IOMapBaseI
 endstruct
 
-table Gdt
-    0x00000000 0x00000000 // Null (used as GDTR)
-    0x0000ffff 0x00cf9b00 // Kernel code
-    0x0000ffff 0x00cf9300 // Kernel data
-    0x0000ffff 0x00cffb00 // User code
-    0x0000ffff 0x00cff300 // User data
-    0x0000ffff 0x00cff300 // User TEB
-    0x00000000 0x00000000 // Task
-endtable
+externptr KiI386Gdt
 
 buffer KiI386Tss Tss_SIZEOF
 public KiI386Tss
@@ -87,8 +79,8 @@ fn KiCPUInit { -- }
     GDT_SEL_KDATA KiI386Tss Tss_ss0 + !
     Tss_SIZEOF KiI386Tss Tss_IOMapBaseI + si
 
-    KiI386Tss 16 << Tss_SIZEOF 1 - | Gdt GDT_SEL_TASK + !
-    KiI386Tss 0xff000000 & KiI386Tss 16 >> 0xff & | 0x8900 | Gdt GDT_SEL_TASK 4 + + !
+    KiI386Tss 16 << Tss_SIZEOF 1 - | KiI386Gdt GDT_SEL_TASK + !
+    KiI386Tss 0xff000000 & KiI386Tss 16 >> 0xff & | 0x8900 | KiI386Gdt GDT_SEL_TASK 4 + + !
 
     // create idt
     auto i
@@ -110,8 +102,8 @@ fn KiCPUInit { -- }
     0x6000 [VECTOR_SYSCALL 2 * 1 +]Idt |=
 
     // create gdtr and idtr
-    GDT_SIZE 1 - Gdt!
-    Gdt Gdt 2 + !
+    GDT_SIZE 1 - KiI386Gdt!
+    KiI386Gdt KiI386Gdt 2 + !
 
     auto idtr
     6 alloc idtr!
@@ -119,7 +111,7 @@ fn KiCPUInit { -- }
     Idt idtr@ 2 + !
 
     // set all the cpu registers
-    GDT_SEL_TASK Gdt idtr@ GDT_SEL_KCODE GDT_SEL_KDATA KiI386Init
+    GDT_SEL_TASK KiI386Gdt idtr@ GDT_SEL_KCODE GDT_SEL_KDATA KiI386Init
 end
 
 const VECTOR_DE      0x00
@@ -298,7 +290,7 @@ fn KiI386Trap { cr2 tf -- }
 end
 
 fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
-    kstack@ OSContext_SIZEOF 4 + - ctx!
+    kstack@ OSContext_SIZEOF 12 + - ctx!
 
     ctx@ OSContext_SIZEOF 0 memset
 
@@ -306,7 +298,7 @@ fn HALCPUContextInit { context1 context2 startfunc kstack process -- ctx }
     context1@ ctx@ OSContext_esi + !
     context2@ ctx@ OSContext_edi + !
 
-    pointerof KiThreadTrampoline ctx@ OSContext_SIZEOF + !
+    pointerof KiThreadTrampoline ctx@ OSContext_SIZEOF 8 + + !
 end
 
 extern HALI386MapSwitch { pgtb -- }
@@ -328,4 +320,44 @@ end
 
 fn HALCPUIsUserTrapFrame { tf -- user }
 	tf@ OSContext_cs + @ I386_CS_USER & user!
+end
+
+extern KiContinue { tf -- }
+
+fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
+    // set up teb segment
+
+    teb@ 16 << 0xffff | KiI386Gdt GDT_SEL_UTEB 3 ~ & + !
+    teb@ 0xff000000 & teb@ 16 >> 0xff & | 0xcff300 | KiI386Gdt GDT_SEL_UTEB 3 ~ & 4 + + !
+
+    // make a fake trap frame to return to
+
+    auto tf
+    OSContext_SIZEOF alloc tf!
+
+	tf@ // ptr
+	OSContext_SIZEOF // sz
+	0 // word
+	memset
+
+    exitfunc@ tf@ OSContext_eax + !
+    context@ tf@ OSContext_edx + !
+    entryfunc@ tf@ OSContext_ecx + !
+    GDT_SEL_UDATA tf@ OSContext_ds + !
+    GDT_SEL_UDATA tf@ OSContext_es + !
+    GDT_SEL_UTEB tf@ OSContext_fs + !
+    GDT_SEL_UDATA tf@ OSContext_gs + !
+    PsOSDLLInformation PsOSDLLInfo_ThreadEntryFunction + @ tf@ OSContext_eip + !
+    GDT_SEL_UCODE tf@ OSContext_cs + !
+    2 tf@ OSContext_eflags + !
+    ustack@ tf@ OSContext_esp + !
+    GDT_SEL_UDATA tf@ OSContext_ss + !
+
+	HALCPUInterruptDisable drop
+
+	if (KeThreadCurrent@ KeThread_UserInterruptB + gb)
+		tf@ PsDispatchUsermodeInterrupts
+	end
+
+	tf@ KiContinue
 end

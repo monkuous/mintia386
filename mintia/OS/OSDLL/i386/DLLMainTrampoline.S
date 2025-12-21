@@ -63,3 +63,12 @@ DLLAPCDispatch:
     call DLLAPCDispatchHL
     int3
 .size DLLAPCDispatch, . - DLLAPCDispatch
+
+.globl DLLThreadEntry
+.type DLLThreadEntry, @function
+DLLThreadEntry:
+    sub $20, %esp
+    mov %eax, 0(%esp)
+    mov %edx, 4(%esp)
+    jmp *%ecx
+.size DLLThreadEntry, . - DLLThreadEntry

@@ -69,6 +69,7 @@ KiI386HandleTrap:
     call KiI386Trap
     mov %ebx, %esp
 
+.LtrapReturn:
     movl 0(%esp), %eax
     movl 4(%esp), %edx
     movl 8(%esp), %ecx
@@ -138,6 +139,14 @@ HALI386MapSwitch:
     mov %eax, %cr3
     ret
 .size HALI386MapSwitch, . - HALI386MapSwitch
+
+# 4(%esp) - tf
+.globl KiContinue
+.type KiContinue, @function
+KiContinue:
+    mov 4(%esp), %esp
+    jmp .LtrapReturn
+.size KiContinue, . - KiContinue
 
 .pushsection "INIT$text", "ax", %progbits
 .balign 4

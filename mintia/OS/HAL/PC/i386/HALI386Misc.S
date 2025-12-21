@@ -104,25 +104,35 @@ HALIcacheSynchronize:
 .globl HALCPUContextSwitch
 .type HALCPUContextSwitch, @function
 HALCPUContextSwitch:
-    sub $76, %esp
-
-    mov 80(%esp), %eax
-    mov 84(%esp), %edx
+    sub $84, %esp
 
     mov %esi, 12(%esp)
     mov %edi, 16(%esp)
     mov %ebx, 20(%esp)
     mov %ebp, 24(%esp)
 
-    mov %esp, (%edx)
-    mov %eax, %esp
+    mov (KiI386Gdt + 0x28), %eax
+    mov (KiI386Gdt + 0x2c), %edx
+
+    mov %eax, 76(%esp)
+    mov %edx, 80(%esp)
+
+    mov 92(%esp), %edi
+    mov %esp, (%edi)
+    mov 88(%esp), %esp
 
     mov 12(%esp), %esi
     mov 16(%esp), %edi
     mov 20(%esp), %ebx
     mov 24(%esp), %ebp
 
-    add $76, %esp
+    mov 76(%esp), %eax
+    mov 80(%esp), %edx
+
+    mov %eax, (KiI386Gdt + 0x28)
+    mov %edx, (KiI386Gdt + 0x2c)
+
+    add $84, %esp
     ret
 .size HALCPUContextSwitch, . - HALCPUContextSwitch
 
