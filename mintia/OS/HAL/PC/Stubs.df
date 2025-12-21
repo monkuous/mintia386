@@ -11,7 +11,3 @@ end
 fn KVDrawCharacter { char nativefg nativebg x y font -- }
     "TODO KVDrawCharacter\n" HALCrash
 end
-
-fn KVClearScreen { nativecolor -- }
-    "TODO KVClearScreen\n" HALCrash
-end

@@ -78,6 +78,10 @@ fn KVI8ToNative { i8 -- nativecolor }
 	[i8@ 0xFF &]Palette@ nativecolor!
 end
 
+fn KVClearScreen { nativecolor -- }
+	FBAddr@ FBSize@ nativecolor@ memset
+end
+
 table Palette
 	0x000000
 	0x220022
