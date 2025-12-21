@@ -218,3 +218,44 @@ KeSafeStringCopyOut:
     add $28, %esp
     ret
 .size KeSafeStringCopyOut, . - KeSafeStringCopyOut
+
+# 4(%esp) - word
+# 8(%esp) - sz
+# 12(%esp) - ptr
+# returns:
+# %eax - 0 if success, STATUS_FAULT if fault
+.globl KeSafeMemset
+.type KeSafeMemset, @function
+KeSafeMemset:
+    sub $28, %esp
+    mov %ebx, 12(%esp)
+
+    mov 32(%esp), %eax
+    mov 36(%esp), %edx
+    mov 40(%esp), %ecx
+
+    cmp $MMHIGHESTUSERADDRESS, %ecx
+    jae 1f
+
+    mov %eax, 0(%esp)
+    mov %edx, 4(%esp)
+    mov %ecx, 8(%esp)
+
+    mov (KeThreadCurrent), %ebx
+    movl $SafeAccessFailure, KeThread_SafeAccessAbort(%ebx)
+    movl %esp, KeThread_SafeAccessSP(%ebx)
+
+    call _df_memcpy
+
+    movl $0, KeThread_SafeAccessAbort(%ebx)
+
+    xor %eax, %eax
+    mov 12(%esp), %ebx
+    add $28, %esp
+    ret
+
+1:  mov $STATUS_FAULT_WRITE, %eax
+    mov 12(%esp), %ebx
+    add $28, %esp
+    ret
+.size KeSafeMemset, . - KeSafeMemset

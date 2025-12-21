@@ -11,7 +11,3 @@ end
 fn KeSafeGetByte { src -- byte ok }
     "TODO KeSafeGetByte\n" KeCrash
 end
-
-fn KeSafeMemset { ptr size word -- ok }
-    "TODO KeSafeMemset\n" KeCrash
-end
