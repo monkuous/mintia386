@@ -47,3 +47,24 @@ fn KVQuery { -- w h ok }
 	HALConsoleWidthPix@ w!
 	HALConsoleHeightPix@ h!
 end
+
+fn KVFontGet { name -- font ok }
+	auto rsrc
+	name@ HALResourceByName rsrc!
+
+	if (rsrc@ ~~)
+		-1 ok!
+		return
+	end
+
+	rsrc@ LdrBootResource_Data + @ font!
+
+	if (font@ HCFHeader_Magic + @ HCFMAGIC ~=)
+		-1 ok!
+		return
+	end
+
+	0 ok!
+
+	rsrc@ HALResourceWire
+end
