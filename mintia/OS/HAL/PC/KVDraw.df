@@ -106,6 +106,629 @@ fn KVDrawFilledRectangle { nativecolor x y w h -- }
 	end
 end
 
+fn KVDrawCharacter { char nativefg nativebg x y font -- }
+	auto pitch
+	FBPitch@ pitch!
+
+	auto w
+	font@ HCFHeader_Width + @ w!
+
+	auto h
+	font@ HCFHeader_Height + @ h!
+
+	auto dest
+	y@ pitch@ * x@ 4 * + FBAddr@ + dest!
+
+	auto mod
+	pitch@ w@ 4 * - mod!
+
+	auto bmp
+	w@ 7 + 3 >> h@ * char@ * font@ HCFHeader_SIZEOF + + bmp!
+
+	auto bitd
+	font@ HCFHeader_Flags + @ HCFFLAG_REVERSE & ~~ bitd!
+
+	if (nativefg@ -1 ==)
+		if (nativebg@ -1 ==)
+			return
+		end
+
+		if (bitd@)
+			nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsBG
+		end else
+			nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBG
+		end
+	end elseif (nativebg@ -1 ==)
+		if (bitd@)
+			nativefg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsFG
+		end else
+			nativefg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastFG
+		end
+	end else
+		if (bitd@)
+			nativefg@ nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastBackwardsFGBG
+		end else
+			nativefg@ nativebg@ bmp@ dest@ mod@ w@ h@ KVBlitBitsFastFGBG
+		end
+	end
+end
+
+fn KVDrawEmptyRectangle { nativecolor x y w h -- }
+	auto pitch
+	FBPitch@ pitch!
+
+	auto mod
+	pitch@ mod!
+
+	auto kptr
+	y@ pitch@ * x@ 4 * + FBAddr@ + kptr!
+
+	auto rowsz
+	w@ 4 * rowsz!
+
+	// top edge
+	kptr@ rowsz@ nativecolor@ memset
+
+	if (h@ 1 >)
+		auto bptr
+		h@ 1 - pitch@ * kptr@ + bptr!
+
+		// bottom edge
+		bptr@ rowsz@ nativecolor@ memset
+	end
+
+	auto ptr
+	kptr@ ptr!
+
+	auto hk
+	h@ hk!
+
+	// left edge
+	while (hk@)
+		nativecolor@ ptr@ !
+
+		mod@ ptr +=
+		1 hk -=
+	end
+
+	if (w@ 1 >)
+		kptr@ w@ 1 - 4 * + ptr!
+
+		h@ hk!
+
+		// right edge
+		while (hk@)
+			nativecolor@ ptr@ !
+
+			mod@ ptr +=
+			1 hk -=
+		end
+	end
+end
+
+// mountains of redundant functions for various bit blit ops
+
+fn KVBlitBitsFastFG { fg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@)
+				if (byte@ 128 &)
+					fg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBG { bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 & ~~)
+					bg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 & ~~)
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 & ~~)
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 & ~~)
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 & ~~)
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 & ~~)
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 & ~~)
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 & ~~)
+					bg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ & ~~)
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastFGBG { fg bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 &)
+					fg@ dest@ 28 + !
+				end else
+					bg@ dest@ 28 + !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 24 + !
+				end else
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 20 + !
+				end else
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 16 + !
+				end else
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 12 + !
+				end else
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 8 + !
+				end else
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 4 + !
+				end else
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+			1 j!
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j <<=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+// reversed ones
+
+fn KVBlitBitsFastBackwardsFG { fg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@)
+				if (byte@ 128 &)
+					fg@ dest@ !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBackwardsBG { bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 & ~~)
+					bg@ dest@ !
+				end
+
+				if (byte@ 64 & ~~)
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 & ~~)
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 & ~~)
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 & ~~)
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 & ~~)
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 & ~~)
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 & ~~)
+					bg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ & ~~)
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
+fn KVBlitBitsFastBackwardsFGBG { fg bg ptr dest mod w h -- }
+	auto j
+	auto byte
+
+	auto left
+
+	while (h@)
+		w@ 3 >> left!
+		while (left@)
+			ptr@ gb byte!
+
+			if (byte@ ~~)
+				bg@ dest@ !
+				bg@ dest@ 4 + !
+				bg@ dest@ 8 + !
+				bg@ dest@ 12 + !
+				bg@ dest@ 16 + !
+				bg@ dest@ 20 + !
+				bg@ dest@ 24 + !
+				bg@ dest@ 28 + !
+			end else
+				if (byte@ 128 &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				if (byte@ 64 &)
+					fg@ dest@ 4 + !
+				end else
+					bg@ dest@ 4 + !
+				end
+
+				if (byte@ 32 &)
+					fg@ dest@ 8 + !
+				end else
+					bg@ dest@ 8 + !
+				end
+
+				if (byte@ 16 &)
+					fg@ dest@ 12 + !
+				end else
+					bg@ dest@ 12 + !
+				end
+
+				if (byte@ 8 &)
+					fg@ dest@ 16 + !
+				end else
+					bg@ dest@ 16 + !
+				end
+
+				if (byte@ 4 &)
+					fg@ dest@ 20 + !
+				end else
+					bg@ dest@ 20 + !
+				end
+
+				if (byte@ 2 &)
+					fg@ dest@ 24 + !
+				end else
+					bg@ dest@ 24 + !
+				end
+
+				if (byte@ 1 &)
+					fg@ dest@ 28 + !
+				end else
+					bg@ dest@ 28 + !
+				end
+			end
+
+			32 dest +=
+			1 left -=
+			1 ptr +=
+		end
+
+		w@ 7 & left!
+		if (left@)
+			ptr@ gb byte!
+			1 ptr +=
+
+			if (w@ 3 >>)
+				128 j!
+			end else
+				1 left@ << j!
+			end
+
+			while (left@)
+				if (byte@ j@ &)
+					fg@ dest@ !
+				end else
+					bg@ dest@ !
+				end
+
+				4 dest +=
+				1 j >>=
+				1 left -=
+			end
+		end
+
+		mod@ dest +=
+		1 h -=
+	end
+end
+
 table Palette
 	0x000000
 	0x220022
