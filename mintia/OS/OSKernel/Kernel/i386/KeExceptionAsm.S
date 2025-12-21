@@ -64,6 +64,7 @@ KiI386HandleTrap:
     mov %cr2, %eax
     mov %esp, %ebx
     and $~15, %esp
+    sub $16, %esp
     mov %ebx, (%esp)
     mov %eax, 4(%esp)
     call KiI386Trap
