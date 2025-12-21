@@ -119,8 +119,8 @@ KiThreadTrampoline:
     movl $0, (%esp)
     call KeIPLLower
 
-    mov %esi, (%esp)
-    mov %edi, 4(%esp)
+    mov %edi, (%esp)
+    mov %esi, 4(%esp)
     call *%ebx
     int3
 .size KiThreadTrampoline, . - KiThreadTrampoline
