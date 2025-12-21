@@ -485,3 +485,23 @@ fn MmVirtualtoPTEAddressWithFail { vaddr -- pteaddr ok }
 
 	0 ok!
 end
+
+fn MiPTEInitializePageTable { vaddr pfdbe process -- }
+	auto ptecount
+
+	auto ok
+
+	0 // pri
+	vaddr@ PAGETABLE - PAGESHIFT >> 22 << // vaddr
+	process@ // process
+	MiProcessPTECountGet ok! ptecount!
+
+	if (DEBUGCHECKS)
+		if (ok@)
+			"MiPTEInitializePageTable\n" KeCrash
+		end
+	end
+
+	ptecount@ pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + !
+	0 pfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+end

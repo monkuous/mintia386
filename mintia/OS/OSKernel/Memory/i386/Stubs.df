@@ -1,5 +1,0 @@
-#include "<inc>/Kernel.h"
-
-fn MiPTEInitializePageTable { vaddr pfdbe process -- }
-    "TODO MiPTEInitializePageTable\n" KeCrash
-end
