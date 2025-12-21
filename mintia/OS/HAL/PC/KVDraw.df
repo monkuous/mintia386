@@ -68,3 +68,8 @@ fn KVFontGet { name -- font ok }
 
 	rsrc@ HALResourceWire
 end
+
+fn KVFontQuery { font -- width height }
+	font@ HCFHeader_Width + @ width!
+	font@ HCFHeader_Height + @ height!
+end

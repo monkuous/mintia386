@@ -1,9 +1,5 @@
 #include "<inc>/HALCrash.h"
 
-fn KVFontQuery { font -- width height }
-    "TODO KVFontQuery\n" HALCrash
-end
-
 fn KVDrawEmptyRectangle { nativecolor x y w h -- }
     "TODO KVDrawEmptyRectangle\n" HALCrash
 end
