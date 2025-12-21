@@ -397,3 +397,13 @@ fn MmVirtualAddressIsValid { vaddr -- isvalid }
 
 	pteaddr@@ PTE_V & isvalid!
 end
+
+fn MmVirtualtoPTEAddressUser { vaddr -- pteaddr }
+	if (DEBUGCHECKS)
+		if (vaddr@ MMHIGHESTUSERADDRESS >)
+			vaddr@ "MmVirtualtoPTEAddressUser: used on system address 0x%08x\n" KeCrash
+		end
+	end
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+end

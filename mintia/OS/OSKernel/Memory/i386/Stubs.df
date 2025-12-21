@@ -4,10 +4,6 @@ fn MiPageDirectoryDestroy { process -- }
     "TODO MiPageDirectoryDestroy\n" KeCrash
 end
 
-fn MmVirtualtoPTEAddressUser { vaddr -- pteaddr }
-    "TODO MmVirtualtoPTEAddressUser\n" KeCrash
-end
-
 fn MiPageDirectoryReference { process -- }
     "TODO MiPageDirectoryReference\n" KeCrash
 end
