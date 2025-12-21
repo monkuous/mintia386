@@ -16,10 +16,6 @@ fn MmVirtualtoPTEAddressWithFail { vaddr -- pteaddr ok }
     "TODO MmVirtualtoPTEAddressWithFail\n" KeCrash
 end
 
-fn MiPTEDelete { deref pteaddr -- }
-    "TODO MiPTEDelete\n" KeCrash
-end
-
 fn MiPTEInitializePageTable { vaddr pfdbe process -- }
     "TODO MiPTEInitializePageTable\n" KeCrash
 end
