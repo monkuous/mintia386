@@ -10,10 +10,12 @@ HALCPUHalt:
 .globl HALI386Reset
 .type HALI386Reset, @function
 HALI386Reset:
-    pushl $0
-    pushl $0
-    lidt (%esp)
-1:  int $0x80
-    hlt
+    cli
+1:  in $0x64, %al
+    test $2, %al
+    jnz 1b
+    mov $0xfe, %al
+    out %al, $0x64
+1:  hlt
     jmp 1b
 .size HALI386Reset, . - HALI386Reset
