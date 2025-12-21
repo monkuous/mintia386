@@ -278,3 +278,288 @@ unsigned long KeThreadWaitForObject(struct KeDispatchHeader *object, unsigned lo
 
 unsigned long HALCPUInterruptDisable();
 void HALCPUInterruptRestore(unsigned long rs);
+
+struct IOFile;
+struct IOFileControlBlock;
+struct OSFileInformation;
+struct PsProcess;
+struct OSDirectoryEntry;
+struct IOPacketHeader;
+struct IOPacketLocation;
+
+typedef unsigned long (*IODispatchOpenFunction)(struct IOFile *fileobject, unsigned long access);
+typedef unsigned long (
+    *IODispatchCloseFunction)(struct IOFile *fileobject, unsigned long access, unsigned long lasthandlecount);
+typedef struct IODispatchIOControlFunction {
+    unsigned long ret;
+    unsigned long ok;
+} (*IODispatchIOControlFunction)(unsigned long lastmode, struct IOFileControlBlock *fcb, unsigned long access,
+    unsigned long arg1, unsigned long arg2);
+typedef unsigned long (*IODispatchSetFileFunction)(struct IOFile *fileobject, struct OSFileInformation *info);
+typedef unsigned long (*IODispatchUnlinkFunction)(struct IOFileControlBlock *dirfcb, const char *name);
+typedef struct IODispatchParseFunction {
+    const char *reparsepath;
+    unsigned long ok;
+} (*IODispatchParseFunction)(struct PsProcess *process, struct IOFileControlBlock *initialfcb,
+    struct IOFile *fileobject);
+typedef unsigned long (*IODispatchDeleteObjectFunction)(struct IOFile *object);
+typedef unsigned long (*IODispatchPokeFunction)(struct IOFile *object, unsigned long poketype);
+typedef unsigned long (*IODispatchSetSecurityFunction)(struct IOFile *object, unsigned long permissions,
+    unsigned long gid, unsigned long uid);
+typedef unsigned long (*IODispatchRenameFunction)(struct IOFileControlBlock *destfcb, const char *destname,
+    struct IOFileControlBlock *srcfcb, const char *srcname);
+typedef unsigned long (*IODispatchTruncateFunction)(struct IOFileControlBlock *fcb, unsigned long flags,
+    unsigned long zero, unsigned long newsize);
+typedef struct IODispatchReadDirectoryFunction {
+    unsigned long nextseek;
+    unsigned long readcount;
+    unsigned long ok;
+} (*IODispatchReadDirectoryFunction)(unsigned long lastmode, struct IOFileControlBlock *fcb,
+    struct OSDirectoryEntry *dirent, unsigned long seek, unsigned long count);
+typedef struct IODispatchGetPageAddressFunction {
+    unsigned long phyaddr;
+    unsigned long ok;
+} (*IODispatchGetPageAddressFunction)(struct IOFileControlBlock *fcb, unsigned long offset);
+typedef void (*IODispatchDeleteDeviceObjectFunction)(struct IOFile *object);
+typedef unsigned long (*IODispatchCancelFunction)(struct IOPacketHeader *iop);
+typedef struct IODispatchEnqueueIOPFunction {
+    unsigned long done;
+    unsigned long ok;
+} (*IODispatchEnqueueIOPFunction)(struct IOPacketLocation *iopl);
+
+struct IODevice;
+
+typedef unsigned long (*IOFilesystemFlushFunction)(struct IODevice *fsdeviceobject, unsigned long shutdown);
+
+struct IODispatchTable {
+    IODispatchOpenFunction Open;
+    IODispatchCloseFunction Close;
+    IODispatchIOControlFunction IOControl;
+    IODispatchSetFileFunction SetFile;
+    unsigned long Reserved9;
+    IODispatchUnlinkFunction Unlink;
+    IODispatchParseFunction Parse;
+    unsigned long Reserved4;
+    IOFilesystemFlushFunction Flush;
+    IODispatchDeleteObjectFunction DeleteObject;
+    IODispatchPokeFunction Poke;
+    IODispatchSetSecurityFunction SetSecurity;
+    IODispatchRenameFunction Rename;
+    unsigned long Reserved6;
+    unsigned long Reserved7;
+    IODispatchTruncateFunction Truncate;
+    IODispatchReadDirectoryFunction ReadDirectory;
+    IODispatchGetPageAddressFunction GetPageAddress;
+    IODispatchDeleteDeviceObjectFunction DeleteDeviceObject;
+    unsigned long Reserved5;
+    IODispatchCancelFunction Cancel;
+    IODispatchEnqueueIOPFunction IOPRead;
+    IODispatchEnqueueIOPFunction IOPWrite;
+};
+
+struct IODriver {
+    unsigned long VersionMajor;
+    unsigned long VersionMinor;
+
+    const char *Name;
+    struct IODispatchTable *DispatchTable;
+    unsigned long BlockLog;
+    unsigned long Flags;
+
+    unsigned long Reserved1;
+    unsigned long Reserved2;
+    unsigned long Reserved3;
+    unsigned long Reserved4;
+    unsigned long Reserved5;
+    unsigned long Reserved6;
+    unsigned long Reserved7;
+};
+
+struct IODevice {
+    struct IODriver *Driver;
+    void *Extension;
+    struct IOFileControlBlock *FileControlBlock;
+    unsigned long BlockLog;
+
+    struct IOMount *RelevantMount;
+    unsigned long StackDepth;
+    unsigned long Flags;
+};
+
+#define IOVERSION_MAJOR 1
+#define IOVERSION_MINOR 0
+
+unsigned long IODeviceDeleteFileObject(struct IOFile *object);
+
+#define ACCESS_WORLD_EXEC 1
+#define ACCESS_WORLD_WRITE 2
+#define ACCESS_WORLD_READ 4
+
+#define ACCESS_WORLD_ALL (ACCESS_WORLD_EXEC | ACCESS_WORLD_WRITE | ACCESS_WORLD_READ)
+
+#define ACCESS_GROUP_EXEC 8
+#define ACCESS_GROUP_WRITE 16
+#define ACCESS_GROUP_READ 32
+
+#define ACCESS_GROUP_ALL (ACCESS_GROUP_EXEC | ACCESS_GROUP_WRITE | ACCESS_GROUP_READ)
+
+#define ACCESS_OWNER_EXEC 64
+#define ACCESS_OWNER_WRITE 128
+#define ACCESS_OWNER_READ 256
+
+#define ACCESS_OWNER_ALL (ACCESS_OWNER_EXEC | ACCESS_OWNER_WRITE | ACCESS_OWNER_READ)
+
+#define ACCESS_ALL_ALL (ACCESS_WORLD_ALL | ACCESS_GROUP_ALL | ACCESS_OWNER_ALL)
+
+#define ACCESS_ANY_EXEC (ACCESS_WORLD_EXEC | ACCESS_GROUP_EXEC | ACCESS_OWNER_EXEC)
+
+#define OSFILETYPE_ANY 0
+#define OSFILETYPE_FILE 1
+#define OSFILETYPE_DIRECTORY 2
+#define OSFILETYPE_CHARDEVICE 3
+#define OSFILETYPE_BLOCKDEVICE 4
+
+struct {
+    struct IODevice *deviceobject;
+    unsigned long ok;
+} IODeviceCreate(unsigned long permissions, struct IODriver *driver, unsigned long sizeinbytes, const char *name,
+    unsigned long type, unsigned long extensionsize);
+
+void strcpy(const char *src, char *dest);
+void itoa(char *str, unsigned long n);
+
+struct IOPartitionTable;
+
+typedef struct IOPartitionDetectFunction {
+    struct IOPartitionTable *partitiontable;
+    unsigned long ok;
+} (*IOPartitionDetectFunction)(struct IODevice *devobject);
+
+struct IOPartitionDetectFunction IOPartitionTableRead(struct IODevice *devobject);
+
+struct IOPartitionSupportTable {
+    const char *Name;
+    IOPartitionDetectFunction Detect;
+    unsigned long Reserved1;
+    unsigned long Reserved2;
+};
+
+#define IOVOLUMELABELMAX 64
+
+struct IOPartitionEntry {
+    char Label[IOVOLUMELABELMAX];
+    unsigned long BlockOffset;
+    unsigned long SizeInBlocks;
+    unsigned long ID;
+    unsigned long Reserved1;
+    unsigned long Reserved2;
+    unsigned long Reserved3;
+};
+
+struct IOPartitionTable {
+    struct IOPartitionSupportTable *Format;
+    char Label[IOVOLUMELABELMAX];
+    unsigned long PartitionCount;
+    unsigned long Reserved1;
+    unsigned long Reserved2;
+    unsigned long Reserved3;
+    struct IOPartitionEntry Partitions[];
+};
+
+unsigned long IODeviceSetLabel(struct IODevice *deviceobject, const char *label);
+
+unsigned long strlen(const char *str);
+
+struct IOPacketHeader *IOPacketFromLocation(struct IOPacketLocation *iopl);
+
+typedef unsigned long (*IOPacketCompletionDPCRoutine)(struct IOPacketLocation *iopl);
+
+struct IOPacketLocation {
+    unsigned char FunctionCodeB;
+    unsigned char StackLocationB;
+    unsigned char Alignment1B;
+    unsigned char Alignment2B;
+    unsigned long Flags;
+    unsigned long Context;
+    struct IOFileControlBlock *FileControlBlock;
+    IOPacketCompletionDPCRoutine CompletionRoutine;
+    unsigned long Offset;
+    unsigned long Length;
+    unsigned long OffsetInMDL;
+    struct IOPacketHeader *IOPH;
+};
+
+struct IOFileControlBlock {
+    struct IOiCacheInfoBlock *CacheInfoBlock;
+    struct IODispatchTable *DispatchTable;
+    unsigned long SizeInBytes;
+    unsigned long StackDepth;
+    void *Extension;
+    struct IOFileControlBlockPaged *Paged;
+};
+
+struct IOFileControlBlockPaged {
+    unsigned long Flags;
+    unsigned long FileType;
+    struct IODevice *DeviceObject;
+    void *Extension;
+    struct KeTime AccessTime;
+    struct KeTime ModifyTime;
+    struct KeTime ChangeTime;
+    struct KeTime CreationTime;
+};
+
+struct OSStatusBlock {
+    unsigned long Status;
+    unsigned long Length;
+};
+
+struct IOPacketHeader {
+    unsigned char CurrentStackIndexB;
+    unsigned char StackDepthB;
+    unsigned char PriorityBoostB;
+    unsigned char TypeB;
+    unsigned char IOPFlagsB;
+    unsigned char HeaderSizeB;
+    unsigned short IOCountI;
+    struct OSStatusBlock StatusBlock;
+    unsigned long Timeout;
+    struct MiQuotaBlock *QuotaBlock;
+    struct IOPacketHeader *ParentIOP;
+    struct KeEvent *Event;
+    unsigned long KFlags;
+    struct MmMDLHeader *MDL;
+    struct IOPacketHeader *DeviceQueueNext;
+    struct IOPacketHeader *DeviceQueuePrev;
+};
+
+#define IODISPATCH_READ 21
+#define IODISPATCH_WRITE 22
+
+void IOPacketCompleteLow(struct IOPacketHeader *iop, unsigned long priboost, unsigned long status);
+unsigned long IOPacketLocationVirtualBuffer(struct IOPacketLocation *iopl);
+
+unsigned long min(unsigned long n2, unsigned long n1);
+
+unsigned long MmMDLPin(struct MmMDLHeader *mdl, unsigned long lockforwrite);
+
+void MmMDLFlush(struct MmMDLHeader *mdl, unsigned long dma, unsigned long write, unsigned long length,
+    unsigned long offset);
+
+unsigned long KeIPLRaise(unsigned long newipl);
+void KeIPLLower(unsigned long newipl);
+
+void IOPacketWasEnqueued(struct IOPacketHeader *iop);
+
+unsigned long IOPacketLocationPhysical(struct IOPacketLocation *iopl, unsigned long offset);
+struct IOPacketLocation *IOPacketCurrentLocation(struct IOPacketHeader *iop);
+
+#define IOBOOSTSERIAL 2
+#define IOBOOSTDISK 1
+#define IOBOOSTKEYBOARD 6
+#define IOBOOSTMOUSE 6
+#define IOBOOSTCONHOST 6
+#define IOBOOSTCONSOLE IOBOOSTSERIAL
+#define IOBOOSTPIPE 1
+
+void IOPacketComplete(struct IOPacketHeader *iop, unsigned long priboost, unsigned long status);

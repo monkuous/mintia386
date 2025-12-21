@@ -93,6 +93,12 @@ struct PRDTEntry {
 
 #define ATA_COMMAND_IDENTIFY 0xec
 
+#define ATA_COMMAND_READ_DMA 0xc8
+#define ATA_COMMAND_READ_DMA_EXT 0x25
+
+#define ATA_COMMAND_WRITE_DMA 0xca
+#define ATA_COMMAND_WRITE_DMA_EXT 0x35
+
 struct AHCICommandTable {
     union {
         struct {
@@ -186,12 +192,14 @@ struct AHCIPort {
     struct KeDPC dpc;
     struct KeEvent event;
     unsigned int pendingCommands;
-    unsigned long blocks;
-    unsigned long blockSize;
+    struct IOPacketHeader *currentRequest;
+    struct IOPacketHeader *requestListHead;
+    unsigned long blockLog;
     bool lba48;
 };
 
 static struct AHCIController *Controller;
+static struct IODriver AHCIDriver;
 
 static unsigned int ReadReg(struct AHCIController *controller, unsigned long offset);
 static void WriteReg(struct AHCIController *controller, unsigned long offset, unsigned int value);
@@ -208,9 +216,88 @@ static unsigned long MsElapsed(struct KeTime *time1, struct KeTime *time2) {
     return (time2->SecPart - time1->SecPart) * 1000 - time1->MsPart + time2->MsPart;
 }
 
+static void StartTransfer(struct AHCIPort *port, struct IOPacketLocation *iopl) {
+    unsigned long phyaddr = IOPacketLocationPhysical(iopl, iopl->Context);
+    unsigned long lba = iopl->Offset >> port->blockLog;
+
+    struct AHCICommand *command = port->data->commandList;
+    struct AHCICommandTable *ctbl = port->data->commandTable;
+
+    command->flags = AHCI_COMMAND_REGFIS | AHCI_COMMAND_PREFETCH;
+    command->prdtCount = 1;
+    command->transferredBytes = 0;
+
+    memset(0, sizeof(ctbl->fis), &ctbl->fis);
+    ctbl->fis.reg.type = FIS_REGISTER_H2D;
+    ctbl->fis.reg.flags = FIS_REGISTER_H2D_COMMAND;
+    ctbl->fis.reg.device = 1U << 6; // LBA mode
+
+    if (iopl->FunctionCodeB == IODISPATCH_READ) {
+        ctbl->fis.reg.command = port->lba48 ? ATA_COMMAND_READ_DMA_EXT : ATA_COMMAND_READ_DMA;
+    } else {
+        ctbl->fis.reg.command = port->lba48 ? ATA_COMMAND_WRITE_DMA_EXT : ATA_COMMAND_WRITE_DMA;
+    }
+
+    ctbl->fis.reg.count = 1;
+    ctbl->fis.reg.lba0 = lba >> 0;
+    ctbl->fis.reg.lba1 = lba >> 16;
+    ctbl->fis.reg.lba2 = lba >> 24;
+    ctbl->fis.reg.lba3 = 0;
+
+    ctbl->prdt[0].dataBase = phyaddr;
+    ctbl->prdt[0].count = 1UL << port->blockLog;
+
+    unsigned long rs = HALCPUInterruptDisable();
+    port->pendingCommands = 1;
+    PortWriteReg(port, PxCI, 1);
+    HALCPUInterruptRestore(rs);
+}
+
 static void AHCIDPCFunction(struct KeDPC *dpc, void *, void *) {
     struct AHCIPort *port = (void *)dpc - __builtin_offsetof(struct AHCIPort, dpc);
-    KeEventSignal(&port->event, 0);
+    struct IOPacketHeader *iop = port->currentRequest;
+
+    if (!iop) {
+        KeEventSignal(&port->event, 0);
+        return;
+    }
+
+    struct IOPacketLocation *iopl = IOPacketCurrentLocation(iop);
+
+    iopl->Offset += 1UL << port->blockLog;
+    iopl->Context += 1UL << port->blockLog;
+
+    if (iopl->Context >= iopl->Length) {
+        // complete, start next one
+
+        if (iopl->FunctionCodeB == IODISPATCH_READ) {
+            MmMDLFlush(iop->MDL, 1, 0, iopl->Length, iopl->OffsetInMDL);
+        }
+
+        IOPacketComplete(iop, IOBOOSTDISK, 0);
+
+        iop = port->requestListHead;
+        port->currentRequest = iop;
+
+        if (!iop) {
+            // no pending requests, we are done.
+            return;
+        }
+
+        struct IOPacketHeader *n = iop->DeviceQueueNext;
+
+        port->requestListHead = n;
+
+        if (n) {
+            n->DeviceQueuePrev = nullptr;
+        }
+
+        iopl = IOPacketCurrentLocation(iop);
+    }
+
+    // start next transfer
+
+    StartTransfer(port, iopl);
 }
 
 static void AHCIInterrupt(unsigned long, struct OSContext *) {
@@ -236,7 +323,35 @@ static void AHCIInterrupt(unsigned long, struct OSContext *) {
     }
 }
 
+struct AHCIDisk {
+    struct AHCIPort *port;
+    unsigned long blockOffset;
+    unsigned long blocks;
+};
+
+static unsigned long CreateDisk(struct IODevice **devOut, const char *name, struct AHCIPort *port, unsigned long blocks,
+    unsigned long offset) {
+
+    auto result = IODeviceCreate(ACCESS_OWNER_ALL | ACCESS_GROUP_READ | ACCESS_GROUP_WRITE, &AHCIDriver,
+        blocks << port->blockLog, name, OSFILETYPE_BLOCKDEVICE, sizeof(struct AHCIDisk));
+    if (result.ok) return result.ok;
+    struct IODevice *device = result.deviceobject;
+
+    device->BlockLog = port->blockLog;
+
+    struct AHCIDisk *disk = device->Extension;
+
+    disk->port = port;
+    disk->blockOffset = offset;
+    disk->blocks = blocks;
+
+    *devOut = device;
+    return 0;
+}
+
 static unsigned long InitializePort(struct AHCIPort *port) {
+    static unsigned long disks;
+
     PortWriteReg(port, PxCMD, PortReadReg(port, PxCMD) | PxCMD_ST);
 
     struct KeTime time1, time2;
@@ -297,34 +412,84 @@ static unsigned long InitializePort(struct AHCIPort *port) {
         }
     }
 
+    unsigned long long blocks;
+
     if ((port->data->identify.features1 & IDENTIFY_VALID_MASK) == IDENTIFY_VALID &&
         (port->data->identify.features0 & IDENTIFY_FEATURES0_LBA48) != 0) {
-        if (port->data->identify.lba48_blocks >> 32) {
-            Printf("port %d: truncating size to 0xffffffff blocks\n", port->index);
-            port->blocks = -1;
-        } else {
-            port->blocks = port->data->identify.lba48_blocks;
-        }
-
+        blocks = port->data->identify.lba48_blocks;
         port->lba48 = true;
     } else {
-        port->blocks = port->data->identify.lba28_blocks;
+        blocks = port->data->identify.lba28_blocks;
         port->lba48 = false;
     }
 
-    if (!port->blocks) {
+    if (!blocks) {
         Printf("port %d: device has 0 length\n", port->index);
         return 0;
     }
 
+    unsigned long blockSize;
+
     if ((port->data->identify.lss & IDENTIFY_VALID_MASK) == IDENTIFY_VALID &&
         (port->data->identify.lss & IDENTIFY_LSS_BLOCK_SIZE_VALID) != 0) {
-        port->blockSize = port->data->identify.blockSize * 2;
+        blockSize = port->data->identify.blockSize * 2;
     } else {
-        port->blockSize = 512;
+        blockSize = 512;
     }
 
-    Printf("port %d: %d blocks (block size: %d)\n", port->index, port->blocks, port->blockSize);
+    Printf("port %d: %d blocks (block size: %d)\n", port->index, blocks, blockSize);
+
+    if (blockSize == 0 || (blockSize & (blockSize - 1)) != 0) {
+        Printf("port %d: block size must be a power of two\n");
+        return 0;
+    }
+
+    port->blockLog = __builtin_ctzg(blockSize);
+
+    if ((blocks << port->blockLog) < blocks || (blocks << port->blockLog) >= 0x100000000) {
+        Printf("port %d: disk is >=4GB; this is not supported! skipping.\n");
+        return 0;
+    }
+
+    char name[32];
+    strcpy("dks", name);
+    itoa(name + 3, disks++);
+
+    struct IODevice *device;
+    unsigned long ok = CreateDisk(&device, name, port, blocks, 0);
+    if (ok) return ok;
+
+    auto result = IOPartitionTableRead(device);
+
+    if (result.ok == 0) {
+        struct IOPartitionTable *partitiontable = result.partitiontable;
+
+        if (partitiontable->Label[0]) {
+            IODeviceSetLabel(device, partitiontable->Label);
+        }
+
+        unsigned long len = strlen(name);
+        name[len++] = 's';
+
+        for (unsigned long i = 0; i < partitiontable->PartitionCount; i++) {
+            struct IOPartitionEntry *pte = &partitiontable->Partitions[i];
+            if (pte->BlockOffset > blocks) continue;
+
+            itoa(name + len, pte->ID);
+
+            ok = CreateDisk(&device, name, port, min(pte->SizeInBlocks, blocks - pte->BlockOffset), pte->BlockOffset);
+            if (ok) {
+                Printf("port %d: failed to create device for partition %d (%i)\n", port->index, pte->ID, ok);
+                continue;
+            }
+
+            if (pte->Label[0]) {
+                IODeviceSetLabel(device, pte->Label);
+            }
+        }
+
+        MmFree(partitiontable);
+    }
 
     return 0;
 }
@@ -412,6 +577,9 @@ static unsigned long AHCIInitialize(struct HALPCIDevice *device) {
 
         port->controller = controller;
         port->index = index;
+        port->pendingCommands = 0;
+        port->currentRequest = nullptr;
+        port->requestListHead = nullptr;
 
         alloc = MmAllocWithTag(CANBLOCK | ZEROMUST, 'AHCd', PAGESIZE);
 
@@ -509,3 +677,167 @@ static void WriteReg(struct AHCIController *controller, unsigned long offset, un
     asm volatile("" ::: "memory");
 #endif
 }
+
+static unsigned long PerformTransfer(struct IOPacketLocation *iopl, struct AHCIDisk *disk, unsigned long blockLog) {
+    struct IOPacketHeader *iop = IOPacketFromLocation(iopl);
+
+    // stash the completed length in context
+
+    iopl->Context = 0;
+
+    iopl->Offset += disk->blockOffset << blockLog;
+
+    iop->DeviceQueueNext = nullptr;
+    iop->DeviceQueuePrev = nullptr;
+
+    unsigned long ipl = KeIPLRaise(IPLDPC);
+
+    IOPacketWasEnqueued(iop);
+
+    if (!disk->port->currentRequest) {
+        // no pending requests, start the disk.
+        disk->port->currentRequest = iop;
+        StartTransfer(disk->port, iopl);
+
+        KeIPLLower(ipl);
+        return 0;
+    }
+
+    struct IOPacketHeader *t = disk->port->requestListHead;
+
+    if (!t) {
+        disk->port->requestListHead = iop;
+
+        KeIPLLower(ipl);
+        return 0;
+    }
+
+    // insertion sort our request into the queue.
+
+    struct IOPacketHeader *p = nullptr;
+
+    while (t) {
+        struct IOPacketLocation *otheriopl = IOPacketCurrentLocation(t);
+
+        if (otheriopl->Offset > iopl->Offset) {
+            // this request has a greater offset than ours, so we will insert
+            // ourselves before it on the queue.
+
+            if (p) {
+                p->DeviceQueueNext = iop;
+            } else {
+                disk->port->requestListHead = iop;
+            }
+
+            iop->DeviceQueuePrev = p;
+            iop->DeviceQueueNext = t;
+
+            t->DeviceQueuePrev = iop;
+
+            KeIPLLower(ipl);
+            return 0;
+        }
+
+        p = t;
+        t = t->DeviceQueueNext;
+    }
+
+    // there were no requests on the list with a greater starting offset, so
+    // we go at the tail.
+
+    iop->DeviceQueuePrev = p;
+    p->DeviceQueueNext = iop;
+
+    KeIPLLower(ipl);
+    return 0;
+}
+
+static struct IODispatchEnqueueIOPFunction AHCIOperation(struct IOPacketLocation *iopl, unsigned long writeToHost) {
+    struct IODispatchEnqueueIOPFunction result = {.done = 1};
+
+    struct IOPacketHeader *iop = IOPacketFromLocation(iopl);
+    struct IODevice *devobj = iopl->FileControlBlock->Paged->DeviceObject;
+    struct AHCIDisk *disk = devobj->Extension;
+    unsigned long size = iopl->FileControlBlock->SizeInBytes;
+    unsigned long offset = iopl->Offset;
+
+    if (offset >= size) {
+        if (writeToHost) {
+            iop->StatusBlock.Length = 0;
+        } else {
+            result.ok = STATUS_END_OF_DISK;
+        }
+
+        goto done;
+    }
+
+    unsigned long blockSize = 1UL << devobj->BlockLog;
+
+    if (offset & (blockSize - 1)) {
+        result.ok = STATUS_UNALIGNED;
+        goto done;
+    }
+
+    struct MmMDLHeader *mdl = iop->MDL;
+
+    if (IOPacketLocationVirtualBuffer(iopl) & (blockSize - 1)) {
+        result.ok = STATUS_UNALIGNED;
+        goto done;
+    }
+
+    unsigned long length = min(iopl->Length, size - offset);
+
+    if (length & (blockSize - 1)) {
+        result.ok = STATUS_UNALIGNED;
+        goto done;
+    }
+
+    if (!length) {
+        iop->StatusBlock.Length = 0;
+        goto done;
+    }
+
+    result.ok = MmMDLPin(mdl, writeToHost);
+    if (result.ok) goto done;
+
+    iop->StatusBlock.Length = length;
+    iopl->Length = length;
+
+    if (!writeToHost) {
+        MmMDLFlush(mdl, 1, 1, iopl->Length, iopl->OffsetInMDL);
+    }
+
+    result.ok = PerformTransfer(iopl, disk, devobj->BlockLog);
+    if (!result.ok) return result;
+
+done:
+    IOPacketCompleteLow(iop, 0, result.ok);
+    return result;
+}
+
+static struct IODispatchIOControlFunction AHCIIOControl(unsigned long, struct IOFileControlBlock *, unsigned long,
+    unsigned long, unsigned long) {
+    return (struct IODispatchIOControlFunction){.ok = 0};
+}
+
+static struct IODispatchEnqueueIOPFunction AHCIRead(struct IOPacketLocation *iopl) {
+    return AHCIOperation(iopl, 1);
+}
+
+static struct IODispatchEnqueueIOPFunction AHCIWrite(struct IOPacketLocation *iopl) {
+    return AHCIOperation(iopl, 0);
+}
+
+static struct IODispatchTable AHCIDispatchTable = {
+    .IOControl = AHCIIOControl,
+    .DeleteObject = IODeviceDeleteFileObject,
+    .IOPRead = AHCIRead,
+    .IOPWrite = AHCIWrite,
+};
+
+static struct IODriver AHCIDriver = {
+    .VersionMajor = IOVERSION_MAJOR,
+    .VersionMinor = IOVERSION_MINOR,
+    .Name = "dks",
+    .DispatchTable = &AHCIDispatchTable,
+};
