@@ -1,9 +1,5 @@
 #include "<inc>/Kernel.h"
 
-fn MiPTECreate { vaddr -- pteaddr ok }
-    "TODO MiPTECreate\n" KeCrash
-end
-
 fn MiPageDirectoryDestroy { process -- }
     "TODO MiPageDirectoryDestroy\n" KeCrash
 end

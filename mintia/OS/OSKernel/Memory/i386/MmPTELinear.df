@@ -226,3 +226,110 @@ fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
 		end
 	end
 end
+
+fn MiPTECreate { vaddr -- pteaddr ok }
+	// create an empty PTE for the vaddr in the current process.
+	// if the page table exists, it is referenced. otherwise it is created and
+	// initialized with a refcount of 1.
+	// assumes VAD list mutex is held.
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	0 ok!
+
+	auto process
+	KeProcessCurrent process!
+
+	auto pagemap
+	process@ KeProcess_PageDirectory + @ 12 >> PAGESHIFT << pagemap!
+
+	auto ptecount
+	auto pfdbe
+	auto ptr
+
+	auto pdeaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pdeaddr!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto pde
+	pdeaddr@@ pde!
+
+	if (pde@ ~~)
+		// need to allocate this page table.
+
+		ipl@ KeIPLLower
+
+		0 // pri
+		vaddr@ // vaddr
+		process@ // process
+		MiProcessPTECountGet ok! ptecount!
+
+		if (ok@)
+			return
+		end
+
+		// private page prototype PTEs are physical addresses.
+
+		pagemap@ vaddr@ 22 >> 2 << + // pte
+		ZEROMUST // priority
+		MiAnonymousPageAlloc pfdbe!
+
+		1 ptecount@ si
+		ptecount@ pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + !
+		0 pfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_PRIVATE |
+		pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + sb
+
+		// create a transition PTE so we can fault this new page table in.
+
+		pfdbe@ MmPFDBEToPhysicalAddress PTE_TRANSITION | pdeaddr@!
+
+		pagemap@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ +
+		MmEvictablePageReference drop
+
+		// put the PTE in the process's working set by probing it.
+
+		auto probe
+		pteaddr@@ probe!
+
+		if (DEBUGCHECKS)
+			if (pteaddr@ MmVirtualAddressIsValid ~~)
+				probe@ pteaddr@ "MiPTECreate: invalid pteaddr %x %x\n" KeCrash
+			end
+
+			if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi 2 ~=)
+				pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi "MiPTECreate: wrong refcount %d\n" KeCrash
+			end
+		end
+	end else
+		if (DEBUGCHECKS)
+			if (pde@ PTE_V & ~~)
+				"MiPTECreate: PDE not valid\n" KeCrash
+			end
+		end
+
+		pde@ 12 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pfdbe!
+
+		if (DEBUGCHECKS)
+			if (pfdbe@ MiPageFrameEntryEvictable_ReferencesI + gi ~~)
+				"MiPTECreate: page table had no references\n" KeCrash
+			end
+		end
+
+		pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ gi 1 +
+		pfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ si
+
+		pfdbe@ MmEvictablePageReference drop
+
+		ipl@ KeIPLLower
+	end
+
+	if (pfdbe@ MiPageFrameEntryEvictable_EvictionFlagsB + gb MMEVICTFLAG_MODIFIED & ~~)
+		pfdbe@ // pfdbe
+		0 // process
+		MmEvictablePageModify
+	end
+end
