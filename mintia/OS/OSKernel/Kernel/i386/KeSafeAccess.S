@@ -287,3 +287,35 @@ KeSafeGetByte:
 1:  movl $STATUS_FAULT, 4(%edx)
     ret $4
 .size KeSafeGetByte, . - KeSafeGetByte
+
+# 4(%esp) - dest
+# returns:
+# %eax - ok
+.globl KeSafeProbeWrite
+.type KeSafeProbeWrite, @function
+KeSafeProbeWrite:
+    mov 4(%esp), %edx
+
+    cmp $MMHIGHESTUSERADDRESS, %eax
+    jae 1f
+
+    mov (KeThreadCurrent), %ecx
+    movl $SafeStoreByteFailure, KeThread_SafeAccessAbort(%ecx)
+
+    mov (%edx), %al
+    mov %al, (%edx)
+
+    movl $0, KeThread_SafeAccessAbort(%ecx)
+
+    xor %eax, %eax
+    ret
+
+1:  movl $STATUS_FAULT_WRITE, %eax
+    ret
+.size KeSafeProbeWrite, . - KeSafeProbeWrite
+
+.type SafeStoreByteFailure, @function
+SafeStoreByteFailure:
+    movl $0, KeThread_SafeAccessAbort(%ecx)
+    ret
+.size SafeStoreByteFailure, . - SafeStoreByteFailure
