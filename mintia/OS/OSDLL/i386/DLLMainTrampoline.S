@@ -40,3 +40,14 @@ DLLThreadExit:
     call OSThreadExit
     int3
 .size DLLThreadExit, . - DLLThreadExit
+
+.globl DLLSignalDispatch
+.type DLLSignalDispatch, @function
+DLLSignalDispatch:
+    mov %esp, %ecx
+    sub $16, %esp
+    mov %eax, (%esp)
+    mov %ecx, 4(%esp)
+    call DLLSignalDispatchHL
+    int3
+.size DLLSignalDispatch, . - DLLSignalDispatch
