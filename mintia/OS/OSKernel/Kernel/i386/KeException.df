@@ -361,3 +361,46 @@ fn KeEnterUserMode { teb exitfunc context ustack entryfunc -- }
 
 	tf@ KiContinue
 end
+
+fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
+	// Cause a usermode interrupt of the current thread by saving the context
+	// on the user stack and redirecting the trapframe to the usermode
+	// interrupt handler. This is used to implement signal and APC dispatch.
+
+	auto usp
+	trapframe@ OSContext_esp + @ usp!
+
+	if (DEBUGCHECKS)
+		if (trapframe@ OSContext_cs + @ I386_CS_USER & ~~)
+			trapframe@ "KiInterruptUsermode: not usermode trapframe %x\n" KeCrash
+		end
+	end
+
+	OSContext_SIZEOF usp -=
+
+	auto ok
+	usp@ // dest
+	trapframe@ // src
+	OSContext_SIZEOF // sz
+	KeSafeCopyOut ok!
+
+	if (ok@)
+		// Failed to copy out context frame, this is fatal to the entire
+		// process.
+
+		// TODO automatically switch to an overflow stack?
+
+		OSSIGNAL_KILL // signal
+		KeThreadCurrent@ KeThread_Process + @ // process
+		KeProcessSignal drop
+
+		return
+	end
+
+	// Redirect the trapframe to the usermode interrupt handler.
+
+	usp@ trapframe@ OSContext_esp + !
+	dispatchfunc@ trapframe@ OSContext_eip + !
+	context@ trapframe@ OSContext_eax + !
+	userfunc@ trapframe@ OSContext_edx + !
+end

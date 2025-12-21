@@ -16,10 +16,6 @@ fn KeSafeGetByte { src -- byte ok }
     "TODO KeSafeGetByte\n" KeCrash
 end
 
-fn KiInterruptUsermode { context userfunc dispatchfunc trapframe -- }
-    "TODO KiInterruptUsermode\n" KeCrash
-end
-
 fn KeSafeMemset { ptr size word -- ok }
     "TODO KeSafeMemset\n" KeCrash
 end
