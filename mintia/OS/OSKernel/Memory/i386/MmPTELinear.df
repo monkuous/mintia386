@@ -55,7 +55,7 @@ fn MiPTEUpdate { phyaddr flags pteaddr -- oldphyaddr oldflags }
 	auto vaddr
 	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
 
-	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+	if (vaddr@ MMLOWESTSYSTEMADDRESS < vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < && ||)
 		// this is a user page.
 
 		if (flags@ PTE_V &)
@@ -150,7 +150,7 @@ fn MiPTESet { pte pteaddr -- }
 	auto vaddr
 	pteaddr@ PAGETABLE - 2 >> PAGESHIFT << vaddr!
 
-	if (vaddr@ MMLOWESTSYSTEMADDRESS <)
+	if (vaddr@ MMLOWESTSYSTEMADDRESS < vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < && ||)
 		// this is a user page.
 		if (pte@ PTE_V &)
 			PTE_U pte |=
