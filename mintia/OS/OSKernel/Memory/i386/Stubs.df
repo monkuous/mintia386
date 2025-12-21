@@ -1,9 +1,5 @@
 #include "<inc>/Kernel.h"
 
-fn MiPageDirectoryAlloc { process -- ok }
-    "TODO MiPageDirectoryAlloc\n" KeCrash
-end
-
 fn MiPTECreate { vaddr -- pteaddr ok }
     "TODO MiPTECreate\n" KeCrash
 end
