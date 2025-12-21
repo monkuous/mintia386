@@ -28,10 +28,6 @@ fn MmVirtualAddressIsValid { vaddr -- isvalid }
     "TODO MmVirtualAddressIsValid\n" KeCrash
 end
 
-fn MiPTESetDirty { pteaddr -- }
-    "TODO MiPTESetDirty\n" KeCrash
-end
-
 fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
     "TODO MiPTEPin\n" KeCrash
 end

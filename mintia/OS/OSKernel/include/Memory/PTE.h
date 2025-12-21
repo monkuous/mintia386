@@ -90,7 +90,7 @@ const MMGUARDPTE        0xFFFF0010
 
 const PTE_V  1  // valid
 const PTE_W  2  // writable
-const PTE_D  64 // dirty
+const PTE_D  2  // dirty
 const PTE_U  4  // user
 const PTE_NC 24 // non-cacheable
 const PTE_WC 8  // writecombine

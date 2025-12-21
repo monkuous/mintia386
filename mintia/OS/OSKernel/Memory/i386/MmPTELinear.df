@@ -161,3 +161,9 @@ fn MiPTESet { pte pteaddr -- }
 
 	vaddr@ HALI386TLBFlush
 end
+
+fn MiPTESetDirty { pteaddr -- }
+	pteaddr@@ PTE_D | // pte
+	pteaddr@ // pteaddr
+	MiPTESet
+end
