@@ -1,5 +1,5 @@
 //
-// Implements page table entry (PTE) management for the xr17032 architecture.
+// Implements page table entry (PTE) management for the i386 architecture.
 //
 
 #include "<df>/dragonfruit.h"
