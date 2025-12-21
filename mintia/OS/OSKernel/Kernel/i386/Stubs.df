@@ -4,10 +4,6 @@ fn KeThreadContinue { alertable signum context thread -- ok }
     "TODO KeThreadContinue\n" KeCrash
 end
 
-fn KeSafeStringCopyOut { dest src max -- ok }
-    "TODO KeSafeStringCopyOut\n" KeCrash
-end
-
 fn KeSafeProbeWrite { dest -- ok }
     "TODO KeSafeProbeWrite\n" KeCrash
 end
