@@ -333,3 +333,52 @@ fn MiPTECreate { vaddr -- pteaddr ok }
 		MmEvictablePageModify
 	end
 end
+
+fn MiPTEUnpin { vaddr ptpfdbe -- }
+	if (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+		return
+	end
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto oldcount
+	ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + @ oldcount!
+
+	if (DEBUGCHECKS)
+		if (oldcount@ ~~)
+			"MiPTEUnpin: underflow\n" KeCrash
+		end
+	end
+
+	oldcount@ 1 - ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + !
+
+	if (oldcount@ 1 ==)
+		auto ptecount
+		ptpfdbe@ MiPageFrameEntryPageTable_PTECountTableEntry + @ ptecount!
+
+		if (ptecount@ gi ~~)
+			// perform deferred deletion of page table
+
+			auto pagemap
+			ptpfdbe@ MiPageFrameEntryAnonymous_PrototypePTE + @ pagemap!
+
+			auto pdpfdbe
+			pagemap@ PAGESHIFT >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + pdpfdbe!
+
+			// force the page table out from the process working set.
+
+			vaddr@ 22 >> PAGESHIFT << PAGETABLE + // vaddr
+			ptpfdbe@ // pfdbe
+			MiWorkingSetEntryForceOut
+
+			ptpfdbe@ MiAnonymousPageDelete
+
+			pdpfdbe@ MmEvictablePageDereference drop
+		end
+	end
+
+	ipl@ KeIPLLower
+
+	ptpfdbe@ MmEvictablePageDereference drop
+end
