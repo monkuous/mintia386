@@ -24,10 +24,6 @@ fn MmVirtualAddressIsValid { vaddr -- isvalid }
     "TODO MmVirtualAddressIsValid\n" KeCrash
 end
 
-fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
-    "TODO MiPTEPin\n" KeCrash
-end
-
 fn MiPTEUnpin { vaddr ptpfdbe -- }
     "TODO MiPTEUnpin\n" KeCrash
 end

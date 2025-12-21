@@ -167,3 +167,62 @@ fn MiPTESetDirty { pteaddr -- }
 	pteaddr@ // pteaddr
 	MiPTESet
 end
+
+fn MiPTEPin { vaddr -- ptpfdbe pteaddr }
+	// pin the page table containing the PTE for the given virtual address,
+	// and return the PTE address.
+
+	vaddr@ PAGESHIFT >> 2 << PAGETABLE + pteaddr!
+
+	if (vaddr@ PAGETABLE >= vaddr@ SYSPAGETABLE < &&)
+		pteaddr@ MmVirtualToPFDBE ptpfdbe!
+
+		return
+	end
+
+	auto ptecount
+	auto pfdbe
+	auto ptr
+
+	auto pdeaddr
+	vaddr@ 22 >> 2 << PAGEDIRECTORY + pdeaddr!
+
+	while (1)
+		// loop until the page table is valid.
+
+		auto ipl
+		IPLDPC KeIPLRaise ipl!
+
+		auto pde
+		pdeaddr@@ pde!
+
+		if (pde@ ~~)
+			// no such page table.
+
+			ipl@ KeIPLLower
+
+			0 ptpfdbe!
+
+			return
+		end elseif (pde@ PTE_V &)
+			// the page table is valid. pin it and return it.
+
+			pde@ 12 >> MiPageFrameEntry_SIZEOF * MiPageFrameDatabase@ + ptpfdbe!
+
+			ptpfdbe@ MmEvictablePageReference drop
+			1 ptpfdbe@ MiPageFrameEntryPageTable_HoldCount + +=
+
+			ipl@ KeIPLLower
+
+			return
+		end else
+			ipl@ KeIPLLower
+
+			// the page table is invalid. touch it to cause it to be demand-
+			// -paged in.
+
+			auto probe
+			pteaddr@@ probe!
+		end
+	end
+end
