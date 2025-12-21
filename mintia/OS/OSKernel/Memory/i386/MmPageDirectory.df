@@ -85,3 +85,29 @@ end
 fn MiPageDirectoryDereference { process -- }
 	process@ KeProcess_PageDirectory + MiSystemPageOut
 end
+
+fn MiPageDirectoryReference { process -- }
+	auto pfdbe
+	PAGEDIRECTORY // vaddr
+	process@ KeProcess_PageDirectory + // pteaddr
+	MiSystemPageIn pfdbe!
+
+	auto pdir
+	pfdbe@ MmPFDBEToPhysicalAddress pdir!
+
+	auto ipl
+	IPLDPC KeIPLRaise ipl!
+
+	auto qp
+	pdir@ MiMapQuickPage qp!
+
+	// re-create recursive mapping of page tables since the physical
+	// address of the page directory may have changed.
+
+	pdir@ PAGESHIFT >> 5 << PTE_V | PTE_W |
+	qp@ PAGETABLE 22 >> 2 << + !
+
+	qp@ MiUnmapQuickPage
+
+	ipl@ KeIPLLower
+end
