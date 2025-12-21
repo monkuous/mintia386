@@ -4,10 +4,6 @@ fn KVDrawEmptyRectangle { nativecolor x y w h -- }
     "TODO KVDrawEmptyRectangle\n" HALCrash
 end
 
-fn KVDrawFilledRectangle { nativecolor x y w h -- }
-    "TODO KVDrawFilledRectangle\n" HALCrash
-end
-
 fn KVDrawCharacter { char nativefg nativebg x y font -- }
     "TODO KVDrawCharacter\n" HALCrash
 end

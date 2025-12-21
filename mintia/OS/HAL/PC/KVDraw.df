@@ -82,6 +82,30 @@ fn KVClearScreen { nativecolor -- }
 	FBAddr@ FBSize@ nativecolor@ memset
 end
 
+fn KVDrawFilledRectangle { nativecolor x y w h -- }
+	auto row
+	0 row!
+
+	auto pitch
+	FBPitch@ pitch!
+
+	auto fb
+	FBAddr@ fb!
+
+	auto ptr
+	y@ pitch@ * x@ 4 * + fb@ + ptr!
+
+	auto rowsz
+	w@ 4 * rowsz!
+
+	while (row@ h@ <)
+		ptr@ rowsz@ nativecolor@ memset
+
+		1 row +=
+		pitch@ ptr +=
+	end
+end
+
 table Palette
 	0x000000
 	0x220022
