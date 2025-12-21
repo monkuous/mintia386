@@ -4,10 +4,6 @@ fn MiPageDirectoryReference { process -- }
     "TODO MiPageDirectoryReference\n" KeCrash
 end
 
-fn MiPageDirectoryDereference { process -- }
-    "TODO MiPageDirectoryDereference\n" KeCrash
-end
-
 fn MiPTEInitializePageTable { vaddr pfdbe process -- }
     "TODO MiPTEInitializePageTable\n" KeCrash
 end
