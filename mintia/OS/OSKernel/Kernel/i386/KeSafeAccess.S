@@ -111,7 +111,7 @@ KeSafeStringCopyIn:
     mov 36(%esp), %edx
     mov 40(%esp), %ecx
 
-    cmp $MMHIGHESTUSERADDRESS, %ecx
+    cmp $MMHIGHESTUSERADDRESS, %edx
     jae 1f
 
     mov %eax, 0(%esp)
