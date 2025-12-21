@@ -142,9 +142,9 @@ _df_memcpy:
     jmp .Lmemcpy_unaligned
 
 .Lmemcpy_zerosize:
-    pop %ebx
     pop %edi
     pop %esi
+    pop %ebx
     ret
 
 .Lmemcpy_aligned_with_eachother:
@@ -501,9 +501,9 @@ memcpy_backwards:
     jmp .Lmemcpyb_unaligned
 
 .Lmemcpyb_zerosize:
-    pop %ebx
     pop %edi
     pop %esi
+    pop %ebx
     ret
 
 .Lmemcpyb_aligned_with_eachother:
