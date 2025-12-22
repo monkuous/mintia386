@@ -200,10 +200,10 @@ ProcessBootOptions:
     mov $BootPrompt, %si
     call Message
 
-    # Allow user to force the boot prompt by holding a modifier key
+    # Allow user to force the boot prompt by holding shift
     mov $2, %ah
     int $0x16
-    test $0xf, %al
+    test $3, %al
     jnz .LselectOption
 
     cmp $1, %bp
