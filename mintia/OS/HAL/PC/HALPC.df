@@ -109,9 +109,9 @@ fn HALPlatformExit { ret mode -- }
 	// MUST BE CALLED WITH INTERRUPTS DISABLED
 
 	if (mode@ OSSHUTDOWN_HALT ==)
-        while (1)
-            HALCPUHalt
-        end
+        //while (1)
+        //    HALCPUHalt
+        //end
 	end elseif (mode@ OSSHUTDOWN_REBOOT ==)
 		HALI386Reset
 	end else
