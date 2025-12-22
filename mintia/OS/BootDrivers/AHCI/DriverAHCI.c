@@ -246,7 +246,7 @@ static void StartTransfer(struct AHCIPort *port, struct IOPacketLocation *iopl) 
     ctbl->fis.reg.lba3 = 0;
 
     ctbl->prdt[0].dataBase = phyaddr;
-    ctbl->prdt[0].count = 1UL << port->blockLog;
+    ctbl->prdt[0].count = (1UL << port->blockLog) - 1;
 
     unsigned long rs = HALCPUInterruptDisable();
     port->pendingCommands = 1;
@@ -313,7 +313,7 @@ static void AHCIInterrupt(unsigned long, struct OSContext *) {
         unsigned int pstatus = PortReadReg(port, PxIS);
         PortWriteReg(port, PxIS, pstatus);
 
-        if (pstatus & PxI_ERROR) KeCrash("AHCI: error on port %d (0x%x)\n", port->index, pstatus);
+        if (pstatus & PxI_ERROR) KeCrash("AHCI: error on port %d (0x%x, 0x%x)\n", port->index, pstatus, PortReadReg(port, PxSERR));
 
         unsigned long pending = PortReadReg(port, PxCI);
         unsigned long completed = port->pendingCommands & ~pending;
