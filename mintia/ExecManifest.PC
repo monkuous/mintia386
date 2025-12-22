@@ -8,3 +8,4 @@
 /mintia/BootDrivers/PCI.sys Root/mintia/BootDrivers/PCI.sys 493
 /mintia/BootDrivers/AHCI.sys Root/mintia/BootDrivers/AHCI.sys 493
 /mintia/BootDrivers/Serial.sys Root/mintia/BootDrivers/Serial.sys 493
+/mintia/BootDrivers/PS2.sys Root/mintia/BootDrivers/PS2.sys 493

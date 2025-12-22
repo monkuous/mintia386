@@ -1,0 +1,508 @@
+//
+// Implements the PS/2 driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALMap.h"
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALPCI.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Console.h"
+
+const PS2PORTDATA   0x60
+const PS2PORTSTATUS 0x64
+const PS2PORTCMD    0x64
+
+const PS2IRQPORT1   1
+const PS2IRQPORT2   12
+
+const PS2STATUS_OUTPUT_FULL 0x01
+const PS2STATUS_INPUT_FULL  0x02
+
+const PS2CMD_READ_CONFIG    0x20
+const PS2CMD_WRITE_CONFIG   0x60
+const PS2CMD_DISABLE_PORT_2 0xa7
+const PS2CMD_ENABLE_PORT_2  0xa8
+const PS2CMD_TEST_PORT_2    0xa9
+const PS2CMD_SELF_TEST      0xaa
+const PS2CMD_TEST_PORT_1    0xab
+const PS2CMD_DISABLE_PORT_1 0xad
+const PS2CMD_ENABLE_PORT_1  0xae
+const PS2CMD_SEND_TO_PORT_2 0xd4
+
+const PS2CFG_IRQ_PORT_1 0x01
+const PS2CFG_IRQ_PORT_2 0x02
+const PS2CFG_CLK_PORT_2 0x20
+const PS2CFG_TRANSLATE  0x40
+
+const PS2TEST_OK_MAGIC 0x55
+
+const DATABUFFERSIZE 128
+
+struct PS2Device
+    DATABUFFERSIZE Data
+
+    4 ReadIndex
+    4 WriteIndex
+    4 Remaining
+
+    KeDPC_SIZEOF DPC
+    4 Context
+
+    4 ResponseBuffer
+    1 AckB
+    1 CommandBytesB
+endstruct
+
+buffer Port1Device PS2Device_SIZEOF
+buffer Port2Device PS2Device_SIZEOF
+
+fn private MaybeReadByte { -- ok value }
+    if (PS2PORTSTATUS HALPCIInb PS2STATUS_OUTPUT_FULL &)
+        PS2PORTDATA HALPCIInb value!
+        0 ok!
+    end else
+        -1 ok!
+    end
+end
+
+fn private ReadByte { -- value }
+    while (PS2PORTSTATUS HALPCIInb PS2STATUS_OUTPUT_FULL & ~~) end
+    PS2PORTDATA HALPCIInb value!
+end
+
+fn private WriteByte { value -- }
+    while (PS2PORTSTATUS HALPCIInb PS2STATUS_INPUT_FULL &) end
+    value@ PS2PORTDATA HALPCIOutb
+end
+
+fn private WriteCommand { cmd -- }
+    while (PS2PORTSTATUS HALPCIInb PS2STATUS_INPUT_FULL &) end
+    cmd@ PS2PORTCMD HALPCIOutb
+end
+
+fn (FDriverInit) DriverInit { stage -- ok }
+    0 ok!
+
+	if (stage@ STAGE_THREAD ==)
+        PS2CMD_DISABLE_PORT_1 WriteCommand
+        PS2CMD_DISABLE_PORT_2 WriteCommand
+
+        MaybeReadByte drop drop // flush output buffer
+
+        auto config
+        PS2CMD_READ_CONFIG WriteCommand
+        ReadByte PS2CFG_IRQ_PORT_1 PS2CFG_IRQ_PORT_2 | PS2CFG_TRANSLATE | ~ & config!
+
+        PS2CMD_SELF_TEST WriteCommand
+
+        if (ReadByte PS2TEST_OK_MAGIC ~=)
+            "Controller self test failed\n" "PS2" HALLog
+            return
+        end
+
+        PS2CMD_WRITE_CONFIG WriteCommand
+        config@ WriteByte
+
+        auto port1
+        auto port2
+        1 port1!
+        0 port2!
+
+        PS2CMD_ENABLE_PORT_2 WriteCommand
+        PS2CMD_READ_CONFIG WriteCommand
+        ReadByte PS2CFG_CLK_PORT_2 & ~~ port2!
+
+        if (port2@)
+            PS2CMD_DISABLE_PORT_2 WriteCommand
+
+            PS2CMD_READ_CONFIG WriteCommand
+            ReadByte PS2CFG_IRQ_PORT_2 ~ & config!
+            PS2CMD_WRITE_CONFIG WriteCommand
+            config@ WriteByte
+
+            1 port2!
+        end
+
+        PS2CMD_TEST_PORT_1 WriteCommand
+
+        if (ReadByte)
+            "Port 1 test failed\n" "PS2" HALLog
+            0 port1!
+        end else
+            PS2CMD_ENABLE_PORT_1 WriteCommand
+        end
+
+        if (port2@)
+            PS2CMD_TEST_PORT_2 WriteCommand
+
+            if (ReadByte)
+                "Port 2 test failed\n" "PS2" HALLog
+                0 port2!
+            end else
+                PS2CMD_ENABLE_PORT_2 WriteCommand
+            end
+        end
+
+        PS2CMD_READ_CONFIG WriteCommand
+        ReadByte config!
+
+        if (port1@)
+            PS2CFG_IRQ_PORT_1 config |=
+        end
+
+        if (port2@)
+            PS2CFG_IRQ_PORT_2 config |=
+        end
+
+        PS2CMD_WRITE_CONFIG WriteCommand
+        config@ WriteByte
+
+        if (port1@)
+            pointerof PS2Interrupt PS2IRQPORT1 IPLINTERACTIVE HALInterruptRegister
+            Port1Device 1 PS2InitDevice
+        end
+
+        if (port2@)
+            pointerof PS2Interrupt PS2IRQPORT2 IPLINTERACTIVE HALInterruptRegister
+            Port2Device 2 PS2InitDevice
+        end
+	end
+end
+
+fn (HALInterruptHandler) private PS2Interrupt { trapframe int -- }
+    auto device
+
+    if (int@ PS2IRQPORT1 ==)
+        Port1Device device!
+    end else
+        Port2Device device!
+    end
+
+    auto value
+    PS2PORTDATA HALPCIInb value!
+
+    if (device@ PS2Device_AckB + gb 1 ==)
+        if (value@ 0xfa == value@ 0xfc == || value@ 0xfe == ||)
+            value@ device@ PS2Device_AckB + sb
+            return
+        end
+    end
+
+    auto cmdbytes
+    device@ PS2Device_CommandBytesB + gb cmdbytes!
+
+    if (cmdbytes@)
+        auto rbuf
+        device@ PS2Device_ResponseBuffer + @ rbuf!
+        value@ rbuf@ sb
+        rbuf@ 1 + device@ PS2Device_ResponseBuffer + !
+
+        cmdbytes@ 1 - device@ PS2Device_CommandBytesB + sb
+        return
+    end
+
+    auto wi
+    device@ PS2Device_WriteIndex + @ wi!
+    value@ device@ PS2Device_Data + wi@ + sb
+    wi@ 1 + DATABUFFERSIZE % wi!
+    wi@ device@ PS2Device_WriteIndex + !
+
+    auto rem
+    device@ PS2Device_Remaining + @ rem!
+
+    if (rem@ DATABUFFERSIZE <)
+        rem@ 1 + device@ PS2Device_Remaining + !
+    end else
+        wi@ device@ PS2Device_ReadIndex + !
+    end
+
+    auto context
+    device@ PS2Device_Context + @ context!
+
+    if (context@)
+        context@ device@ DPCHIGHIMPORTANCE device@ PS2Device_DPC + KeDPCEnqueue drop
+    end
+end
+
+fn PS2SetupDPC { device func context -- }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    func@ device@ PS2Device_DPC + KeDPCInitialize
+    context@ device@ PS2Device_Context + !
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn private MsElapsed { time1 time2 -- ms }
+    time2@ KeTime_SecPart + @ time1@ KeTime_SecPart + @ - 1000 *
+    time1@ KeTime_MsPart + @ - time2@ KeTime_MsPart + @ + ms!
+end
+
+fn PS2WriteByte { device value timeout maxattempts -- ok }
+    auto time1
+    auto time2
+    KeTime_SIZEOF alloc time1!
+    KeTime_SIZEOF alloc time2!
+
+    while (maxattempts@)
+        auto rs
+        HALCPUInterruptDisable rs!
+
+        1 device@ PS2Device_AckB + sb
+
+        if (device@ Port1Device ==)
+            value@ WriteByte
+        end else
+            PS2CMD_SEND_TO_PORT_2 WriteCommand
+            value@ WriteByte
+        end
+
+        HALCPUInterruptEnable
+
+        time1@ HALUptimeQuery
+
+        auto ack
+
+        while (1)
+            device@ PS2Device_AckB + gb ack!
+
+            if (ack@ 1 ~=)
+                break
+            end
+
+            time2@ HALUptimeQuery
+
+            if (time1@ time2@ MsElapsed timeout@ >=)
+                rs@ HALCPUInterruptRestore
+                STATUS_WAIT_TIMEOUT ok!
+                return
+            end
+        end
+
+        rs@ HALCPUInterruptRestore
+
+        if (ack@ 0xfa ==)
+            0 ok!
+            return
+        end
+
+        if (ack@ 0xfe ~=)
+            STATUS_IO_ERROR ok!
+            return
+        end
+
+        1 maxattempts -=
+    end
+
+    STATUS_TRY_AGAIN_LATER ok!
+end
+
+fn PS2ReadByte { device -- ok value }
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    if (device@ PS2Device_Remaining + @)
+        auto ri
+        device@ PS2Device_ReadIndex + @ ri!
+        device@ PS2Device_Data + ri@ + gb value!
+        ri@ 1 + DATABUFFERSIZE % device@ PS2Device_ReadIndex + !
+        1 device@ PS2Device_Remaining + -=
+
+        0 ok!
+    end else
+        -1 ok!
+    end
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn private IsKeyboardIDStart { id -- iskbd }
+    id@ 0xab == id@ 0xac == || id@ 0x2b == || id@ 0x5d == || id@ 0x60 == | id@ 0x47 == || iskbd!
+end
+
+fn PS2Command { device command sbuf snum rbuf rnum -- ok }
+    auto timeout
+
+    if (command@ 0xff ==)
+        1000 timeout!
+    end else
+        200 timeout!
+    end
+
+    auto rs
+    HALCPUInterruptDisable rs!
+
+    rbuf@ device@ PS2Device_ResponseBuffer + !
+    rnum@ device@ PS2Device_CommandBytesB + sb
+
+    device@ command@ timeout@ 2 PS2WriteByte ok!
+
+    if (ok@ ~~)
+        while (snum@ ok@ ~~ &&)
+            device@ sbuf@ snum@ + gb 200 2 PS2WriteByte ok!
+            1 snum -=
+        end
+
+        if (command@ 0xff ==)
+            4000 timeout!
+        end else
+            500 timeout!
+        end
+
+        auto time1
+        auto time2
+        KeTime_SIZEOF alloc time1!
+        KeTime_SIZEOF alloc time2!
+
+        time1@ HALUptimeQuery
+
+        auto orig
+        rnum@ orig!
+
+        while (rnum@)
+            auto remaining
+            device@ PS2Device_CommandBytesB + gb remaining!
+
+            if (remaining@ rnum@ ~=)
+                remaining@ rnum!
+
+                if (remaining@ ~~)
+                    break
+                end
+
+                if (command@ 0xff ==)
+                    100 timeout!
+                end elseif (command@ 0xf2 ==)
+                    if (rbuf@ gb IsKeyboardIDStart ~~)
+                        break
+                    end
+                end
+
+                time1@ HALUptimeQuery
+            end
+
+            HALCPUInterruptEnable // give interrupt handler a chance to run
+
+            time2@ HALUptimeQuery
+
+            if (time1@ time2@ MsElapsed timeout@ >=)
+                if (command@ 0xff ~=)
+                    STATUS_WAIT_TIMEOUT ok!
+                end
+
+                break
+            end
+
+            HALCPUInterruptDisable drop
+        end
+    end
+
+    0 device@ PS2Device_CommandBytesB + sb
+
+    rs@ HALCPUInterruptRestore
+end
+
+fn private PS2ResetDevice { device -- ok }
+    auto buf
+    3 alloc buf!
+
+    device@ 0xff 0 0 buf@ 3 PS2Command ok!
+
+    if (ok@)
+        return
+    end
+
+    if (buf@ gb 0xaa ~=)
+        STATUS_IO_ERROR ok!
+    end
+end
+
+fn PS2IdentifyDevice { device -- ok id length }
+    // Disable scanning
+    device@ 0xf5 0 0 0 0 PS2Command ok!
+
+    if (ok@)
+        return
+    end
+
+    // Identify the device
+    auto buf
+    2 alloc buf!
+    0xe5e5 buf@ si
+    device@ 0xf2 0 0 buf@ 2 PS2Command ok!
+
+    if (ok@)
+        return
+    end
+
+    0 id!
+    0 length!
+
+    while (length@ 2 <)
+        auto value
+        buf@ length@ + gb value!
+
+        if (value@ 0xe5 ==)
+            break
+        end
+
+        8 id <<=
+        value@ id |=
+
+        1 length +=
+    end
+end
+
+extern PS2KeyboardInit { device -- ok }
+
+fn private IsKeyboardID { id length -- iskbd }
+    length@ 0 == length@ 2 == id@ 8 >> 0xff & IsKeyboardIDStart && || iskbd!
+end
+
+fn private PS2InitDevice { device port -- }
+    auto ok
+    device@ PS2ResetDevice ok!
+
+    if (ok@)
+        ok@ port@ "Failed to reset device on port %d (%i)\n" "PS2" HALLog
+        return
+    end
+
+    auto id
+    auto length
+
+    device@ PS2IdentifyDevice length! id! ok!
+
+    if (ok@)
+        port@ "Failed to identify device on port %d\n" "PS2" HALLog
+        return
+    end
+
+    length@ id@ port@ "Device on port %d is 0x%x (%d)\n" "PS2" HALLog
+
+    if (id@ length@ IsKeyboardID)
+        device@ PS2KeyboardInit ok!
+    end
+
+    if (ok@)
+        ok@ port@ "Failed to initialize device on port %d (%i)\n" "PS2" HALLog
+    end
+end

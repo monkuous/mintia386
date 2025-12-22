@@ -1,0 +1,374 @@
+//
+// Implements the PS/2 keyboard driver.
+//
+
+#include "<df>/dragonfruit.h"
+
+#include "<ll>/OSDLL/OS.h"
+
+#include "<inc>/HALMap.h"
+#include "<inc>/HALLog.h"
+#include "<inc>/HALDriver.h"
+#include "<inc>/HALRTC.h"
+#include "<inc>/HALInterrupt.h"
+#include "<inc>/HALCPU.h"
+#include "<inc>/HALConsole.h"
+
+#include "<inc>/Kernel.h"
+
+#include "<inc>/Executive.h"
+
+#include "<inc>/Memory.h"
+
+#include "<inc>/IO.h"
+
+#include "<inc>/Console.h"
+
+#include "PS2.h"
+
+const KEYBD_SHIFT       1
+const KEYBD_CTRL        2
+const KEYBD_ALT         4
+const KEYBD_CAPS        8
+const KEYBD_NUM         16
+const KEYBD_SCROLL      32
+const KEYBD_ARROW       64
+const KEYBD_CAPS_DOWN   128
+const KEYBD_NUM_DOWN    256
+const KEYBD_SCROLL_DOWN 512
+
+struct Keyboard
+    4 States
+    4 Code
+    4 Remaining
+    1 ReleaseB
+endstruct
+
+var NumKeyboards 0
+
+fn private UpdateLEDs { device keyboard -- }
+    auto value
+    auto states
+    0 value!
+    keyboard@ Keyboard_States + @ states!
+
+    if (states@ KEYBD_SCROLL &)
+        1 value |=
+    end
+
+    if (states@ KEYBD_NUM &)
+        2 value |=
+    end
+
+    if (states@ KEYBD_CAPS &)
+        4 value |=
+    end
+
+    auto sbuf
+    1 alloc sbuf!
+    value sbuf@ sb
+    device@ 0xed sbuf@ 1 0 0 PS2Command drop
+end
+
+fn PS2KeyboardInit { device -- ok }
+    auto sbuf
+    1 alloc sbuf!
+
+    // Select scancode set 2
+    2 sbuf@ sb
+    device@ 0xf0 sbuf@ 1 0 0 PS2Command drop
+
+    // Set repeat delay and rate
+    0x66 sbuf@ sb // 1000 ms delay, ~25 Hz rate
+    device@ 0xf3 sbuf@ 1 0 0 PS2Command drop
+
+    // Enable scanning
+    device@ 0xf4 0 0 0 0 PS2Command ok!
+
+    if (ok@)
+        return
+    end
+
+    // Empty data buffer
+    while (device@ PS2ReadByte drop ~~) end
+
+    auto keyboard
+    Keyboard_SIZEOF // size
+    'Kybd' // tag
+    CANBLOCK // flags
+    MmAllocWithTag ok! keyboard!
+
+    if (ok@)
+        return
+    end
+
+    0 keyboard@ Keyboard_States + !
+    0 keyboard@ Keyboard_Remaining + !
+    0 keyboard@ Keyboard_ReleaseB + sb
+
+    device@ keyboard@ UpdateLEDs
+
+	if (CoVideoConsoleInputDevice@ ~~)
+		// no device specified as video console input buffer, make that us
+		keyboard@ CoVideoConsoleInputDevice!
+	end
+
+    device@ pointerof PS2KeyboardDPC keyboard@ PS2SetupDPC
+
+    0 ok!
+end
+
+fn (KeDPCFunction) private PS2KeyboardDPC { keyboard device dpc -- }
+    if (keyboard@ CoVideoConsoleInputDevice@ ~= CoVideoConsole@ ~~ ||)
+        return
+    end
+
+    while (1)
+        auto scan
+        auto ok
+        device@ PS2ReadByte scan! ok!
+
+        if (ok@)
+            break
+        end
+
+        if (scan@ 0xe0 ==)
+            1 keyboard@ Keyboard_Remaining + !
+            scan@ keyboard@ Keyboard_Code + !
+            continue
+        end
+
+        if (scan@ 0xe1 ==)
+            2 keyboard@ Keyboard_Remaining + !
+            scan@ keyboard@ Keyboard_Code + !
+            continue
+        end
+
+        if (scan@ 0xf0 ==)
+            1 keyboard@ Keyboard_ReleaseB + sb
+            continue
+        end
+
+        auto rem
+        keyboard@ Keyboard_Remaining + @ rem!
+
+        if (rem@)
+            1 rem -=
+            rem@ keyboard@ Keyboard_Remaining + !
+
+            if (rem@)
+                keyboard@ Keyboard_Code + @ 8 << scan@ | keyboard@ Keyboard_Code + !
+                continue
+            end
+
+            keyboard@ Keyboard_Code + @ 8 << scan |=
+        end
+
+        auto release
+        keyboard@ Keyboard_ReleaseB + gb release!
+        0 keyboard@ Keyboard_ReleaseB + sb
+
+        auto states
+        keyboard@ Keyboard_States + @ states!
+
+        if (scan@ 0x14 == scan@ 0x114 == ||)
+            if (release@)
+                states@ KEYBD_CTRL ~ & keyboard@ Keyboard_States + !
+            end else
+                states@ KEYBD_CTRL | keyboard@ Keyboard_States + !
+            end
+
+            continue
+        end elseif (scan@ 0x12 == scan@ 0x59 == ||)
+            if (release@)
+                states@ KEYBD_SHIFT ~ & keyboard@ Keyboard_States + !
+            end else
+                states@ KEYBD_SHIFT | keyboard@ Keyboard_States + !
+            end
+
+            continue
+        end elseif (scan@ 0x11 == scan@ 0x111 == ||)
+            if (release@)
+                states@ KEYBD_ALT ~ & keyboard@ Keyboard_States + !
+            end else
+                states@ KEYBD_ALT | keyboard@ Keyboard_States + !
+            end
+
+            continue
+        end elseif (scan@ 0x58 ==)
+            if (states@ KEYBD_CAPS &)
+                if (release@)
+                    if (states@ KEYBD_CAPS_DOWN &)
+                        states@ KEYBD_CAPS_DOWN ~ & keyboard@ Keyboard_States + !
+                    end else
+                        states@ KEYBD_CAPS ~ & keyboard@ Keyboard_States + !
+                        device@ keyboard@ UpdateLEDs
+                    end
+                end
+            end elseif (release@ ~~)
+                states@ KEYBD_CAPS KEYBD_CAPS_DOWN | | keyboard@ Keyboard_States + !
+                device@ keyboard@ UpdateLEDs
+            end
+
+            continue
+        end elseif (scan@ 0x77 ==)
+            if (states@ KEYBD_NUM &)
+                if (release@)
+                    if (states@ KEYBD_NUM_DOWN &)
+                        states@ KEYBD_NUM_DOWN ~ & keyboard@ Keyboard_States + !
+                    end else
+                        states@ KEYBD_NUM ~ & keyboard@ Keyboard_States + !
+                        device@ keyboard@ UpdateLEDs
+                    end
+                end
+            end elseif (release@ ~~)
+                states@ KEYBD_NUM KEYBD_NUM_DOWN | | keyboard@ Keyboard_States + !
+                device@ keyboard@ UpdateLEDs
+            end
+
+            continue
+        end elseif (scan@ 0x7e ==)
+            if (states@ KEYBD_SCROLL &)
+                if (release@)
+                    if (states@ KEYBD_SCROLL_DOWN &)
+                        states@ KEYBD_SCROLL_DOWN ~ & keyboard@ Keyboard_States + !
+                    end else
+                        states@ KEYBD_SCROLL ~ & keyboard@ Keyboard_States + !
+                        device@ keyboard@ UpdateLEDs
+                    end
+                end
+            end elseif (release@ ~~)
+                states@ KEYBD_SCROLL KEYBD_SCROLL_DOWN | | keyboard@ Keyboard_States + !
+                device@ keyboard@ UpdateLEDs
+            end
+
+            continue
+        end
+
+        if (release@)
+            continue
+        end
+
+        auto c
+
+        if (states@ KEYBD_NUM & ~~)
+            if (scan@ 0x75 ==)
+                '\[' CoVideoConsoleInputCharacter
+                '[' CoVideoConsoleInputCharacter
+                'A' CoVideoConsoleInputCharacter
+                continue
+            end elseif (scan@ 0x6b ==)
+                '\[' CoVideoConsoleInputCharacter
+                '[' CoVideoConsoleInputCharacter
+                'D' CoVideoConsoleInputCharacter
+                continue
+            end elseif (scan@ 0x72 ==)
+                '\[' CoVideoConsoleInputCharacter
+                '[' CoVideoConsoleInputCharacter
+                'B' CoVideoConsoleInputCharacter
+                continue
+            end elseif (scan@ 0x74 ==)
+                '\[' CoVideoConsoleInputCharacter
+                '[' CoVideoConsoleInputCharacter
+                'C' CoVideoConsoleInputCharacter
+                continue
+            end elseif (scan@ 0x69 == scan@ 0x6c == || scan@ 0x70 == || scan@ 0x71 == || scan@ 0x73 == ||
+                        scan@ 0x7a == || scan@ 0x7d == ||)
+                continue
+            end
+        end
+
+        if (scan@ 0xe075 ==)
+            '\[' CoVideoConsoleInputCharacter
+            '[' CoVideoConsoleInputCharacter
+            'A' CoVideoConsoleInputCharacter
+            continue
+        end elseif (scan@ 0xe06b ==)
+            '\[' CoVideoConsoleInputCharacter
+            '[' CoVideoConsoleInputCharacter
+            'D' CoVideoConsoleInputCharacter
+            continue
+        end elseif (scan@ 0xe072 ==)
+            '\[' CoVideoConsoleInputCharacter
+            '[' CoVideoConsoleInputCharacter
+            'B' CoVideoConsoleInputCharacter
+            continue
+        end elseif (scan@ 0xe074 ==)
+            '\[' CoVideoConsoleInputCharacter
+            '[' CoVideoConsoleInputCharacter
+            'C' CoVideoConsoleInputCharacter
+            continue
+        end
+
+        if (scan@ KEYBOARD_LAYOUT_MAX <)
+            if (states@ KEYBD_SHIFT &)
+                KeyboardLayoutShift scan@ + gb c!
+            end else
+                KeyboardLayout scan@ + gb c!
+            end
+        end elseif (scan@ 0xe04a ==)
+            '/' c!
+        end elseif (scan@ 0xe05a ==)
+            '\r' c!
+        end else
+            0 c!
+        end
+
+        if (c@ 0 ==)
+            continue
+        end
+
+        if (c@ 'a' >= c@ 'z' <= && states@ KEYBD_CAPS & &&)
+            0x20 c -=
+        end
+
+        if (states@ KEYBD_CTRL &)
+            if (c@ 0x20 | 'a' >= c@ 0x20 | 'z' <= &&)
+                c@ 0x20 | 0x60 - c!
+            end elseif (c@ '2' ==)
+                0 c!
+            end elseif (c@ '6' ==)
+                30 c!
+            end elseif (c@ '-' ==)
+                31 c!
+            end elseif (c@ '[' ==)
+                27 c!
+            end elseif (c@ ']' ==)
+                29 c!
+            end elseif (c@ '\\' ==)
+                28 c!
+            end elseif (c@ 0x20 >=)
+                continue
+            end
+        end
+
+        c@ CoVideoConsoleInputCharacter
+    end
+end
+
+// these tables assumes numlock is on and capslock is off
+// it also doesn't contain keypad / (code 0xe04a) or keypad enter (code 0xe05a)
+
+const KEYBOARD_LAYOUT_MAX 0x80
+
+table KeyboardLayout
+    0x00000000 0x00000000 0x00000000 0x00600900
+    0x00000000 0x00317100 0x737a0000 0x00327761
+    0x64786300 0x00333465 0x66762000 0x00357274
+    0x68626e00 0x00367967 0x6a6d0000 0x00383775
+    0x696b2c00 0x0039306f 0x6c2f2e00 0x002d703b
+    0x00270000 0x00003d5b 0x5d0d0000 0x00005c00
+    0x00000000 0x00080000 0x34003100 0x00000037
+    0x35322e30 0x001b3836 0x2d332b00 0x0000392a
+endtable
+
+table KeyboardLayoutShift
+    0x00000000 0x00000000 0x00000000 0x007e0000
+    0x00000000 0x00215100 0x535a0000 0x00405741
+    0x44584300 0x00232445 0x46562000 0x00255254
+    0x48424e00 0x005e5947 0x4a4d0000 0x002a2655
+    0x494b3c00 0x0028294f 0x4c3f3e00 0x005f503a
+    0x00220000 0x00002b7b 0x7d0d0000 0x00007c00
+    0x00000000 0x00080000 0x00000000 0x00000000
+    0x00000000 0x001b0000 0x2d002b00 0x0000002a
+endtable

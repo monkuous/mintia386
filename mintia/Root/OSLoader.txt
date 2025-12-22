@@ -1,1 +1,1 @@
-ROOTDEV=dks0s0 -ttymode
+ROOTDEV=dks0s0
