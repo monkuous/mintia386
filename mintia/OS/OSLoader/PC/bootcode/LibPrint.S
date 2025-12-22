@@ -10,6 +10,7 @@ Error:
 
 .type Message, @function
 Message:
+    push %bp
 1:  lodsb
     test %al, %al
     jz 1f
@@ -17,7 +18,8 @@ Message:
     mov $0x7, %bx
     int $0x10
     jmp 1b
-1:  ret
+1:  pop %bp
+    ret
 .size Message, . - Message
 
 .type ErrorTail, @object
