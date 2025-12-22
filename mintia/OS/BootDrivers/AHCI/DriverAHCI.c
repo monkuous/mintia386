@@ -235,6 +235,7 @@ static void StartTransfer(struct AHCIPort *port, struct IOPacketLocation *iopl) 
     if (iopl->FunctionCodeB == IODISPATCH_READ) {
         ctbl->fis.reg.command = port->lba48 ? ATA_COMMAND_READ_DMA_EXT : ATA_COMMAND_READ_DMA;
     } else {
+        command->flags |= AHCI_COMMAND_WRITE;
         ctbl->fis.reg.command = port->lba48 ? ATA_COMMAND_WRITE_DMA_EXT : ATA_COMMAND_WRITE_DMA;
     }
 
