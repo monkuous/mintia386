@@ -159,6 +159,10 @@ fn (KeDPCFunction) DriverSerialDPCFunction { context1 context2 dpc -- }
 
         rs@ HALCPUInterruptRestore
 
+		if (c@ 0x7f ==)
+			'\b' c!
+		end
+
 		c@ // c
 		context1@ // duplex
 		CoDuplexInputCharacter drop
