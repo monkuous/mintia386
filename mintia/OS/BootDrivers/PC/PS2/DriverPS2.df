@@ -174,14 +174,16 @@ fn (FDriverInit) DriverInit { stage -- ok }
         PS2CMD_WRITE_CONFIG WriteCommand
         config@ WriteByte
 
-        if (port1@)
-            pointerof PS2Interrupt PS2IRQPORT1 IPLINTERACTIVE HALInterruptRegister
-            Port1Device 1 PS2InitDevice
-        end
+        // on some devices, if port 2 isn't initialized first, port 1 initialization fails
 
         if (port2@)
             pointerof PS2Interrupt PS2IRQPORT2 IPLINTERACTIVE HALInterruptRegister
             Port2Device 2 PS2InitDevice
+        end
+
+        if (port1@)
+            pointerof PS2Interrupt PS2IRQPORT1 IPLINTERACTIVE HALInterruptRegister
+            Port1Device 1 PS2InitDevice
         end
 	end
 end
