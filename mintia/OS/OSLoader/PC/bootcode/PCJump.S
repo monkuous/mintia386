@@ -219,6 +219,7 @@ ProcessBootOptions:
     add $0x30, %dx
     cmp %dl, %al
     ja .LselectOption
+    xor %ah, %ah
     mov %ax, %bp
     sub $0x30, %bp
 
