@@ -896,7 +896,7 @@ strncpy:
     ret
 
 .Lstrncpy_done:
-    movb $0, (%esi,%ecx)
+    movb $0, (%edi,%ecx)
 
     pop %edi
     pop %esi
