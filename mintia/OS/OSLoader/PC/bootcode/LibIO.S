@@ -36,7 +36,9 @@ IOInit:
     mov $0x08, %ah
     mov (IODrive), %dl
     xor %di, %di
+    push %es
     int $0x13
+    pop %es
     jc .LinitFailed
 
     and $0x3f, %cx
