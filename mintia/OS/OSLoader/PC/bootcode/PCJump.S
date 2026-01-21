@@ -106,7 +106,7 @@ LoadInit:
     mov $1, %bx
     cmp Partition_SectorCount(%si), %bx
     mov $0, %bx
-    cmp (Partition_SectorCount + 2)(%si), %bx
+    sbb (Partition_SectorCount + 2)(%si), %bx
     jnc .LadvancePartition
 
     # Load potential boot record
